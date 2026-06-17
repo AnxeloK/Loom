@@ -1,0 +1,147 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 10 Jun 2026 16:20:00 +0000
+Subject: [PATCH] Reduce owner random lookup churn
+
+
+diff --git a/net/minecraft/server/threading/runtime/DomainRandom.java b/net/minecraft/server/threading/runtime/DomainRandom.java
+index 07662ceab1f69ddc68029df0477ae88437b59b8e..4d4026f15d187ff70ef1c736b92a590887bfd4a7 100644
+--- a/net/minecraft/server/threading/runtime/DomainRandom.java
++++ b/net/minecraft/server/threading/runtime/DomainRandom.java
+@@ -27,14 +27,10 @@ public final class DomainRandom {
+     }
+ 
+     public static RandomSource forRuntimeLevel(final ServerLevel level, final RandomSource fallback) {
+-        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.currentOwner();
+-        if (owner == null) {
++        final String key = OwnerDomainExecutor.currentRandomKey(level);
++        if (key == null) {
+             return fallback;
+         }
+-        final String key = level.dimension().identifier() + "|" + owner.domain()
+-            + "|" + owner.minChunkX() + "," + owner.minChunkZ()
+-            + "|" + owner.maxChunkX() + "," + owner.maxChunkZ()
+-            + "|" + owner.playerId();
+         return DOMAIN_RANDOMS.get().computeIfAbsent(key, ignored -> RandomSource.create(seed(level, BlockPos.ZERO, key)));
+     }
+ 
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index 58d6eb3e87ddc3e1473bcd76efe7e77c349c6bdc..d19434e74fb49f0cd21ff25553adaa27df7a40f4 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -126,6 +126,43 @@ public final class OwnerDomainExecutor {
+         return context == null ? null : context.owner();
+     }
+ 
++    static @Nullable String currentRandomKey(final ServerLevel level) {
++        final OwnerContext context = CURRENT_OWNER.get();
++        if (context == null) {
++            return null;
++        }
++        if (context.randomLevel == level) {
++            return context.randomUseFallback ? null : context.randomKey;
++        }
++
++        final Owner owner = context.owner();
++        if (isFullLevelRegion(owner, level)
++            && TickRegions.isCurrentThreadOwnerQuiet(level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
++            context.randomLevel = level;
++            context.randomKey = null;
++            context.randomUseFallback = true;
++            return null;
++        }
++
++        final String key = level.dimension().identifier() + "|" + owner.domain()
++            + "|" + owner.minChunkX() + "," + owner.minChunkZ()
++            + "|" + owner.maxChunkX() + "," + owner.maxChunkZ()
++            + "|" + owner.playerId();
++        context.randomLevel = level;
++        context.randomKey = key;
++        context.randomUseFallback = false;
++        return key;
++    }
++
++    private static boolean isFullLevelRegion(final Owner owner, final ServerLevel level) {
++        return owner.domain() == Domain.REGION
++            && owner.level() == level
++            && owner.minChunkX() == Integer.MIN_VALUE
++            && owner.minChunkZ() == Integer.MIN_VALUE
++            && owner.maxChunkX() == Integer.MAX_VALUE
++            && owner.maxChunkZ() == Integer.MAX_VALUE;
++    }
++
+     public static Domain currentDomain() {
+         final OwnerContext context = CURRENT_OWNER.get();
+         return context == null ? Domain.ASYNC_IO : context.owner().domain();
+@@ -319,7 +356,25 @@ public final class OwnerDomainExecutor {
+     ) {
+     }
+ 
+-    private record OwnerContext(Owner owner, @Nullable OwnerContext previous) {
++    private static final class OwnerContext {
++        private final Owner owner;
++        private final @Nullable OwnerContext previous;
++        private @Nullable ServerLevel randomLevel;
++        private @Nullable String randomKey;
++        private boolean randomUseFallback;
++
++        private OwnerContext(final Owner owner, final @Nullable OwnerContext previous) {
++            this.owner = owner;
++            this.previous = previous;
++        }
++
++        private Owner owner() {
++            return this.owner;
++        }
++
++        private @Nullable OwnerContext previous() {
++            return this.previous;
++        }
+     }
+ 
+     public static final class Scope implements AutoCloseable {
+diff --git a/net/minecraft/world/level/NaturalSpawner.java b/net/minecraft/world/level/NaturalSpawner.java
+index 88a9ab44f6044c7e15a8f2d0541afa60d17a85c1..acebc44f1f1aa4f1d2e1bb0107b4c5fcb26d9e19 100644
+--- a/net/minecraft/world/level/NaturalSpawner.java
++++ b/net/minecraft/world/level/NaturalSpawner.java
+@@ -311,7 +311,7 @@ public final class NaturalSpawner {
+                             }
+ 
+                             // Paper start - PreCreatureSpawnEvent
+-                            PreSpawnStatus doSpawning = isValidSpawnPostitionForType(level, mobCategory, structureManager, generator, currentSpawnData, pos, nearestPlayerDistanceSqr);
++                            PreSpawnStatus doSpawning = isValidSpawnPostitionForType(level, mobCategory, structureManager, generator, currentSpawnData, pos, nearestPlayerDistanceSqr, random);
+                             // Paper start - per player mob count backoff
+                             if (doSpawning == PreSpawnStatus.ABORT || doSpawning == PreSpawnStatus.CANCELLED) {
+                                 level.getChunkSource().chunkMap.updateFailurePlayerMobTypeMap(pos.getX() >> 4, pos.getZ() >> 4, mobCategory);
+@@ -395,7 +395,8 @@ public final class NaturalSpawner {
+         final ChunkGenerator generator,
+         final MobSpawnSettings.SpawnerData currentSpawnData,
+         final BlockPos.MutableBlockPos pos,
+-        final double nearestPlayerDistanceSqr
++        final double nearestPlayerDistanceSqr,
++        final RandomSource random
+     ) {
+         // Paper start - PreCreatureSpawnEvent
+         EntityType<?> type = currentSpawnData.type();
+@@ -415,7 +416,7 @@ public final class NaturalSpawner {
+             && type.canSummon()
+             && canSpawnMobAt(level, structureManager, generator, mobCategory, currentSpawnData, pos)
+             && SpawnPlacements.isSpawnPositionOk(type, level, pos)
+-            && SpawnPlacements.checkSpawnRules(type, level, EntitySpawnReason.NATURAL, pos, level.getRandom())
++            && SpawnPlacements.checkSpawnRules(type, level, EntitySpawnReason.NATURAL, pos, random)
+             && level.noCollision(type.getSpawnAABB(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5));
+         return success ? PreSpawnStatus.SUCCESS : PreSpawnStatus.FAIL; // Paper - PreCreatureSpawnEvent
+     }
+@@ -494,8 +495,11 @@ public final class NaturalSpawner {
+     }
+ 
+     private static BlockPos getRandomPosWithin(final Level level, final LevelChunk chunk) {
++        return getRandomPosWithin(level, chunk, level.getRandom());
++    }
++
++    private static BlockPos getRandomPosWithin(final Level level, final LevelChunk chunk, final RandomSource random) {
+         ChunkPos pos = chunk.getPos();
+-        final RandomSource random = level.getRandom();
+         int x = pos.getMinBlockX() + random.nextInt(16);
+         int z = pos.getMinBlockZ() + random.nextInt(16);
+         int topEmptyY = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, x, z) + 1;

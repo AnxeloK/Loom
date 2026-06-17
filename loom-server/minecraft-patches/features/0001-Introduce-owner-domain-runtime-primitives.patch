@@ -1,0 +1,3267 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 8 May 2026 17:36:57 +0000
+Subject: [PATCH] Introduce owner-domain runtime primitives
+
+
+diff --git a/io/papermc/paper/threadedregions/RegionRuntime.java b/io/papermc/paper/threadedregions/RegionRuntime.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..baaf50fad822cc81ebe668a432c93806cb5b2244
+--- /dev/null
++++ b/io/papermc/paper/threadedregions/RegionRuntime.java
+@@ -0,0 +1,227 @@
++package io.papermc.paper.threadedregions;
++
++import net.minecraft.server.level.ServerLevel;
++
++import java.util.Objects;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.atomic.AtomicLong;
++
++/**
++ * Runtime ownership registry for region execution leases.
++ *
++ * <p>Work scopes claim a lease for a chunk range, and thread checks validate
++ * access against those active leases. The implementation starts simple so it
++ * can stay easy to reason about while the region graph runtime grows.</p>
++ */
++public final class RegionRuntime {
++
++    private final AtomicLong nextLeaseId = new AtomicLong(1L);
++    private final AtomicLong leaseConflicts = new AtomicLong();
++    private final ConcurrentHashMap<ServerLevel, WorldOwnership> ownershipByWorld = new ConcurrentHashMap<>();
++
++    public long claimLease(
++        final ServerLevel world,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final Thread ownerThread
++    ) {
++        Objects.requireNonNull(world, "World may not be null");
++        Objects.requireNonNull(ownerThread, "Owner thread may not be null");
++        if (minChunkX > maxChunkX || minChunkZ > maxChunkZ) {
++            throw new IllegalArgumentException("Invalid lease bounds: min > max");
++        }
++
++        final long leaseId = this.nextLeaseId.getAndIncrement();
++        final Lease lease = new Lease(
++            leaseId,
++            minChunkX,
++            minChunkZ,
++            maxChunkX,
++            maxChunkZ,
++            ownerThread.threadId(),
++            ownerThread.getName()
++        );
++
++        this.ownershipByWorld
++            .computeIfAbsent(world, ignored -> new WorldOwnership())
++            .claimLease(lease, this.leaseConflicts);
++
++        return leaseId;
++    }
++
++    public void releaseLease(final ServerLevel world, final long leaseId) {
++        final WorldOwnership worldOwnership = this.ownershipByWorld.get(world);
++        if (worldOwnership == null) {
++            return;
++        }
++        worldOwnership.removeLease(leaseId);
++        if (worldOwnership.isEmpty()) {
++            this.ownershipByWorld.remove(world, worldOwnership);
++        }
++    }
++
++    public boolean isOwner(final ServerLevel world, final int chunkX, final int chunkZ, final Thread thread) {
++        final WorldOwnership worldOwnership = this.ownershipByWorld.get(world);
++        return worldOwnership != null && worldOwnership.isOwner(chunkX, chunkZ, thread.threadId());
++    }
++
++    public boolean isOwner(
++        final ServerLevel world,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final Thread thread
++    ) {
++        final WorldOwnership worldOwnership = this.ownershipByWorld.get(world);
++        return worldOwnership != null && worldOwnership.isOwner(minChunkX, minChunkZ, maxChunkX, maxChunkZ, thread.threadId());
++    }
++
++    public int activeLeases(final ServerLevel world) {
++        final WorldOwnership worldOwnership = this.ownershipByWorld.get(world);
++        return worldOwnership == null ? 0 : worldOwnership.size();
++    }
++
++    public long leaseConflictCount() {
++        return this.leaseConflicts.get();
++    }
++
++    public void clearWorld(final ServerLevel world) {
++        this.ownershipByWorld.remove(world);
++    }
++
++    private static final class WorldOwnership {
++
++        private final Object lock = new Object();
++        private final ConcurrentHashMap<Long, Lease> leases = new ConcurrentHashMap<>();
++
++        private void claimLease(final Lease lease, final AtomicLong conflictCounter) {
++            synchronized (this.lock) {
++                final Lease conflictingLease = this.findConflictingLease(lease);
++                if (conflictingLease != null) {
++                    conflictCounter.getAndIncrement();
++                    throw new IllegalStateException(
++                        "Region lease conflict: new lease " + lease.describeBounds()
++                            + " by thread " + lease.ownerThreadName + "[" + lease.ownerThreadId + "] overlaps existing lease "
++                            + conflictingLease.describeBounds() + " by thread "
++                            + conflictingLease.ownerThreadName + "[" + conflictingLease.ownerThreadId + "]"
++                    );
++                }
++
++                final Lease prev = this.leases.put(lease.id, lease);
++                if (prev != null) {
++                    throw new IllegalStateException("Duplicate lease id: " + lease.id);
++                }
++            }
++        }
++
++        private void removeLease(final long leaseId) {
++            synchronized (this.lock) {
++                this.leases.remove(leaseId);
++            }
++        }
++
++        private boolean isOwner(final int chunkX, final int chunkZ, final long threadId) {
++            for (final Lease lease : this.leases.values()) {
++                if (lease.ownerThreadId == threadId && lease.contains(chunkX, chunkZ)) {
++                    return true;
++                }
++            }
++            return false;
++        }
++
++        private boolean isOwner(
++            final int minChunkX,
++            final int minChunkZ,
++            final int maxChunkX,
++            final int maxChunkZ,
++            final long threadId
++        ) {
++            for (final Lease lease : this.leases.values()) {
++                if (lease.ownerThreadId == threadId
++                    && lease.contains(minChunkX, minChunkZ)
++                    && lease.contains(maxChunkX, maxChunkZ)) {
++                    return true;
++                }
++            }
++            return false;
++        }
++
++        private boolean isEmpty() {
++            synchronized (this.lock) {
++                return this.leases.isEmpty();
++            }
++        }
++
++        private int size() {
++            synchronized (this.lock) {
++                return this.leases.size();
++            }
++        }
++
++        private Lease findConflictingLease(final Lease lease) {
++            for (final Lease existing : this.leases.values()) {
++                if (existing.ownerThreadId == lease.ownerThreadId) {
++                    continue;
++                }
++                if (existing.intersects(lease.minChunkX, lease.minChunkZ, lease.maxChunkX, lease.maxChunkZ)) {
++                    return existing;
++                }
++            }
++            return null;
++        }
++    }
++
++    private static final class Lease {
++
++        private final long id;
++        private final int minChunkX;
++        private final int minChunkZ;
++        private final int maxChunkX;
++        private final int maxChunkZ;
++        private final long ownerThreadId;
++        @SuppressWarnings("unused")
++        private final String ownerThreadName;
++
++        private Lease(
++            final long id,
++            final int minChunkX,
++            final int minChunkZ,
++            final int maxChunkX,
++            final int maxChunkZ,
++            final long ownerThreadId,
++            final String ownerThreadName
++        ) {
++            this.id = id;
++            this.minChunkX = minChunkX;
++            this.minChunkZ = minChunkZ;
++            this.maxChunkX = maxChunkX;
++            this.maxChunkZ = maxChunkZ;
++            this.ownerThreadId = ownerThreadId;
++            this.ownerThreadName = ownerThreadName;
++        }
++
++        private boolean contains(final int chunkX, final int chunkZ) {
++            return chunkX >= this.minChunkX && chunkX <= this.maxChunkX
++                && chunkZ >= this.minChunkZ && chunkZ <= this.maxChunkZ;
++        }
++
++        private boolean intersects(
++            final int minChunkX,
++            final int minChunkZ,
++            final int maxChunkX,
++            final int maxChunkZ
++        ) {
++            return this.minChunkX <= maxChunkX
++                && this.maxChunkX >= minChunkX
++                && this.minChunkZ <= maxChunkZ
++                && this.maxChunkZ >= minChunkZ;
++        }
++
++        private String describeBounds() {
++            return "[" + this.minChunkX + "," + this.minChunkZ + " -> " + this.maxChunkX + "," + this.maxChunkZ + "]";
++        }
++    }
++}
+\ No newline at end of file
+diff --git a/net/minecraft/server/threading/RegionRuntime.java b/net/minecraft/server/threading/RegionRuntime.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..67ef35a877fa5c418d65d446c397093f5906f10f
+--- /dev/null
++++ b/net/minecraft/server/threading/RegionRuntime.java
+@@ -0,0 +1,652 @@
++package net.minecraft.server.threading;
++
++import net.minecraft.server.level.ServerLevel;
++
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Map;
++import java.util.Objects;
++import java.util.Set;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.atomic.AtomicLong;
++
++/**
++ * Runtime ownership registry for region execution leases.
++ *
++ * <p>Work scopes claim a lease for a chunk range, and thread checks validate
++ * access against those active leases. The implementation starts simple so it
++ * can stay easy to reason about while the region graph runtime grows.</p>
++ */
++public class RegionRuntime {
++
++    private final AtomicLong nextLeaseId = new AtomicLong(1L);
++    private final AtomicLong nextRegionId = new AtomicLong(1L);
++    private final AtomicLong leaseConflicts = new AtomicLong();
++    private final ConcurrentHashMap<Object, WorldOwnership> ownershipByWorld = new ConcurrentHashMap<>();
++
++    protected RegionRuntime() {
++    }
++
++    public long claimLease(
++        final ServerLevel world,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final Thread ownerThread
++    ) {
++        return this.claimLeaseInternal(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread);
++    }
++
++    protected long claimLeaseForTesting(
++        final Object worldKey,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final Thread ownerThread
++    ) {
++        return this.claimLeaseInternal(worldKey, minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread);
++    }
++
++    private long claimLeaseInternal(
++        final Object worldKey,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final Thread ownerThread
++    ) {
++        Objects.requireNonNull(worldKey, "World key may not be null");
++        Objects.requireNonNull(ownerThread, "Owner thread may not be null");
++        if (minChunkX > maxChunkX || minChunkZ > maxChunkZ) {
++            throw new IllegalArgumentException("Invalid lease bounds: min > max");
++        }
++
++        final long leaseId = this.nextLeaseId.getAndIncrement();
++        this.ownershipByWorld
++            .computeIfAbsent(worldKey, ignored -> new WorldOwnership())
++            .claimLease(
++                leaseId,
++                minChunkX,
++                minChunkZ,
++                maxChunkX,
++                maxChunkZ,
++                ownerThread,
++                this.leaseConflicts,
++                this.nextRegionId
++            );
++
++        return leaseId;
++    }
++
++    public void releaseLease(final ServerLevel world, final long leaseId) {
++        this.releaseLeaseInternal(world, leaseId);
++    }
++
++    protected void releaseLeaseForTesting(final Object worldKey, final long leaseId) {
++        this.releaseLeaseInternal(worldKey, leaseId);
++    }
++
++    private void releaseLeaseInternal(final Object worldKey, final long leaseId) {
++        final WorldOwnership worldOwnership = this.ownershipByWorld.get(worldKey);
++        if (worldOwnership == null) {
++            return;
++        }
++        worldOwnership.removeLease(leaseId);
++    }
++
++    public boolean isOwner(final ServerLevel world, final int chunkX, final int chunkZ, final Thread thread) {
++        return this.isOwnerInternal(world, chunkX, chunkZ, thread);
++    }
++
++    protected boolean isOwnerForTesting(final Object worldKey, final int chunkX, final int chunkZ, final Thread thread) {
++        return this.isOwnerInternal(worldKey, chunkX, chunkZ, thread);
++    }
++
++    private boolean isOwnerInternal(final Object worldKey, final int chunkX, final int chunkZ, final Thread thread) {
++        final WorldOwnership worldOwnership = this.ownershipByWorld.get(worldKey);
++        return worldOwnership != null && worldOwnership.isOwner(chunkX, chunkZ, thread.threadId());
++    }
++
++    public boolean isOwner(
++        final ServerLevel world,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final Thread thread
++    ) {
++        return this.isOwnerInternal(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, thread);
++    }
++
++    protected boolean isOwnerForTesting(
++        final Object worldKey,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final Thread thread
++    ) {
++        return this.isOwnerInternal(worldKey, minChunkX, minChunkZ, maxChunkX, maxChunkZ, thread);
++    }
++
++    private boolean isOwnerInternal(
++        final Object worldKey,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final Thread thread
++    ) {
++        final WorldOwnership worldOwnership = this.ownershipByWorld.get(worldKey);
++        return worldOwnership != null && worldOwnership.isOwner(minChunkX, minChunkZ, maxChunkX, maxChunkZ, thread.threadId());
++    }
++
++    public int activeLeases(final ServerLevel world) {
++        return this.activeLeasesInternal(world);
++    }
++
++    protected int activeLeasesForTesting(final Object worldKey) {
++        return this.activeLeasesInternal(worldKey);
++    }
++
++    private int activeLeasesInternal(final Object worldKey) {
++        final WorldOwnership worldOwnership = this.ownershipByWorld.get(worldKey);
++        return worldOwnership == null ? 0 : worldOwnership.size();
++    }
++
++    public long leaseConflictCount() {
++        return this.leaseConflicts.get();
++    }
++
++    public void clearWorld(final ServerLevel world) {
++        this.clearWorldInternal(world);
++    }
++
++    protected void clearWorldForTesting(final Object worldKey) {
++        this.clearWorldInternal(worldKey);
++    }
++
++    private void clearWorldInternal(final Object worldKey) {
++        this.ownershipByWorld.remove(worldKey);
++    }
++
++    public RuntimeDiagnostics snapshotDiagnostics() {
++        final List<WorldDiagnostics> worlds = new ArrayList<>();
++        long totalActiveLeases = 0L;
++        long totalActiveRegions = 0L;
++        long totalCreatedRegions = 0L;
++        long totalSplitEvents = 0L;
++        long totalMergeEvents = 0L;
++        long totalRetiredRegions = 0L;
++        long totalReusedRegionAssignments = 0L;
++
++        for (final Map.Entry<Object, WorldOwnership> entry : this.ownershipByWorld.entrySet()) {
++            final WorldDiagnostics worldSnapshot = entry.getValue().snapshot(describeWorld(entry.getKey()));
++            worlds.add(worldSnapshot);
++            totalActiveLeases += worldSnapshot.activeLeases();
++            totalActiveRegions += worldSnapshot.activeRegions();
++            totalCreatedRegions += worldSnapshot.createdRegions();
++            totalSplitEvents += worldSnapshot.splitEvents();
++            totalMergeEvents += worldSnapshot.mergeEvents();
++            totalRetiredRegions += worldSnapshot.retiredRegions();
++            totalReusedRegionAssignments += worldSnapshot.reusedRegionAssignments();
++        }
++
++        worlds.sort(java.util.Comparator.comparing(WorldDiagnostics::worldId));
++
++        return new RuntimeDiagnostics(
++            worlds.size(),
++            totalActiveLeases,
++            totalActiveRegions,
++            totalCreatedRegions,
++            totalSplitEvents,
++            totalMergeEvents,
++            totalRetiredRegions,
++            totalReusedRegionAssignments,
++            List.copyOf(worlds)
++        );
++    }
++
++    public WorldDiagnostics snapshotWorldDiagnostics(final ServerLevel world) {
++        final WorldOwnership worldOwnership = this.ownershipByWorld.get(world);
++        return worldOwnership == null ? WorldDiagnostics.empty(describeWorld(world)) : worldOwnership.snapshot(describeWorld(world));
++    }
++
++    protected WorldDiagnostics snapshotWorldDiagnosticsForTesting(final Object worldKey) {
++        final WorldOwnership worldOwnership = this.ownershipByWorld.get(worldKey);
++        return worldOwnership == null ? WorldDiagnostics.empty(describeWorld(worldKey)) : worldOwnership.snapshot(describeWorld(worldKey));
++    }
++
++    private static String describeWorld(final Object worldKey) {
++        if (worldKey instanceof ServerLevel world) {
++            return String.valueOf(world.dimension().identifier());
++        }
++        return "testing@" + Integer.toHexString(System.identityHashCode(worldKey));
++    }
++
++    private static final class WorldOwnership {
++
++        private final java.util.concurrent.locks.ReentrantLock lock = new java.util.concurrent.locks.ReentrantLock();
++        private final Map<Long, Lease> leases = new HashMap<>();
++        private final Map<Long, RegionDescriptor> regions = new HashMap<>();
++        private final Map<Long, Integer> regionReferenceCounts = new HashMap<>();
++        private long createdRegions;
++        private long splitEvents;
++        private long mergeEvents;
++        private long retiredRegions;
++        private long reusedRegionAssignments;
++
++        private void claimLease(
++            final long leaseId,
++            final int minChunkX,
++            final int minChunkZ,
++            final int maxChunkX,
++            final int maxChunkZ,
++            final Thread ownerThread,
++            final AtomicLong conflictCounter,
++            final AtomicLong nextRegionId
++        ) {
++            this.lock.lock();
++            try {
++                final Lease conflictingLease = this.findConflictingLease(minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread.threadId());
++                if (conflictingLease != null) {
++                    conflictCounter.getAndIncrement();
++                    throw new IllegalStateException(
++                        "Region lease conflict: new lease [" + minChunkX + "," + minChunkZ + " -> " + maxChunkX + "," + maxChunkZ + "]"
++                            + " by thread " + ownerThread.getName() + "[" + ownerThread.threadId() + "] overlaps existing lease "
++                            + conflictingLease.describeBounds() + " by thread "
++                            + conflictingLease.ownerThreadName + "[" + conflictingLease.ownerThreadId + "]"
++                    );
++                }
++
++                final long regionId = this.resolveRegionId(minChunkX, minChunkZ, maxChunkX, maxChunkZ, nextRegionId);
++                final Lease lease = new Lease(
++                    leaseId,
++                    minChunkX,
++                    minChunkZ,
++                    maxChunkX,
++                    maxChunkZ,
++                    ownerThread.threadId(),
++                    ownerThread.getName(),
++                    regionId
++                );
++                final Lease prev = this.leases.put(lease.id, lease);
++                if (prev != null) {
++                    throw new IllegalStateException("Duplicate lease id: " + lease.id);
++                }
++                this.regionReferenceCounts.merge(regionId, 1, Integer::sum);
++
++                final RegionDescriptor regionDescriptor = this.regions.get(regionId);
++                if (regionDescriptor != null) {
++                    regionDescriptor.touch();
++                }
++            } finally {
++                this.lock.unlock();
++            }
++        }
++
++        private void removeLease(final long leaseId) {
++            this.lock.lock();
++            try {
++                final Lease removed = this.leases.remove(leaseId);
++                if (removed == null) {
++                    return;
++                }
++                final Integer refs = this.regionReferenceCounts.get(removed.regionId);
++                if (refs == null || refs <= 1) {
++                    this.regionReferenceCounts.remove(removed.regionId);
++                    if (this.regions.remove(removed.regionId) != null) {
++                        ++this.retiredRegions;
++                    }
++                } else {
++                    this.regionReferenceCounts.put(removed.regionId, refs - 1);
++                }
++            } finally {
++                this.lock.unlock();
++            }
++        }
++
++        private boolean isOwner(final int chunkX, final int chunkZ, final long threadId) {
++            this.lock.lock();
++            try {
++                for (final Lease lease : this.leases.values()) {
++                    if (lease.ownerThreadId == threadId && lease.contains(chunkX, chunkZ)) {
++                        return true;
++                    }
++                }
++            } finally {
++                this.lock.unlock();
++            }
++            return false;
++        }
++
++        private boolean isOwner(
++            final int minChunkX,
++            final int minChunkZ,
++            final int maxChunkX,
++            final int maxChunkZ,
++            final long threadId
++        ) {
++            this.lock.lock();
++            try {
++                for (final Lease lease : this.leases.values()) {
++                    if (lease.ownerThreadId == threadId
++                        && lease.contains(minChunkX, minChunkZ)
++                        && lease.contains(maxChunkX, maxChunkZ)) {
++                        return true;
++                    }
++                }
++            } finally {
++                this.lock.unlock();
++            }
++            return false;
++        }
++
++        private boolean isEmpty() {
++            this.lock.lock();
++            try {
++                return this.leases.isEmpty();
++            } finally {
++                this.lock.unlock();
++            }
++        }
++
++        private int size() {
++            this.lock.lock();
++            try {
++                return this.leases.size();
++            } finally {
++                this.lock.unlock();
++            }
++        }
++
++        private Lease findConflictingLease(
++            final int minChunkX,
++            final int minChunkZ,
++            final int maxChunkX,
++            final int maxChunkZ,
++            final long ownerThreadId
++        ) {
++            for (final Lease existing : this.leases.values()) {
++                if (existing.ownerThreadId == ownerThreadId) {
++                    continue;
++                }
++                if (existing.intersects(minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++                    return existing;
++                }
++            }
++            return null;
++        }
++
++        private long resolveRegionId(
++            final int minChunkX,
++            final int minChunkZ,
++            final int maxChunkX,
++            final int maxChunkZ,
++            final AtomicLong nextRegionId
++        ) {
++            final Lease exact = this.findExactLease(minChunkX, minChunkZ, maxChunkX, maxChunkZ);
++            if (exact != null) {
++                return exact.regionId;
++            }
++
++            final Set<Long> overlappingRegions = new HashSet<>();
++            for (final Lease existing : this.leases.values()) {
++                if (existing.intersects(minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++                    overlappingRegions.add(existing.regionId);
++                }
++            }
++
++            final long reusableRegionId = this.findContainingRegion(
++                overlappingRegions,
++                minChunkX,
++                minChunkZ,
++                maxChunkX,
++                maxChunkZ
++            );
++            if (reusableRegionId != Long.MIN_VALUE) {
++                ++this.reusedRegionAssignments;
++                final RegionDescriptor descriptor = this.regions.get(reusableRegionId);
++                if (descriptor != null) {
++                    descriptor.touch();
++                }
++                return reusableRegionId;
++            }
++
++            final long regionId = nextRegionId.getAndIncrement();
++            final RegionLifecycleEvent lifecycleEvent;
++            final List<Long> parentRegionIds;
++            if (overlappingRegions.isEmpty()) {
++                lifecycleEvent = RegionLifecycleEvent.CREATED;
++                parentRegionIds = List.of();
++            } else if (overlappingRegions.size() == 1) {
++                lifecycleEvent = RegionLifecycleEvent.SPLIT;
++                ++this.splitEvents;
++                parentRegionIds = List.copyOf(overlappingRegions);
++            } else {
++                lifecycleEvent = RegionLifecycleEvent.MERGE;
++                ++this.mergeEvents;
++                parentRegionIds = List.copyOf(overlappingRegions);
++            }
++
++            ++this.createdRegions;
++            this.regions.put(
++                regionId,
++                new RegionDescriptor(regionId, minChunkX, minChunkZ, maxChunkX, maxChunkZ, lifecycleEvent, parentRegionIds)
++            );
++            return regionId;
++        }
++
++        private long findContainingRegion(
++            final Set<Long> overlappingRegions,
++            final int minChunkX,
++            final int minChunkZ,
++            final int maxChunkX,
++            final int maxChunkZ
++        ) {
++            long selectedRegionId = Long.MIN_VALUE;
++            long selectedArea = Long.MAX_VALUE;
++            for (final Long regionId : overlappingRegions) {
++                final RegionDescriptor descriptor = this.regions.get(regionId);
++                if (descriptor == null || !descriptor.contains(minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++                    continue;
++                }
++                final long area = descriptor.area();
++                if (selectedRegionId == Long.MIN_VALUE || area < selectedArea) {
++                    selectedRegionId = regionId.longValue();
++                    selectedArea = area;
++                }
++            }
++            return selectedRegionId;
++        }
++
++        private Lease findExactLease(final int minChunkX, final int minChunkZ, final int maxChunkX, final int maxChunkZ) {
++            for (final Lease lease : this.leases.values()) {
++                if (lease.matches(minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++                    return lease;
++                }
++            }
++            return null;
++        }
++
++        private WorldDiagnostics snapshot(final String worldId) {
++            this.lock.lock();
++            try {
++                return new WorldDiagnostics(
++                    worldId,
++                    this.leases.size(),
++                    this.regionReferenceCounts.size(),
++                    this.createdRegions,
++                    this.splitEvents,
++                    this.mergeEvents,
++                    this.retiredRegions,
++                    this.reusedRegionAssignments
++                );
++            } finally {
++                this.lock.unlock();
++            }
++        }
++    }
++
++    private static final class Lease {
++
++        private final long id;
++        private final int minChunkX;
++        private final int minChunkZ;
++        private final int maxChunkX;
++        private final int maxChunkZ;
++        private final long ownerThreadId;
++        @SuppressWarnings("unused")
++        private final String ownerThreadName;
++        private final long regionId;
++
++        private Lease(
++            final long id,
++            final int minChunkX,
++            final int minChunkZ,
++            final int maxChunkX,
++            final int maxChunkZ,
++            final long ownerThreadId,
++            final String ownerThreadName,
++            final long regionId
++        ) {
++            this.id = id;
++            this.minChunkX = minChunkX;
++            this.minChunkZ = minChunkZ;
++            this.maxChunkX = maxChunkX;
++            this.maxChunkZ = maxChunkZ;
++            this.ownerThreadId = ownerThreadId;
++            this.ownerThreadName = ownerThreadName;
++            this.regionId = regionId;
++        }
++
++        private boolean contains(final int chunkX, final int chunkZ) {
++            return chunkX >= this.minChunkX && chunkX <= this.maxChunkX
++                && chunkZ >= this.minChunkZ && chunkZ <= this.maxChunkZ;
++        }
++
++        private boolean matches(
++            final int minChunkX,
++            final int minChunkZ,
++            final int maxChunkX,
++            final int maxChunkZ
++        ) {
++            return this.minChunkX == minChunkX
++                && this.minChunkZ == minChunkZ
++                && this.maxChunkX == maxChunkX
++                && this.maxChunkZ == maxChunkZ;
++        }
++
++        private boolean intersects(
++            final int minChunkX,
++            final int minChunkZ,
++            final int maxChunkX,
++            final int maxChunkZ
++        ) {
++            return this.minChunkX <= maxChunkX
++                && this.maxChunkX >= minChunkX
++                && this.minChunkZ <= maxChunkZ
++                && this.maxChunkZ >= minChunkZ;
++        }
++
++        private String describeBounds() {
++            return "[" + this.minChunkX + "," + this.minChunkZ + " -> " + this.maxChunkX + "," + this.maxChunkZ + "]";
++        }
++    }
++
++    private static final class RegionDescriptor {
++
++        private final long id;
++        private final int minChunkX;
++        private final int minChunkZ;
++        private final int maxChunkX;
++        private final int maxChunkZ;
++        @SuppressWarnings("unused")
++        private final RegionLifecycleEvent lifecycleEvent;
++        @SuppressWarnings("unused")
++        private final List<Long> parentRegionIds;
++        private final long createdNanos;
++        private long lastTouchedNanos;
++
++        private RegionDescriptor(
++            final long id,
++            final int minChunkX,
++            final int minChunkZ,
++            final int maxChunkX,
++            final int maxChunkZ,
++            final RegionLifecycleEvent lifecycleEvent,
++            final List<Long> parentRegionIds
++        ) {
++            this.id = id;
++            this.minChunkX = minChunkX;
++            this.minChunkZ = minChunkZ;
++            this.maxChunkX = maxChunkX;
++            this.maxChunkZ = maxChunkZ;
++            this.lifecycleEvent = lifecycleEvent;
++            this.parentRegionIds = List.copyOf(parentRegionIds);
++            this.createdNanos = System.nanoTime();
++            this.lastTouchedNanos = this.createdNanos;
++        }
++
++        private void touch() {
++            this.lastTouchedNanos = System.nanoTime();
++        }
++
++        private boolean contains(
++            final int minChunkX,
++            final int minChunkZ,
++            final int maxChunkX,
++            final int maxChunkZ
++        ) {
++            return minChunkX >= this.minChunkX
++                && maxChunkX <= this.maxChunkX
++                && minChunkZ >= this.minChunkZ
++                && maxChunkZ <= this.maxChunkZ;
++        }
++
++        private long area() {
++            final long width = (long)this.maxChunkX - (long)this.minChunkX + 1L;
++            final long depth = (long)this.maxChunkZ - (long)this.minChunkZ + 1L;
++            return width * depth;
++        }
++    }
++
++    private enum RegionLifecycleEvent {
++        CREATED,
++        SPLIT,
++        MERGE
++    }
++
++    public static record RuntimeDiagnostics(
++        int worldsTracked,
++        long activeLeases,
++        long activeRegions,
++        long createdRegions,
++        long splitEvents,
++        long mergeEvents,
++        long retiredRegions,
++        long reusedRegionAssignments,
++        List<WorldDiagnostics> worlds
++    ) {
++    }
++
++    public static record WorldDiagnostics(
++        String worldId,
++        int activeLeases,
++        int activeRegions,
++        long createdRegions,
++        long splitEvents,
++        long mergeEvents,
++        long retiredRegions,
++        long reusedRegionAssignments
++    ) {
++
++        static WorldDiagnostics empty(final String worldId) {
++            return new WorldDiagnostics(worldId, 0, 0, 0L, 0L, 0L, 0L, 0L);
++        }
++    }
++}
+\ No newline at end of file
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d08c56e6ce636605136a0b37060113da8d1fd0ed
+--- /dev/null
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -0,0 +1,2076 @@
++package net.minecraft.server.threading;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import net.minecraft.server.level.ServerLevel;
++import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
++import org.bukkit.plugin.IllegalPluginAccessException;
++import org.bukkit.plugin.Plugin;
++import org.jspecify.annotations.Nullable;
++
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.EnumMap;
++import java.util.HashMap;
++import java.util.Iterator;
++import java.util.List;
++import java.util.Map;
++import java.util.Objects;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.ThreadFactory;
++import java.util.concurrent.atomic.AtomicLong;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.function.Consumer;
++
++/**
++ * Runtime region ownership state used by thread checks.
++ *
++ * <p>Contexts are pushed while ticking and converted into runtime region
++ * ownership leases. Thread checks validate against both active context stack
++ * and the shared ownership runtime.</p>
++ */
++public class TickRegions {
++
++    private static final boolean STRICT_CONTEXT_CHECKS = Boolean.parseBoolean(
++        System.getProperty("paper.threadedregions.strictContextChecks", "true")
++    );
++    private static final boolean ALLOW_UNOWNED_TICK_THREAD_ACCESS = Boolean.parseBoolean(
++        System.getProperty("paper.threadedregions.allowUnownedTickThreadAccess", "false")
++    );
++    private static final boolean STRICT_RUNTIME_MODE = STRICT_CONTEXT_CHECKS;
++    private static final boolean PARALLEL_SCHEDULER_ENABLED = Boolean.parseBoolean(
++        System.getProperty("paper.threadedregions.parallelScheduler", "true")
++    );
++    private static final int PARALLEL_SCHEDULER_MIN_TASKS = Math.max(
++        2,
++        Integer.getInteger("paper.threadedregions.parallelScheduler.minTasks", 8)
++    );
++    private static final int REGION_BUCKET_SHIFT = Math.max(
++        0,
++        Math.min(30, Integer.getInteger("paper.threadedregions.parallelScheduler.bucketShift", 3))
++    );
++    private static final int REGION_WORKER_COUNT = Math.max(
++        1,
++        Integer.getInteger(
++            "paper.threadedregions.parallelScheduler.threads",
++            Math.max(1, Runtime.getRuntime().availableProcessors() / 2)
++        )
++    );
++    private static final int SCHEDULER_MAX_TASKS_PER_TICK = Math.max(
++        32,
++        Integer.getInteger("paper.threadedregions.scheduler.maxTasksPerTick", 4096)
++    );
++    private static final int SCHEDULER_MAX_TASKS_PER_TICK_BURST = Math.max(
++        SCHEDULER_MAX_TASKS_PER_TICK,
++        Integer.getInteger("paper.threadedregions.scheduler.maxTasksPerTickBurst", SCHEDULER_MAX_TASKS_PER_TICK * 2)
++    );
++    private static final int MAILBOX_MAX_MESSAGES_PER_TICK = Math.max(
++        32,
++        Integer.getInteger("paper.threadedregions.mailbox.maxMessagesPerTick", 4096)
++    );
++    private static final int MAILBOX_MAX_MESSAGES_PER_TICK_BURST = Math.max(
++        MAILBOX_MAX_MESSAGES_PER_TICK,
++        Integer.getInteger("paper.threadedregions.mailbox.maxMessagesPerTickBurst", MAILBOX_MAX_MESSAGES_PER_TICK * 2)
++    );
++    private static final int MAILBOX_MAX_QUEUED_MESSAGES = Math.max(
++        64,
++        Integer.getInteger("paper.threadedregions.mailbox.maxQueuedMessages", 16384)
++    );
++    private static final boolean PARALLEL_MAILBOX_ENABLED = Boolean.parseBoolean(
++        System.getProperty("paper.threadedregions.parallelMailbox", "true")
++    );
++    private static final int PARALLEL_MAILBOX_MIN_MESSAGES = Math.max(
++        2,
++        Integer.getInteger("paper.threadedregions.parallelMailbox.minMessages", 8)
++    );
++    private static final boolean PARALLEL_SIMULATION_ENABLED = Boolean.parseBoolean(
++        System.getProperty("paper.threadedregions.parallelSimulation", "true")
++    );
++    private static final int PARALLEL_SIMULATION_MAX_OPS_PER_TASK = Math.max(
++        1,
++        Integer.getInteger("paper.threadedregions.parallelSimulation.maxOpsPerTask", 64)
++    );
++    private static final int PARALLEL_SIMULATION_TARGET_TASKS_PER_WORKER = Math.max(
++        1,
++        Integer.getInteger("paper.threadedregions.parallelSimulation.targetTasksPerWorker", 4)
++    );
++    private static final int DIAGNOSTIC_EVENT_LIMIT = Math.max(
++        64,
++        Integer.getInteger("paper.threadedregions.diagnostics.eventLimit", 512)
++    );
++
++    private static final ThreadLocal<@Nullable RegionContext> CURRENT_CONTEXT = new ThreadLocal<>();
++    private static final Map<ServerLevel, WorldSchedulerState> SCHEDULER_STATES = new ConcurrentHashMap<>();
++    private static final RegionRuntime REGION_RUNTIME = new RegionRuntime();
++    private static final ExecutorService REGION_SCHEDULER_EXECUTOR = Executors.newFixedThreadPool(
++        REGION_WORKER_COUNT,
++        new RegionSchedulerThreadFactory()
++    );
++    private static final AtomicLong OWNERSHIP_CHECKS = new AtomicLong();
++    private static final AtomicLong OWNERSHIP_FAILURES = new AtomicLong();
++    private static final AtomicLong LEASE_CLAIM_FAILURES = new AtomicLong();
++    private static final AtomicLong SCHEDULER_TASKS_EXECUTED = new AtomicLong();
++    private static final AtomicLong SCHEDULER_TASKS_DEFERRED = new AtomicLong();
++    private static final AtomicLong SCHEDULER_PARALLEL_TICKS = new AtomicLong();
++    private static final AtomicLong SCHEDULER_PARALLEL_BUCKETS = new AtomicLong();
++    private static final AtomicLong SCHEDULER_BUDGET_SKIPS = new AtomicLong();
++    private static final AtomicLong MAILBOX_MESSAGES_POSTED = new AtomicLong();
++    private static final AtomicLong MAILBOX_MESSAGES_DELIVERED = new AtomicLong();
++    private static final AtomicLong MAILBOX_MESSAGES_DEFERRED = new AtomicLong();
++    private static final AtomicLong MAILBOX_MESSAGES_DROPPED = new AtomicLong();
++    private static final AtomicLong MAILBOX_PARALLEL_DRAINS = new AtomicLong();
++    private static final AtomicLong MAILBOX_PARALLEL_BUCKETS = new AtomicLong();
++    private static final AtomicLong MAILBOX_BUDGET_SKIPS = new AtomicLong();
++    private static final AtomicLong SIMULATION_BATCH_TASKS = new AtomicLong();
++    private static final AtomicLong SIMULATION_BATCH_OPERATIONS = new AtomicLong();
++    private static final AtomicLong SIMULATION_SERIAL_FALLBACKS = new AtomicLong();
++    private static final AtomicLong SIMULATION_SERIAL_OPERATIONS = new AtomicLong();
++    private static final AtomicLong[] MAILBOX_POSTED_BY_TYPE = createTypeCounters();
++    private static final AtomicLong[] MAILBOX_DELIVERED_BY_TYPE = createTypeCounters();
++    private static final AtomicLong[] MAILBOX_DEFERRED_BY_TYPE = createTypeCounters();
++    private static final AtomicLong[] MAILBOX_DROPPED_BY_TYPE = createTypeCounters();
++    private static final Object DIAGNOSTIC_LOCK = new Object();
++    private static final ArrayDeque<DiagnosticEvent> DIAGNOSTIC_EVENTS = new ArrayDeque<>();
++    private static final AtomicLong DIAGNOSTIC_SEQUENCE = new AtomicLong();
++
++    protected TickRegions() {
++    }
++
++    static {
++        if (STRICT_RUNTIME_MODE && ALLOW_UNOWNED_TICK_THREAD_ACCESS) {
++            recordDiagnostic(
++                DiagnosticType.CONFIGURATION_WARNING,
++                null,
++                0,
++                0,
++                0,
++                0,
++                "paper.threadedregions.allowUnownedTickThreadAccess is ignored in strict mode"
++            );
++        }
++    }
++
++    public static int getRegionChunkShift() {
++        return ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ThreadedTicketLevelPropagator.SECTION_SHIFT;
++    }
++
++    public static RegionContext pushLevelContext(final ServerLevel world) {
++        return pushRegionContext(world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE);
++    }
++
++    public static RegionContext pushRegionContext(
++        final ServerLevel world,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ
++    ) {
++        final RegionContext previous = CURRENT_CONTEXT.get();
++        final Thread currentThread = Thread.currentThread();
++        final long leaseId;
++        try {
++            leaseId = REGION_RUNTIME.claimLease(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread);
++        } catch (final IllegalStateException ex) {
++            LEASE_CLAIM_FAILURES.getAndIncrement();
++            recordDiagnostic(
++                DiagnosticType.LEASE_CLAIM_FAILURE,
++                world,
++                minChunkX,
++                minChunkZ,
++                maxChunkX,
++                maxChunkZ,
++                ex.getMessage()
++            );
++            throw new IllegalStateException(
++                "Failed to claim region lease for world "
++                    + world.dimension().identifier() + " bounds "
++                    + "[" + minChunkX + "," + minChunkZ + " -> " + maxChunkX + "," + maxChunkZ + "]",
++                ex
++            );
++        }
++        final RegionContext next = new RegionContext(
++            world,
++            minChunkX,
++            minChunkZ,
++            maxChunkX,
++            maxChunkZ,
++            previous,
++            leaseId,
++            currentThread.threadId()
++        );
++        CURRENT_CONTEXT.set(next);
++        return next;
++    }
++
++    public static void popContext(final RegionContext context) {
++        RegionContext current = CURRENT_CONTEXT.get();
++        if (current != context) {
++            // Context stacks may be temporarily suspended and rebuilt with equivalent bounds/owner ids.
++            // Accepting an equivalent stack prevents false-positive unbalanced checks at outer pop sites.
++            if (current == null || !isEquivalentContextStack(current, context)) {
++                recordDiagnostic(
++                    DiagnosticType.CONTEXT_STACK_UNBALANCED,
++                    context.world(),
++                    context.minChunkX(),
++                    context.minChunkZ(),
++                    context.maxChunkX(),
++                    context.maxChunkZ(),
++                    "Unbalanced region context stack"
++                );
++                throw new IllegalStateException("Unbalanced region context stack");
++            }
++        }
++        CURRENT_CONTEXT.set(current.previous());
++        REGION_RUNTIME.releaseLease(current.world(), current.leaseId());
++    }
++
++    private static boolean isEquivalentContextStack(RegionContext current, RegionContext expected) {
++        while (current != null && expected != null) {
++            if (current.world() != expected.world()
++                || current.minChunkX() != expected.minChunkX()
++                || current.minChunkZ() != expected.minChunkZ()
++                || current.maxChunkX() != expected.maxChunkX()
++                || current.maxChunkZ() != expected.maxChunkZ()
++                || current.ownerThreadId() != expected.ownerThreadId()) {
++                return false;
++            }
++            current = current.previous();
++            expected = expected.previous();
++        }
++
++        return current == null && expected == null;
++    }
++
++    public static boolean isCurrentThreadOwner(final ServerLevel world, final int chunkX, final int chunkZ) {
++        OWNERSHIP_CHECKS.getAndIncrement();
++
++        final Thread currentThread = Thread.currentThread();
++        if (isCurrentThreadOwnerByContext(world, chunkX, chunkZ, currentThread.threadId())) {
++            return true;
++        }
++        if (REGION_RUNTIME.isOwner(world, chunkX, chunkZ, currentThread)) {
++            return true;
++        }
++
++        return onOwnershipFailure(world, chunkX, chunkZ, chunkX, chunkZ);
++    }
++
++    public static boolean isCurrentThreadOwner(
++        final ServerLevel world,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ
++    ) {
++        OWNERSHIP_CHECKS.getAndIncrement();
++
++        final Thread currentThread = Thread.currentThread();
++        if (isCurrentThreadOwnerByContext(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread.threadId())) {
++            return true;
++        }
++        if (REGION_RUNTIME.isOwner(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread)) {
++            return true;
++        }
++
++        return onOwnershipFailure(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
++    }
++
++    public static boolean isCurrentThreadOwnerQuiet(final ServerLevel world, final int chunkX, final int chunkZ) {
++        return isCurrentThreadOwnerNoFailure(world, chunkX, chunkZ);
++    }
++
++    public static boolean isCurrentThreadOwnerQuiet(
++        final ServerLevel world,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ
++    ) {
++        final Thread currentThread = Thread.currentThread();
++        final long threadId = currentThread.threadId();
++        return isCurrentThreadOwnerByContext(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, threadId)
++            || REGION_RUNTIME.isOwner(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread);
++    }
++
++    public static @Nullable RegionContext currentContext() {
++        return CURRENT_CONTEXT.get();
++    }
++
++    public static long getOwnershipCheckCount() {
++        return OWNERSHIP_CHECKS.get();
++    }
++
++    public static long getOwnershipFailureCount() {
++        return OWNERSHIP_FAILURES.get();
++    }
++
++    public static int getActiveOwnershipLeases(final ServerLevel world) {
++        return REGION_RUNTIME.activeLeases(world);
++    }
++
++    public static long getLeaseConflictCount() {
++        return REGION_RUNTIME.leaseConflictCount();
++    }
++
++    public static long getLeaseClaimFailureCount() {
++        return LEASE_CLAIM_FAILURES.get();
++    }
++
++    public static long getSchedulerTaskExecutionCount() {
++        return SCHEDULER_TASKS_EXECUTED.get();
++    }
++
++    public static long getSchedulerTaskDeferredCount() {
++        return SCHEDULER_TASKS_DEFERRED.get();
++    }
++
++    public static long getSchedulerParallelTickCount() {
++        return SCHEDULER_PARALLEL_TICKS.get();
++    }
++
++    public static long getSchedulerParallelBucketCount() {
++        return SCHEDULER_PARALLEL_BUCKETS.get();
++    }
++
++    public static long getSchedulerBudgetSkipCount() {
++        return SCHEDULER_BUDGET_SKIPS.get();
++    }
++
++    public static long getMailboxPostedCount() {
++        return MAILBOX_MESSAGES_POSTED.get();
++    }
++
++    public static long getMailboxDeliveredCount() {
++        return MAILBOX_MESSAGES_DELIVERED.get();
++    }
++
++    public static long getMailboxDeferredCount() {
++        return MAILBOX_MESSAGES_DEFERRED.get();
++    }
++
++    public static long getMailboxDroppedCount() {
++        return MAILBOX_MESSAGES_DROPPED.get();
++    }
++
++    public static long getMailboxParallelDrainCount() {
++        return MAILBOX_PARALLEL_DRAINS.get();
++    }
++
++    public static long getMailboxParallelBucketCount() {
++        return MAILBOX_PARALLEL_BUCKETS.get();
++    }
++
++    public static long getMailboxBudgetSkipCount() {
++        return MAILBOX_BUDGET_SKIPS.get();
++    }
++
++    public static long getSimulationBatchTaskCount() {
++        return SIMULATION_BATCH_TASKS.get();
++    }
++
++    public static long getSimulationBatchOperationCount() {
++        return SIMULATION_BATCH_OPERATIONS.get();
++    }
++
++    public static long getSimulationSerialFallbackCount() {
++        return SIMULATION_SERIAL_FALLBACKS.get();
++    }
++
++    public static long getSimulationSerialOperationCount() {
++        return SIMULATION_SERIAL_OPERATIONS.get();
++    }
++
++    public static RegionRuntime.RuntimeDiagnostics getRegionRuntimeDiagnostics() {
++        return REGION_RUNTIME.snapshotDiagnostics();
++    }
++
++    public static RuntimeDiagnostics snapshotDiagnostics() {
++        final List<WorldSchedulerDiagnostics> schedulerWorlds = new ArrayList<>();
++        for (final WorldSchedulerState state : SCHEDULER_STATES.values()) {
++            schedulerWorlds.add(state.snapshotDiagnostics());
++        }
++        schedulerWorlds.sort(Comparator.comparing(WorldSchedulerDiagnostics::worldId));
++
++        return new RuntimeDiagnostics(
++            STRICT_RUNTIME_MODE,
++            OWNERSHIP_CHECKS.get(),
++            OWNERSHIP_FAILURES.get(),
++            LEASE_CLAIM_FAILURES.get(),
++            SCHEDULER_TASKS_EXECUTED.get(),
++            SCHEDULER_TASKS_DEFERRED.get(),
++            SCHEDULER_PARALLEL_TICKS.get(),
++            SCHEDULER_PARALLEL_BUCKETS.get(),
++            SCHEDULER_BUDGET_SKIPS.get(),
++            MAILBOX_MESSAGES_POSTED.get(),
++            MAILBOX_MESSAGES_DELIVERED.get(),
++            MAILBOX_MESSAGES_DEFERRED.get(),
++            MAILBOX_MESSAGES_DROPPED.get(),
++            MAILBOX_PARALLEL_DRAINS.get(),
++            MAILBOX_PARALLEL_BUCKETS.get(),
++            MAILBOX_BUDGET_SKIPS.get(),
++            SIMULATION_BATCH_TASKS.get(),
++            SIMULATION_BATCH_OPERATIONS.get(),
++            SIMULATION_SERIAL_FALLBACKS.get(),
++            SIMULATION_SERIAL_OPERATIONS.get(),
++            snapshotMailboxTypeDiagnostics(),
++            REGION_RUNTIME.snapshotDiagnostics(),
++            List.copyOf(schedulerWorlds),
++            recentDiagnostics()
++        );
++    }
++
++    public static String diagnosticsReport() {
++        final RuntimeDiagnostics diagnostics = snapshotDiagnostics();
++        final StringBuilder report = new StringBuilder(1024);
++        report.append("TickRegions diagnostics {")
++            .append("strictMode=").append(diagnostics.strictMode())
++            .append(", ownershipChecks=").append(diagnostics.ownershipChecks())
++            .append(", ownershipFailures=").append(diagnostics.ownershipFailures())
++            .append(", leaseClaimFailures=").append(diagnostics.leaseClaimFailures())
++            .append(", schedulerExecuted=").append(diagnostics.schedulerTasksExecuted())
++            .append(", schedulerDeferred=").append(diagnostics.schedulerTasksDeferred())
++            .append(", schedulerParallelTicks=").append(diagnostics.schedulerParallelTicks())
++            .append(", schedulerParallelBuckets=").append(diagnostics.schedulerParallelBuckets())
++            .append(", schedulerBudgetSkips=").append(diagnostics.schedulerBudgetSkips())
++            .append(", mailboxPosted=").append(diagnostics.mailboxMessagesPosted())
++            .append(", mailboxDelivered=").append(diagnostics.mailboxMessagesDelivered())
++            .append(", mailboxDeferred=").append(diagnostics.mailboxMessagesDeferred())
++            .append(", mailboxDropped=").append(diagnostics.mailboxMessagesDropped())
++            .append(", mailboxParallelDrains=").append(diagnostics.mailboxParallelDrains())
++            .append(", mailboxParallelBuckets=").append(diagnostics.mailboxParallelBuckets())
++            .append(", mailboxBudgetSkips=").append(diagnostics.mailboxBudgetSkips())
++            .append(", simulationBatchTasks=").append(diagnostics.simulationBatchTasks())
++            .append(", simulationBatchOps=").append(diagnostics.simulationBatchOperations())
++            .append(", simulationSerialFallbacks=").append(diagnostics.simulationSerialFallbacks())
++            .append(", simulationSerialOps=").append(diagnostics.simulationSerialOperations())
++            .append(", mailboxByType=").append(diagnostics.mailboxTypeDiagnostics())
++            .append(", activeLeases=").append(diagnostics.regionRuntime().activeLeases())
++            .append(", activeRegions=").append(diagnostics.regionRuntime().activeRegions())
++            .append(", createdRegions=").append(diagnostics.regionRuntime().createdRegions())
++            .append(", splitEvents=").append(diagnostics.regionRuntime().splitEvents())
++            .append(", mergeEvents=").append(diagnostics.regionRuntime().mergeEvents())
++            .append(", retiredRegions=").append(diagnostics.regionRuntime().retiredRegions())
++            .append(", reusedRegionAssignments=").append(diagnostics.regionRuntime().reusedRegionAssignments())
++            .append('}');
++        return report.toString();
++    }
++
++    public static List<DiagnosticEvent> recentDiagnostics() {
++        {
++            return List.copyOf(DIAGNOSTIC_EVENTS);
++        }
++    }
++
++    public static void clearWorldState(final ServerLevel world) {
++        SCHEDULER_STATES.remove(world);
++        REGION_RUNTIME.clearWorld(world);
++    }
++
++    public static boolean isParallelSimulationEnabled() {
++        return PARALLEL_SIMULATION_ENABLED;
++    }
++
++    public static boolean shouldRunSimulationRegionTasksInParallel(final int taskCount) {
++        return PARALLEL_SIMULATION_ENABLED && taskCount > 1;
++    }
++
++    public static int getParallelSimulationMaxOpsPerTask() {
++        return PARALLEL_SIMULATION_MAX_OPS_PER_TASK;
++    }
++
++    public static int getAdaptiveParallelSimulationMaxOpsPerTask(final int operationCount) {
++        if (operationCount <= 0) {
++            return PARALLEL_SIMULATION_MAX_OPS_PER_TASK;
++        }
++        final int desiredTasks = Math.max(1, REGION_WORKER_COUNT * PARALLEL_SIMULATION_TARGET_TASKS_PER_WORKER);
++        final int adaptiveOps = (int)Math.ceil((double)operationCount / (double)desiredTasks);
++        return Math.max(1, Math.min(PARALLEL_SIMULATION_MAX_OPS_PER_TASK, adaptiveOps));
++    }
++
++    public static int getAdaptiveSchedulerBudget(final int dueTasks) {
++        return computeAdaptiveDrainBudget(
++            dueTasks,
++            SCHEDULER_MAX_TASKS_PER_TICK,
++            SCHEDULER_MAX_TASKS_PER_TICK_BURST,
++            REGION_WORKER_COUNT
++        );
++    }
++
++    public static int getAdaptiveMailboxBudget(final int queuedMessages) {
++        return computeAdaptiveDrainBudget(
++            queuedMessages,
++            MAILBOX_MAX_MESSAGES_PER_TICK,
++            MAILBOX_MAX_MESSAGES_PER_TICK_BURST,
++            REGION_WORKER_COUNT
++        );
++    }
++
++    public static boolean areChunksInSameRegionTaskBucket(
++        final int firstChunkX,
++        final int firstChunkZ,
++        final int secondChunkX,
++        final int secondChunkZ
++    ) {
++        return regionBucketKey(firstChunkX, firstChunkZ) == regionBucketKey(secondChunkX, secondChunkZ);
++    }
++
++    public static boolean isWithinSameRegionTaskBucket(
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ
++    ) {
++        return areChunksInSameRegionTaskBucket(minChunkX, minChunkZ, maxChunkX, maxChunkZ);
++    }
++
++    public static long getRegionTaskBucketKey(final int chunkX, final int chunkZ) {
++        return regionBucketKey(chunkX, chunkZ);
++    }
++
++    public static void recordSimulationBatchDispatch(final int taskCount, final int operationCount) {
++        if (taskCount > 0) {
++            SIMULATION_BATCH_TASKS.addAndGet(taskCount);
++        }
++        if (operationCount > 0) {
++            SIMULATION_BATCH_OPERATIONS.addAndGet(operationCount);
++        }
++    }
++
++    public static void recordSimulationSerialFallback(final int operationCount) {
++        SIMULATION_SERIAL_FALLBACKS.incrementAndGet();
++        if (operationCount > 0) {
++            SIMULATION_SERIAL_OPERATIONS.addAndGet(operationCount);
++        }
++    }
++
++    static int computeAdaptiveDrainBudget(
++        final int available,
++        final int baseBudget,
++        final int burstBudget,
++        final int workerCount
++    ) {
++        if (baseBudget <= 0) {
++            throw new IllegalArgumentException("baseBudget must be > 0");
++        }
++        if (burstBudget < baseBudget) {
++            throw new IllegalArgumentException("burstBudget must be >= baseBudget");
++        }
++        if (available <= baseBudget || burstBudget == baseBudget) {
++            return baseBudget;
++        }
++
++        final int workers = Math.max(1, workerCount);
++        final int overload = available - baseBudget;
++        final int scaledBoost = (int)Math.ceil((double)overload / (double)workers);
++        return Math.max(baseBudget, Math.min(burstBudget, baseBudget + scaledBoost));
++    }
++
++    public static void runRegionBoundTasksFromCurrentContext(
++        final ServerLevel world,
++        final List<RegionBoundTask> tasks,
++        final String stageName
++    ) {
++        Objects.requireNonNull(world, "World may not be null");
++        Objects.requireNonNull(tasks, "Tasks may not be null");
++        Objects.requireNonNull(stageName, "Stage name may not be null");
++        if (tasks.isEmpty()) {
++            return;
++        }
++
++        final List<ContextLeaseBounds> suspended = suspendContextStackForWorld(world);
++        try {
++            runRegionBoundTasks(world, tasks, stageName);
++        } finally {
++            restoreContextStack(world, suspended);
++        }
++    }
++
++    public static void recordPluginContextViolation(final @Nullable Plugin plugin, final String operation, final String detail) {
++        Objects.requireNonNull(operation, "Operation may not be null");
++        Objects.requireNonNull(detail, "Detail may not be null");
++        final RegionContext context = CURRENT_CONTEXT.get();
++        recordDiagnostic(
++            DiagnosticType.PLUGIN_CONTEXT_VIOLATION,
++            context == null ? null : context.world(),
++            context == null ? Integer.MIN_VALUE : context.minChunkX(),
++            context == null ? Integer.MIN_VALUE : context.minChunkZ(),
++            context == null ? Integer.MAX_VALUE : context.maxChunkX(),
++            context == null ? Integer.MAX_VALUE : context.maxChunkZ(),
++            "plugin=" + (plugin == null ? "<none>" : plugin.getPluginMeta().getDisplayName())
++                + ", operation=" + operation
++                + ", detail=" + detail
++        );
++    }
++
++    private static void runRegionBoundTasks(
++        final ServerLevel world,
++        final List<RegionBoundTask> tasks,
++        final String stageName
++    ) {
++        final boolean containsMultiChunkTasks = containsMultiChunkRegionTasks(tasks);
++        final List<RegionBoundBucket> buckets = containsMultiChunkTasks
++            ? bucketRegionBoundTasksByOverlap(world, tasks)
++            : bucketRegionBoundTasksByDispatchChunk(world, tasks);
++
++        if (PARALLEL_SIMULATION_ENABLED && buckets.size() > 1) {
++            final List<CompletableFuture<Void>> futures = new ArrayList<>(buckets.size());
++            for (int i = 0, len = buckets.size(); i < len; ++i) {
++                final RegionBoundBucket bucket = buckets.get(i);
++                futures.add(CompletableFuture.runAsync(() -> bucket.run(stageName), REGION_SCHEDULER_EXECUTOR));
++            }
++            RuntimeException firstFailure = null;
++            Error firstError = null;
++            for (int i = 0, len = futures.size(); i < len; ++i) {
++                try {
++                    futures.get(i).join();
++                } catch (final java.util.concurrent.CompletionException ex) {
++                    final Throwable cause = unwrapParallelStageFailure(ex);
++                    if (cause instanceof Error error) {
++                        if (firstError == null) {
++                            firstError = error;
++                        }
++                        continue;
++                    }
++                    if (cause instanceof RuntimeException runtimeException) {
++                        if (firstFailure == null) {
++                            firstFailure = runtimeException;
++                        }
++                    } else if (firstFailure == null) {
++                        firstFailure = new RuntimeException("Parallel region task dispatch failed for " + stageName, cause);
++                    }
++                }
++            }
++            if (firstError != null) {
++                throw firstError;
++            }
++            if (firstFailure != null) {
++                throw firstFailure;
++            }
++            return;
++        }
++
++        for (int i = 0, len = buckets.size(); i < len; ++i) {
++            buckets.get(i).run(stageName);
++        }
++    }
++
++    private static boolean containsMultiChunkRegionTasks(final List<RegionBoundTask> tasks) {
++        for (int i = 0, len = tasks.size(); i < len; ++i) {
++            final RegionBoundTask task = tasks.get(i);
++            if (task.minChunkX() != task.maxChunkX() || task.minChunkZ() != task.maxChunkZ()) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private static List<RegionBoundBucket> bucketRegionBoundTasksByDispatchChunk(
++        final ServerLevel world,
++        final List<RegionBoundTask> tasks
++    ) {
++        final Map<Long, RegionBoundBucket> bucketMap = new HashMap<>();
++        for (int i = 0, len = tasks.size(); i < len; ++i) {
++            final RegionBoundTask task = tasks.get(i);
++            final long bucketKey = regionBucketKey(task.chunkX(), task.chunkZ());
++            bucketMap.computeIfAbsent(bucketKey, ignored -> new RegionBoundBucket(world)).add(task);
++        }
++
++        final List<Map.Entry<Long, RegionBoundBucket>> entries = new ArrayList<>(bucketMap.entrySet());
++        entries.sort(Map.Entry.comparingByKey());
++        final List<RegionBoundBucket> buckets = new ArrayList<>(entries.size());
++        for (int i = 0, len = entries.size(); i < len; ++i) {
++            buckets.add(entries.get(i).getValue());
++        }
++        return buckets;
++    }
++
++    private static List<RegionBoundBucket> bucketRegionBoundTasksByOverlap(
++        final ServerLevel world,
++        final List<RegionBoundTask> tasks
++    ) {
++        final List<RegionBoundBucket> buckets = new ArrayList<>();
++        for (int i = 0, len = tasks.size(); i < len; ++i) {
++            final RegionBoundTask task = tasks.get(i);
++            RegionBoundBucket target = null;
++            for (int bucketIndex = 0, bucketLen = buckets.size(); bucketIndex < bucketLen; ++bucketIndex) {
++                final RegionBoundBucket bucket = buckets.get(bucketIndex);
++                if (bucket.intersects(task)) {
++                    target = bucket;
++                    break;
++                }
++            }
++
++            if (target == null) {
++                target = new RegionBoundBucket(world);
++                buckets.add(target);
++            }
++            target.add(task);
++
++            for (int bucketIndex = buckets.size() - 1; bucketIndex >= 0; --bucketIndex) {
++                final RegionBoundBucket bucket = buckets.get(bucketIndex);
++                if (bucket == target || !target.intersects(bucket)) {
++                    continue;
++                }
++                target.absorb(bucket);
++                buckets.remove(bucketIndex);
++            }
++        }
++
++        buckets.sort(Comparator
++            .comparingInt(RegionBoundBucket::minChunkX)
++            .thenComparingInt(RegionBoundBucket::minChunkZ)
++            .thenComparingInt(RegionBoundBucket::maxChunkX)
++            .thenComparingInt(RegionBoundBucket::maxChunkZ));
++        return buckets;
++    }
++
++    private static Throwable unwrapParallelStageFailure(final Throwable throwable) {
++        Throwable cause = throwable;
++        while ((cause instanceof java.util.concurrent.CompletionException || cause instanceof java.util.concurrent.ExecutionException)
++            && cause.getCause() != null) {
++            cause = cause.getCause();
++        }
++        return cause;
++    }
++
++    private static List<ContextLeaseBounds> suspendContextStackForWorld(final ServerLevel world) {
++        RegionContext current = CURRENT_CONTEXT.get();
++        if (current == null) {
++            return List.of();
++        }
++        final List<ContextLeaseBounds> suspended = new ArrayList<>();
++        while (current != null) {
++            if (current.world() != world) {
++                throw new IllegalStateException(
++                    "Cannot suspend mixed-world context stack while dispatching parallel tasks for "
++                        + world.dimension().identifier()
++                );
++            }
++            suspended.add(new ContextLeaseBounds(
++                current.minChunkX(),
++                current.minChunkZ(),
++                current.maxChunkX(),
++                current.maxChunkZ()
++            ));
++            popContext(current);
++            current = CURRENT_CONTEXT.get();
++        }
++        return suspended;
++    }
++
++    private static void restoreContextStack(final ServerLevel world, final List<ContextLeaseBounds> suspended) {
++        for (int i = suspended.size() - 1; i >= 0; --i) {
++            final ContextLeaseBounds bounds = suspended.get(i);
++            pushRegionContext(
++                world,
++                bounds.minChunkX(),
++                bounds.minChunkZ(),
++                bounds.maxChunkX(),
++                bounds.maxChunkZ()
++            );
++        }
++    }
++
++    private static boolean isCurrentThreadOwnerByContext(
++        final ServerLevel world,
++        final int chunkX,
++        final int chunkZ,
++        final long threadId
++    ) {
++        for (RegionContext context = CURRENT_CONTEXT.get(); context != null; context = context.previous()) {
++            if (context.ownerThreadId() == threadId && context.world() == world && context.contains(chunkX, chunkZ)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private static boolean isCurrentThreadOwnerByContext(
++        final ServerLevel world,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final long threadId
++    ) {
++        for (RegionContext context = CURRENT_CONTEXT.get(); context != null; context = context.previous()) {
++            if (context.ownerThreadId() == threadId
++                && context.world() == world
++                && context.contains(minChunkX, minChunkZ)
++                && context.contains(maxChunkX, maxChunkZ)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private static boolean onOwnershipFailure(
++        final ServerLevel world,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ
++    ) {
++        OWNERSHIP_FAILURES.getAndIncrement();
++        recordDiagnostic(
++            DiagnosticType.OWNERSHIP_FAILURE,
++            world,
++            minChunkX,
++            minChunkZ,
++            maxChunkX,
++            maxChunkZ,
++            "Thread does not own requested region"
++        );
++        if (STRICT_RUNTIME_MODE) {
++            return false;
++        }
++        return true;
++    }
++
++    private static boolean isCurrentThreadOwnerNoFailure(final ServerLevel world, final int chunkX, final int chunkZ) {
++        final Thread currentThread = Thread.currentThread();
++        final long threadId = currentThread.threadId();
++        return isCurrentThreadOwnerByContext(world, chunkX, chunkZ, threadId)
++            || REGION_RUNTIME.isOwner(world, chunkX, chunkZ, currentThread);
++    }
++
++    private static long regionBucketKey(final int chunkX, final int chunkZ) {
++        final int bucketX = chunkX >> REGION_BUCKET_SHIFT;
++        final int bucketZ = chunkZ >> REGION_BUCKET_SHIFT;
++        return ((bucketX & 0xFFFFFFFFL) << 32) | (bucketZ & 0xFFFFFFFFL);
++    }
++
++    private static void recordDiagnostic(
++        final DiagnosticType type,
++        final @Nullable ServerLevel world,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final String detail
++    ) {
++        final Thread current = Thread.currentThread();
++        final DiagnosticEvent event = new DiagnosticEvent(
++            DIAGNOSTIC_SEQUENCE.incrementAndGet(),
++            System.nanoTime(),
++            current.getName(),
++            current.threadId(),
++            type,
++            worldId(world),
++            minChunkX,
++            minChunkZ,
++            maxChunkX,
++            maxChunkZ,
++            detail
++        );
++
++        {
++            DIAGNOSTIC_EVENTS.addLast(event);
++            while (DIAGNOSTIC_EVENTS.size() > DIAGNOSTIC_EVENT_LIMIT) {
++                DIAGNOSTIC_EVENTS.removeFirst();
++            }
++        }
++    }
++
++    private static String worldId(final @Nullable ServerLevel world) {
++        return world == null ? "<none>" : String.valueOf(world.dimension().identifier());
++    }
++
++    private static AtomicLong[] createTypeCounters() {
++        final CrossRegionMessageType[] values = CrossRegionMessageType.values();
++        final AtomicLong[] counters = new AtomicLong[values.length];
++        for (int i = 0, len = values.length; i < len; ++i) {
++            counters[i] = new AtomicLong();
++        }
++        return counters;
++    }
++
++    private static void incrementTypeCounter(final AtomicLong[] counters, final CrossRegionMessageType type) {
++        counters[type.ordinal()].getAndIncrement();
++    }
++
++    private static Map<CrossRegionMessageType, MailboxTypeDiagnostics> snapshotMailboxTypeDiagnostics() {
++        final EnumMap<CrossRegionMessageType, MailboxTypeDiagnostics> diagnostics = new EnumMap<>(CrossRegionMessageType.class);
++        for (final CrossRegionMessageType type : CrossRegionMessageType.values()) {
++            diagnostics.put(
++                type,
++                new MailboxTypeDiagnostics(
++                    MAILBOX_POSTED_BY_TYPE[type.ordinal()].get(),
++                    MAILBOX_DELIVERED_BY_TYPE[type.ordinal()].get(),
++                    MAILBOX_DEFERRED_BY_TYPE[type.ordinal()].get(),
++                    MAILBOX_DROPPED_BY_TYPE[type.ordinal()].get()
++                )
++            );
++        }
++        return Map.copyOf(diagnostics);
++    }
++
++    private static WorldSchedulerState stateFor(final ServerLevel world) {
++        return SCHEDULER_STATES.computeIfAbsent(world, ignored -> new WorldSchedulerState(world));
++    }
++
++    public static void tickWorld(final ServerLevel world) {
++        stateFor(world).tickScheduler();
++    }
++
++    public static void postWorldTick(final ServerLevel world) {
++        stateFor(world).drainMailbox();
++    }
++
++    public static void cancelTasks(final Plugin plugin) {
++        for (final WorldSchedulerState state : SCHEDULER_STATES.values()) {
++            state.cancelTasks(plugin);
++        }
++    }
++
++    public static void execute(final Plugin plugin, final ServerLevel world, final int chunkX, final int chunkZ, final Runnable run) {
++        run(plugin, world, chunkX, chunkZ, ignored -> run.run());
++    }
++
++    public static void sendCrossRegionMessage(
++        final @Nullable Plugin plugin,
++        final ServerLevel world,
++        final int sourceChunkX,
++        final int sourceChunkZ,
++        final int targetChunkX,
++        final int targetChunkZ,
++        final CrossRegionMessageType messageType,
++        final String messageDetail,
++        final Runnable action
++    ) {
++        Objects.requireNonNull(world, "World may not be null");
++        Objects.requireNonNull(action, "Action may not be null");
++        Objects.requireNonNull(messageType, "Message type may not be null");
++        Objects.requireNonNull(messageDetail, "Message detail may not be null");
++        if (plugin != null && !plugin.isEnabled()) {
++            throw new IllegalPluginAccessException("Plugin attempted to send cross-region message while disabled");
++        }
++
++        final WorldSchedulerState state = stateFor(world);
++        state.enqueueMailbox(
++            new CrossRegionMessage(plugin, sourceChunkX, sourceChunkZ, targetChunkX, targetChunkZ, messageType, messageDetail, action, state)
++        );
++    }
++
++    public static void sendCrossRegionMessage(
++        final @Nullable Plugin plugin,
++        final ServerLevel world,
++        final int sourceChunkX,
++        final int sourceChunkZ,
++        final int targetChunkX,
++        final int targetChunkZ,
++        final String messageType,
++        final Runnable action
++    ) {
++        sendCrossRegionMessage(
++            plugin,
++            world,
++            sourceChunkX,
++            sourceChunkZ,
++            targetChunkX,
++            targetChunkZ,
++            CrossRegionMessageType.PLUGIN_TASK,
++            messageType,
++            action
++        );
++    }
++
++    public static void sendCrossRegionMessage(
++        final ServerLevel world,
++        final int targetChunkX,
++        final int targetChunkZ,
++        final String messageType,
++        final Runnable action
++    ) {
++        sendCrossRegionMessage(null, world, targetChunkX, targetChunkZ, targetChunkX, targetChunkZ, CrossRegionMessageType.INTERNAL, messageType, action);
++    }
++
++    public static void sendEntityTransfer(
++        final ServerLevel world,
++        final int sourceChunkX,
++        final int sourceChunkZ,
++        final int targetChunkX,
++        final int targetChunkZ,
++        final Runnable action
++    ) {
++        sendCrossRegionMessage(
++            null,
++            world,
++            sourceChunkX,
++            sourceChunkZ,
++            targetChunkX,
++            targetChunkZ,
++            CrossRegionMessageType.ENTITY_TRANSFER,
++            "entity-transfer",
++            action
++        );
++    }
++
++    public static void sendBoundaryBlockUpdate(
++        final ServerLevel world,
++        final int sourceChunkX,
++        final int sourceChunkZ,
++        final int targetChunkX,
++        final int targetChunkZ,
++        final Runnable action
++    ) {
++        sendCrossRegionMessage(
++            null,
++            world,
++            sourceChunkX,
++            sourceChunkZ,
++            targetChunkX,
++            targetChunkZ,
++            CrossRegionMessageType.BOUNDARY_BLOCK_UPDATE,
++            "boundary-block-update",
++            action
++        );
++    }
++
++    public static void sendTicketDelta(
++        final ServerLevel world,
++        final int sourceChunkX,
++        final int sourceChunkZ,
++        final int targetChunkX,
++        final int targetChunkZ,
++        final Runnable action
++    ) {
++        sendCrossRegionMessage(
++            null,
++            world,
++            sourceChunkX,
++            sourceChunkZ,
++            targetChunkX,
++            targetChunkZ,
++            CrossRegionMessageType.TICKET_DELTA,
++            "ticket-delta",
++            action
++        );
++    }
++
++    public static ScheduledTask run(
++        final Plugin plugin,
++        final ServerLevel world,
++        final int chunkX,
++        final int chunkZ,
++        final Consumer<ScheduledTask> task
++    ) {
++        return runDelayed(plugin, world, chunkX, chunkZ, task, 1L);
++    }
++
++    public static ScheduledTask runDelayed(
++        final Plugin plugin,
++        final ServerLevel world,
++        final int chunkX,
++        final int chunkZ,
++        final Consumer<ScheduledTask> task,
++        final long delayTicks
++    ) {
++        Objects.requireNonNull(plugin, "Plugin may not be null");
++        Objects.requireNonNull(world, "World may not be null");
++        Objects.requireNonNull(task, "Task may not be null");
++        if (delayTicks <= 0L) {
++            throw new IllegalArgumentException("Delay ticks may not be <= 0");
++        }
++        if (!plugin.isEnabled()) {
++            throw new IllegalPluginAccessException("Plugin attempted to register task while disabled");
++        }
++
++        final WorldSchedulerState state = stateFor(world);
++        final RegionScheduledTask scheduled = new RegionScheduledTask(state, plugin, chunkX, chunkZ, -1L, task);
++        state.schedule(scheduled, delayTicks);
++        return scheduled;
++    }
++
++    public static ScheduledTask runAtFixedRate(
++        final Plugin plugin,
++        final ServerLevel world,
++        final int chunkX,
++        final int chunkZ,
++        final Consumer<ScheduledTask> task,
++        final long initialDelayTicks,
++        final long periodTicks
++    ) {
++        Objects.requireNonNull(plugin, "Plugin may not be null");
++        Objects.requireNonNull(world, "World may not be null");
++        Objects.requireNonNull(task, "Task may not be null");
++        if (initialDelayTicks <= 0L) {
++            throw new IllegalArgumentException("Initial delay ticks may not be <= 0");
++        }
++        if (periodTicks <= 0L) {
++            throw new IllegalArgumentException("Period ticks may not be <= 0");
++        }
++        if (!plugin.isEnabled()) {
++            throw new IllegalPluginAccessException("Plugin attempted to register task while disabled");
++        }
++
++        final WorldSchedulerState state = stateFor(world);
++        final RegionScheduledTask scheduled = new RegionScheduledTask(state, plugin, chunkX, chunkZ, periodTicks, task);
++        state.schedule(scheduled, initialDelayTicks);
++        return scheduled;
++    }
++
++    private static final class WorldSchedulerState {
++
++        private final ServerLevel world;
++        private final Object lock = new Object();
++        private final Map<Long, List<RegionScheduledTask>> tasksByDeadline = new HashMap<>();
++        private final ArrayDeque<CrossRegionMessage> mailbox = new ArrayDeque<>();
++        private long tickCount;
++        private long scheduledTaskCount;
++        private long executedTaskCount;
++        private long deferredTaskCount;
++        private long cancelledTaskCount;
++        private long parallelTickCount;
++        private long schedulerBudgetSkipCount;
++        private long postedMessageCount;
++        private long deliveredMessageCount;
++        private long deferredMessageCount;
++        private long droppedMessageCount;
++        private long parallelMailboxDrainCount;
++        private long mailboxBudgetSkipCount;
++
++        private WorldSchedulerState(final ServerLevel world) {
++            this.world = world;
++        }
++
++        private void schedule(final RegionScheduledTask task, final long delayTicks) {
++            {
++                this.tasksByDeadline.computeIfAbsent(this.tickCount + delayTicks, ignored -> new ArrayList<>()).add(task);
++                ++this.scheduledTaskCount;
++            }
++        }
++
++        private void tickScheduler() {
++            final List<RegionScheduledTask> toRun;
++            {
++                ++this.tickCount;
++                toRun = this.tasksByDeadline.remove(this.tickCount);
++            }
++            if (toRun == null || toRun.isEmpty()) {
++                return;
++            }
++
++            final List<RegionScheduledTask> budgeted = this.applySchedulerBudget(toRun);
++            if (budgeted.isEmpty()) {
++                return;
++            }
++
++            if (STRICT_RUNTIME_MODE) {
++                this.tickStrict(budgeted);
++                return;
++            }
++
++            if (this.tryTickParallel(budgeted)) {
++                return;
++            }
++
++            for (int i = 0, len = budgeted.size(); i < len; ++i) {
++                this.runScheduledTask(budgeted.get(i));
++            }
++        }
++
++        private List<RegionScheduledTask> applySchedulerBudget(final List<RegionScheduledTask> toRun) {
++            final int schedulerBudget = getAdaptiveSchedulerBudget(toRun.size());
++            if (toRun.size() <= schedulerBudget) {
++                return toRun;
++            }
++
++            SCHEDULER_BUDGET_SKIPS.getAndIncrement();
++            {
++                ++this.schedulerBudgetSkipCount;
++            }
++            recordDiagnostic(
++                DiagnosticType.SCHEDULER_BUDGET_EXHAUSTED,
++                this.world,
++                Integer.MIN_VALUE,
++                Integer.MIN_VALUE,
++                Integer.MAX_VALUE,
++                Integer.MAX_VALUE,
++                "Scheduler budget exhausted: due=" + toRun.size()
++                    + ", budget=" + schedulerBudget
++                    + ", baseBudget=" + SCHEDULER_MAX_TASKS_PER_TICK
++            );
++
++            final List<RegionScheduledTask> budgeted = new ArrayList<>(schedulerBudget);
++            for (int i = 0, len = toRun.size(); i < len; ++i) {
++                final RegionScheduledTask task = toRun.get(i);
++                if (i < schedulerBudget) {
++                    budgeted.add(task);
++                } else {
++                    this.schedule(task, 1L);
++                }
++            }
++            return budgeted;
++        }
++
++        private void tickStrict(final List<RegionScheduledTask> toRun) {
++            final List<TaskBucket> buckets = this.bucketTasks(toRun);
++            if (buckets.isEmpty()) {
++                return;
++            }
++
++            if (PARALLEL_SCHEDULER_ENABLED && buckets.size() > 1) {
++                this.recordParallelDispatch(buckets.size());
++                final List<CompletableFuture<Void>> futures = new ArrayList<>(buckets.size());
++                for (final TaskBucket bucket : buckets) {
++                    futures.add(CompletableFuture.runAsync(bucket::run, REGION_SCHEDULER_EXECUTOR));
++                }
++                CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
++                return;
++            }
++
++            for (int i = 0, len = buckets.size(); i < len; ++i) {
++                buckets.get(i).run();
++            }
++        }
++
++        private void drainMailbox() {
++            final List<CrossRegionMessage> toDeliver = this.collectMailboxBudgeted();
++            if (toDeliver.isEmpty()) {
++                return;
++            }
++
++            if (STRICT_RUNTIME_MODE) {
++                this.drainMailboxStrict(toDeliver);
++                return;
++            }
++
++            if (this.tryDrainMailboxParallel(toDeliver)) {
++                return;
++            }
++
++            for (int i = 0, len = toDeliver.size(); i < len; ++i) {
++                this.runMailboxMessage(toDeliver.get(i));
++            }
++        }
++
++        private List<CrossRegionMessage> collectMailboxBudgeted() {
++            {
++                final int available = this.mailbox.size();
++                if (available == 0) {
++                    return List.of();
++                }
++
++                final int mailboxBudget = getAdaptiveMailboxBudget(available);
++                final int budgeted = Math.min(available, mailboxBudget);
++                final List<CrossRegionMessage> toDeliver = new ArrayList<>(budgeted);
++                for (int i = 0; i < budgeted; ++i) {
++                    final CrossRegionMessage message = this.mailbox.pollFirst();
++                    if (message == null) {
++                        break;
++                    }
++                    toDeliver.add(message);
++                }
++
++                if (available > budgeted) {
++                    MAILBOX_BUDGET_SKIPS.getAndIncrement();
++                    ++this.mailboxBudgetSkipCount;
++                    recordDiagnostic(
++                        DiagnosticType.MAILBOX_BUDGET_EXHAUSTED,
++                        this.world,
++                        Integer.MIN_VALUE,
++                        Integer.MIN_VALUE,
++                        Integer.MAX_VALUE,
++                        Integer.MAX_VALUE,
++                        "Mailbox budget exhausted: queued=" + available
++                            + ", budget=" + mailboxBudget
++                            + ", baseBudget=" + MAILBOX_MAX_MESSAGES_PER_TICK
++                    );
++                }
++                return toDeliver;
++            }
++        }
++
++        private void drainMailboxStrict(final List<CrossRegionMessage> toDeliver) {
++            final List<MessageBucket> buckets = this.bucketMessages(toDeliver);
++            if (buckets.isEmpty()) {
++                return;
++            }
++
++            if (PARALLEL_MAILBOX_ENABLED && toDeliver.size() >= PARALLEL_MAILBOX_MIN_MESSAGES && buckets.size() > 1) {
++                this.recordParallelMailboxDrain(buckets.size());
++                final List<CompletableFuture<Void>> futures = new ArrayList<>(buckets.size());
++                for (final MessageBucket bucket : buckets) {
++                    futures.add(CompletableFuture.runAsync(bucket::run, REGION_SCHEDULER_EXECUTOR));
++                }
++                CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
++                return;
++            }
++
++            for (int i = 0, len = buckets.size(); i < len; ++i) {
++                buckets.get(i).run();
++            }
++        }
++
++        private boolean tryDrainMailboxParallel(final List<CrossRegionMessage> toDeliver) {
++            if (!PARALLEL_MAILBOX_ENABLED || toDeliver.size() < PARALLEL_MAILBOX_MIN_MESSAGES) {
++                return false;
++            }
++
++            final List<MessageBucket> buckets = this.bucketMessages(toDeliver);
++            if (buckets.size() <= 1) {
++                return false;
++            }
++
++            this.recordParallelMailboxDrain(buckets.size());
++
++            final List<CompletableFuture<Void>> futures = new ArrayList<>(buckets.size());
++            for (final MessageBucket bucket : buckets) {
++                futures.add(CompletableFuture.runAsync(bucket::run, REGION_SCHEDULER_EXECUTOR));
++            }
++
++            CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
++            return true;
++        }
++
++        private boolean tryTickParallel(final List<RegionScheduledTask> toRun) {
++            if (!PARALLEL_SCHEDULER_ENABLED || toRun.size() < PARALLEL_SCHEDULER_MIN_TASKS) {
++                return false;
++            }
++
++            final List<TaskBucket> buckets = this.bucketTasks(toRun);
++            if (buckets.size() <= 1) {
++                return false;
++            }
++
++            this.recordParallelDispatch(buckets.size());
++
++            final List<CompletableFuture<Void>> futures = new ArrayList<>(buckets.size());
++            for (final TaskBucket bucket : buckets) {
++                futures.add(CompletableFuture.runAsync(bucket::run, REGION_SCHEDULER_EXECUTOR));
++            }
++
++            CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
++            return true;
++        }
++
++        private List<TaskBucket> bucketTasks(final List<RegionScheduledTask> toRun) {
++            final Map<Long, TaskBucket> bucketMap = new HashMap<>();
++            for (int i = 0, len = toRun.size(); i < len; ++i) {
++                final RegionScheduledTask task = toRun.get(i);
++                final long bucketKey = regionBucketKey(task.chunkX, task.chunkZ);
++                bucketMap.computeIfAbsent(bucketKey, ignored -> new TaskBucket(this.world)).add(task);
++            }
++
++            final List<Map.Entry<Long, TaskBucket>> entries = new ArrayList<>(bucketMap.entrySet());
++            entries.sort(Map.Entry.comparingByKey());
++
++            final List<TaskBucket> buckets = new ArrayList<>(entries.size());
++            for (int i = 0, len = entries.size(); i < len; ++i) {
++                buckets.add(entries.get(i).getValue());
++            }
++            return buckets;
++        }
++
++        private List<MessageBucket> bucketMessages(final List<CrossRegionMessage> messages) {
++            final Map<Long, MessageBucket> bucketMap = new HashMap<>();
++            for (int i = 0, len = messages.size(); i < len; ++i) {
++                final CrossRegionMessage message = messages.get(i);
++                final long bucketKey = regionBucketKey(message.targetChunkX(), message.targetChunkZ());
++                bucketMap.computeIfAbsent(bucketKey, ignored -> new MessageBucket(this.world)).add(message);
++            }
++
++            final List<Map.Entry<Long, MessageBucket>> entries = new ArrayList<>(bucketMap.entrySet());
++            entries.sort(Map.Entry.comparingByKey());
++
++            final List<MessageBucket> buckets = new ArrayList<>(entries.size());
++            for (int i = 0, len = entries.size(); i < len; ++i) {
++                buckets.add(entries.get(i).getValue());
++            }
++            return buckets;
++        }
++
++        private void recordParallelDispatch(final int bucketCount) {
++            SCHEDULER_PARALLEL_TICKS.getAndIncrement();
++            SCHEDULER_PARALLEL_BUCKETS.getAndAdd(bucketCount);
++            {
++                ++this.parallelTickCount;
++            }
++        }
++
++        private void recordParallelMailboxDrain(final int bucketCount) {
++            MAILBOX_PARALLEL_DRAINS.getAndIncrement();
++            MAILBOX_PARALLEL_BUCKETS.getAndAdd(bucketCount);
++            {
++                ++this.parallelMailboxDrainCount;
++            }
++        }
++
++        private void enqueueMailbox(final CrossRegionMessage message) {
++            {
++                this.enqueueMailboxInternal(message, true);
++            }
++        }
++
++        private void enqueueMailboxInternal(final CrossRegionMessage message, final boolean countAsPosted) {
++            if (this.mailbox.size() >= MAILBOX_MAX_QUEUED_MESSAGES) {
++                final CrossRegionMessage dropped = this.mailbox.pollFirst();
++                ++this.droppedMessageCount;
++                MAILBOX_MESSAGES_DROPPED.getAndIncrement();
++                if (dropped != null) {
++                    incrementTypeCounter(MAILBOX_DROPPED_BY_TYPE, dropped.messageType());
++                }
++                recordDiagnostic(
++                    DiagnosticType.MAILBOX_QUEUE_OVERFLOW,
++                    this.world,
++                    message.targetChunkX(),
++                    message.targetChunkZ(),
++                    message.targetChunkX(),
++                    message.targetChunkZ(),
++                    "Mailbox queue overflow, dropping oldest message"
++                );
++            }
++            this.mailbox.addLast(message);
++            if (countAsPosted) {
++                ++this.postedMessageCount;
++                MAILBOX_MESSAGES_POSTED.getAndIncrement();
++                incrementTypeCounter(MAILBOX_POSTED_BY_TYPE, message.messageType());
++            }
++        }
++
++        private void runScheduledTask(final RegionScheduledTask task) {
++            if (isCurrentThreadOwnerNoFailure(this.world, task.chunkX, task.chunkZ)) {
++                SCHEDULER_TASKS_EXECUTED.getAndIncrement();
++                {
++                    ++this.executedTaskCount;
++                }
++                task.runNow();
++                return;
++            }
++
++            this.deferTask(task, "No owner context available for scheduled task");
++        }
++
++        private void runMailboxMessage(final CrossRegionMessage message) {
++            final Plugin plugin = message.plugin();
++            if (plugin != null && !plugin.isEnabled()) {
++                this.dropMailboxMessage(message, "Owning plugin is disabled");
++                return;
++            }
++            if (isCurrentThreadOwnerNoFailure(this.world, message.targetChunkX(), message.targetChunkZ())) {
++                this.deliverMailboxMessage(message);
++                return;
++            }
++
++            this.deferMailboxMessage(message, "No owner context available for mailbox message");
++        }
++
++        private void deliverMailboxMessage(final CrossRegionMessage message) {
++            try {
++                message.action().run();
++            } catch (final Throwable throwable) {
++                final Plugin plugin = message.plugin();
++                if (plugin != null) {
++                    plugin.getLogger().log(
++                        java.util.logging.Level.WARNING,
++                        "Cross-region mailbox message '" + message.describeType() + "' generated an exception",
++                        throwable
++                    );
++                } else {
++                    recordDiagnostic(
++                        DiagnosticType.MAILBOX_MESSAGE_DROPPED,
++                        this.world,
++                        message.targetChunkX(),
++                        message.targetChunkZ(),
++                        message.targetChunkX(),
++                        message.targetChunkZ(),
++                        "Internal mailbox message threw exception: " + throwable
++                    );
++                }
++            } finally {
++                MAILBOX_MESSAGES_DELIVERED.getAndIncrement();
++                incrementTypeCounter(MAILBOX_DELIVERED_BY_TYPE, message.messageType());
++                {
++                    ++this.deliveredMessageCount;
++                }
++            }
++        }
++
++        private void deferMailboxMessage(final CrossRegionMessage message, final String detail) {
++            MAILBOX_MESSAGES_DEFERRED.getAndIncrement();
++            incrementTypeCounter(MAILBOX_DEFERRED_BY_TYPE, message.messageType());
++            {
++                ++this.deferredMessageCount;
++                this.enqueueMailboxInternal(message, false);
++            }
++            recordDiagnostic(
++                DiagnosticType.MAILBOX_MESSAGE_DEFERRED,
++                this.world,
++                message.targetChunkX(),
++                message.targetChunkZ(),
++                message.targetChunkX(),
++                message.targetChunkZ(),
++                detail + ", type=" + message.describeType()
++            );
++        }
++
++        private void dropMailboxMessage(final CrossRegionMessage message, final String detail) {
++            MAILBOX_MESSAGES_DROPPED.getAndIncrement();
++            incrementTypeCounter(MAILBOX_DROPPED_BY_TYPE, message.messageType());
++            {
++                ++this.droppedMessageCount;
++            }
++            recordDiagnostic(
++                DiagnosticType.MAILBOX_MESSAGE_DROPPED,
++                this.world,
++                message.targetChunkX(),
++                message.targetChunkZ(),
++                message.targetChunkX(),
++                message.targetChunkZ(),
++                detail + ", type=" + message.describeType()
++            );
++        }
++
++        private void deferTask(final RegionScheduledTask task, final String detail) {
++            SCHEDULER_TASKS_DEFERRED.getAndIncrement();
++            {
++                ++this.deferredTaskCount;
++            }
++            recordDiagnostic(
++                DiagnosticType.SCHEDULER_TASK_DEFERRED,
++                this.world,
++                task.chunkX,
++                task.chunkZ,
++                task.chunkX,
++                task.chunkZ,
++                detail
++            );
++            this.schedule(task, 1L);
++        }
++
++        private void cancelTasks(final Plugin plugin) {
++            {
++                for (final List<RegionScheduledTask> tasks : this.tasksByDeadline.values()) {
++                    for (int i = 0, len = tasks.size(); i < len; ++i) {
++                        final RegionScheduledTask task = tasks.get(i);
++                        if (task.plugin == plugin) {
++                            final ScheduledTask.CancelledState cancelled = task.cancel();
++                            if (cancelled == ScheduledTask.CancelledState.CANCELLED_BY_CALLER
++                                || cancelled == ScheduledTask.CancelledState.NEXT_RUNS_CANCELLED) {
++                                ++this.cancelledTaskCount;
++                            }
++                        }
++                    }
++                }
++
++                for (final Iterator<CrossRegionMessage> iterator = this.mailbox.iterator(); iterator.hasNext(); ) {
++                    final CrossRegionMessage message = iterator.next();
++                    if (message.plugin() == plugin) {
++                        iterator.remove();
++                        ++this.droppedMessageCount;
++                        MAILBOX_MESSAGES_DROPPED.getAndIncrement();
++                        incrementTypeCounter(MAILBOX_DROPPED_BY_TYPE, message.messageType());
++                    }
++                }
++            }
++        }
++
++        private WorldSchedulerDiagnostics snapshotDiagnostics() {
++            {
++                long queuedTasks = 0L;
++                for (final List<RegionScheduledTask> tasks : this.tasksByDeadline.values()) {
++                    queuedTasks += tasks.size();
++                }
++                final long queuedMailboxMessages = this.mailbox.size();
++                return new WorldSchedulerDiagnostics(
++                    worldId(this.world),
++                    this.tickCount,
++                    queuedTasks,
++                    this.scheduledTaskCount,
++                    this.executedTaskCount,
++                    this.deferredTaskCount,
++                    this.cancelledTaskCount,
++                    this.parallelTickCount,
++                    this.schedulerBudgetSkipCount,
++                    queuedMailboxMessages,
++                    this.postedMessageCount,
++                    this.deliveredMessageCount,
++                    this.deferredMessageCount,
++                    this.droppedMessageCount,
++                    this.parallelMailboxDrainCount,
++                    this.mailboxBudgetSkipCount
++                );
++            }
++        }
++
++        private static final class TaskBucket {
++
++            private final ServerLevel world;
++            private final List<RegionScheduledTask> tasks = new ArrayList<>();
++            private int minChunkX = Integer.MAX_VALUE;
++            private int minChunkZ = Integer.MAX_VALUE;
++            private int maxChunkX = Integer.MIN_VALUE;
++            private int maxChunkZ = Integer.MIN_VALUE;
++
++            private TaskBucket(final ServerLevel world) {
++                this.world = world;
++            }
++
++            private void add(final RegionScheduledTask task) {
++                this.tasks.add(task);
++                this.minChunkX = Math.min(this.minChunkX, task.chunkX);
++                this.minChunkZ = Math.min(this.minChunkZ, task.chunkZ);
++                this.maxChunkX = Math.max(this.maxChunkX, task.chunkX);
++                this.maxChunkZ = Math.max(this.maxChunkZ, task.chunkZ);
++            }
++
++            private void run() {
++                final RegionContext context;
++                try {
++                    context = pushRegionContext(
++                        this.world,
++                        this.minChunkX,
++                        this.minChunkZ,
++                        this.maxChunkX,
++                        this.maxChunkZ
++                    );
++                } catch (final IllegalStateException ex) {
++                    for (int i = 0, len = this.tasks.size(); i < len; ++i) {
++                        this.tasks.get(i).owner.deferTask(this.tasks.get(i), "Bucket claim failed: " + ex.getMessage());
++                    }
++                    return;
++                }
++                try {
++                    for (int i = 0, len = this.tasks.size(); i < len; ++i) {
++                        this.tasks.get(i).owner.runScheduledTask(this.tasks.get(i));
++                    }
++                } finally {
++                    popContext(context);
++                }
++            }
++        }
++
++        private static final class MessageBucket {
++
++            private final ServerLevel world;
++            private final List<CrossRegionMessage> messages = new ArrayList<>();
++            private int minChunkX = Integer.MAX_VALUE;
++            private int minChunkZ = Integer.MAX_VALUE;
++            private int maxChunkX = Integer.MIN_VALUE;
++            private int maxChunkZ = Integer.MIN_VALUE;
++
++            private MessageBucket(final ServerLevel world) {
++                this.world = world;
++            }
++
++            private void add(final CrossRegionMessage message) {
++                this.messages.add(message);
++                this.minChunkX = Math.min(this.minChunkX, message.targetChunkX());
++                this.minChunkZ = Math.min(this.minChunkZ, message.targetChunkZ());
++                this.maxChunkX = Math.max(this.maxChunkX, message.targetChunkX());
++                this.maxChunkZ = Math.max(this.maxChunkZ, message.targetChunkZ());
++            }
++
++            private void run() {
++                final RegionContext context;
++                try {
++                    context = pushRegionContext(
++                        this.world,
++                        this.minChunkX,
++                        this.minChunkZ,
++                        this.maxChunkX,
++                        this.maxChunkZ
++                    );
++                } catch (final IllegalStateException ex) {
++                    for (int i = 0, len = this.messages.size(); i < len; ++i) {
++                        final CrossRegionMessage message = this.messages.get(i);
++                        message.owner().deferMailboxMessage(message, "Mailbox bucket claim failed: " + ex.getMessage());
++                    }
++                    return;
++                }
++
++                try {
++                    for (int i = 0, len = this.messages.size(); i < len; ++i) {
++                        final CrossRegionMessage message = this.messages.get(i);
++                        message.owner().runMailboxMessage(message);
++                    }
++                } finally {
++                    popContext(context);
++                }
++            }
++        }
++    }
++
++    private static final record CrossRegionMessage(
++        @Nullable Plugin plugin,
++        int sourceChunkX,
++        int sourceChunkZ,
++        int targetChunkX,
++        int targetChunkZ,
++        CrossRegionMessageType messageType,
++        String messageDetail,
++        Runnable action,
++        WorldSchedulerState owner
++    ) {
++
++        private String describeType() {
++            return this.messageType.name() + ":" + this.messageDetail;
++        }
++    }
++
++    private static final class RegionScheduledTask implements ScheduledTask {
++
++        private static final int STATE_IDLE = 0;
++        private static final int STATE_RUNNING = 1;
++        private static final int STATE_CANCELLED_RUNNING = 2;
++        private static final int STATE_FINISHED = 3;
++        private static final int STATE_CANCELLED = 4;
++
++        private final WorldSchedulerState owner;
++        private final Plugin plugin;
++        private final int chunkX;
++        private final int chunkZ;
++        private final long repeatDelay;
++        private @Nullable Consumer<ScheduledTask> run;
++        private int state = STATE_IDLE;
++
++        private RegionScheduledTask(
++            final WorldSchedulerState owner,
++            final Plugin plugin,
++            final int chunkX,
++            final int chunkZ,
++            final long repeatDelay,
++            final Consumer<ScheduledTask> run
++        ) {
++            this.owner = owner;
++            this.plugin = plugin;
++            this.chunkX = chunkX;
++            this.chunkZ = chunkZ;
++            this.repeatDelay = repeatDelay;
++            this.run = run;
++        }
++
++        private void runNow() {
++            final Consumer<ScheduledTask> callback;
++            {
++                if (this.state != STATE_IDLE) {
++                    return;
++                }
++                this.state = STATE_RUNNING;
++                callback = this.run;
++            }
++
++            if (callback == null || !this.plugin.isEnabled()) {
++                {
++                    this.state = STATE_CANCELLED;
++                    this.run = null;
++                }
++                return;
++            }
++
++            try {
++                callback.accept(this);
++            } catch (final Throwable throwable) {
++                this.plugin.getLogger().log(java.util.logging.Level.WARNING, "Region task for " + this.plugin.getDescription().getFullName() + " generated an exception", throwable);
++            } finally {
++                boolean reschedule = false;
++                {
++                    if (this.repeatDelay > 0L && this.state == STATE_RUNNING && this.plugin.isEnabled()) {
++                        this.state = STATE_IDLE;
++                        reschedule = true;
++                    } else if (this.state == STATE_CANCELLED_RUNNING) {
++                        this.state = STATE_CANCELLED;
++                        this.run = null;
++                    } else if (this.state == STATE_RUNNING) {
++                        this.state = STATE_FINISHED;
++                        this.run = null;
++                    }
++                }
++
++                if (reschedule) {
++                    this.owner.schedule(this, this.repeatDelay);
++                }
++            }
++        }
++
++        @Override
++        public Plugin getOwningPlugin() {
++            return this.plugin;
++        }
++
++        @Override
++        public boolean isRepeatingTask() {
++            return this.repeatDelay > 0L;
++        }
++
++        @Override
++        public CancelledState cancel() {
++            return switch (this.state) {
++                case STATE_IDLE -> {
++                    this.state = STATE_CANCELLED;
++                    this.run = null;
++                    yield CancelledState.CANCELLED_BY_CALLER;
++                }
++                case STATE_RUNNING -> {
++                    if (this.repeatDelay > 0L) {
++                        this.state = STATE_CANCELLED_RUNNING;
++                        yield CancelledState.NEXT_RUNS_CANCELLED;
++                    }
++                    yield CancelledState.RUNNING;
++                }
++                case STATE_CANCELLED_RUNNING -> CancelledState.NEXT_RUNS_CANCELLED_ALREADY;
++                case STATE_FINISHED -> CancelledState.ALREADY_EXECUTED;
++                case STATE_CANCELLED -> CancelledState.CANCELLED_ALREADY;
++                default -> throw new IllegalStateException("Unknown task state: " + this.state);
++            };
++        }
++
++        @Override
++        public ExecutionState getExecutionState() {
++            return switch (this.state) {
++                case STATE_IDLE -> ExecutionState.IDLE;
++                case STATE_RUNNING -> ExecutionState.RUNNING;
++                case STATE_CANCELLED_RUNNING -> ExecutionState.CANCELLED_RUNNING;
++                case STATE_FINISHED -> ExecutionState.FINISHED;
++                case STATE_CANCELLED -> ExecutionState.CANCELLED;
++                default -> throw new IllegalStateException("Unknown task state: " + this.state);
++            };
++        }
++    }
++
++    private static final class RegionSchedulerThreadFactory implements ThreadFactory {
++
++        private final AtomicInteger nextId = new AtomicInteger(1);
++
++        @Override
++        public Thread newThread(final Runnable runnable) {
++            final TickThread thread = new TickThread(runnable, "Region scheduler thread #" + this.nextId.getAndIncrement());
++            thread.setDaemon(true);
++            thread.setPriority(Thread.NORM_PRIORITY + 1);
++            return thread;
++        }
++    }
++
++    public enum CrossRegionMessageType {
++        ENTITY_TRANSFER,
++        BOUNDARY_BLOCK_UPDATE,
++        TICKET_DELTA,
++        PLUGIN_TASK,
++        INTERNAL
++    }
++
++    public enum DiagnosticType {
++        CONFIGURATION_WARNING,
++        OWNERSHIP_FAILURE,
++        LEASE_CLAIM_FAILURE,
++        CONTEXT_STACK_UNBALANCED,
++        SCHEDULER_BUDGET_EXHAUSTED,
++        SCHEDULER_TASK_DEFERRED,
++        MAILBOX_BUDGET_EXHAUSTED,
++        MAILBOX_QUEUE_OVERFLOW,
++        MAILBOX_MESSAGE_DEFERRED,
++        MAILBOX_MESSAGE_DROPPED,
++        PLUGIN_CONTEXT_VIOLATION
++    }
++
++    public static final record RuntimeDiagnostics(
++        boolean strictMode,
++        long ownershipChecks,
++        long ownershipFailures,
++        long leaseClaimFailures,
++        long schedulerTasksExecuted,
++        long schedulerTasksDeferred,
++        long schedulerParallelTicks,
++        long schedulerParallelBuckets,
++        long schedulerBudgetSkips,
++        long mailboxMessagesPosted,
++        long mailboxMessagesDelivered,
++        long mailboxMessagesDeferred,
++        long mailboxMessagesDropped,
++        long mailboxParallelDrains,
++        long mailboxParallelBuckets,
++        long mailboxBudgetSkips,
++        long simulationBatchTasks,
++        long simulationBatchOperations,
++        long simulationSerialFallbacks,
++        long simulationSerialOperations,
++        Map<CrossRegionMessageType, MailboxTypeDiagnostics> mailboxTypeDiagnostics,
++        RegionRuntime.RuntimeDiagnostics regionRuntime,
++        List<WorldSchedulerDiagnostics> schedulerWorlds,
++        List<DiagnosticEvent> recentEvents
++    ) {
++    }
++
++    public static final record MailboxTypeDiagnostics(
++        long posted,
++        long delivered,
++        long deferred,
++        long dropped
++    ) {
++    }
++
++    public static final record WorldSchedulerDiagnostics(
++        String worldId,
++        long tickCount,
++        long queuedTasks,
++        long scheduledTasks,
++        long executedTasks,
++        long deferredTasks,
++        long cancelledTasks,
++        long parallelTicks,
++        long schedulerBudgetSkips,
++        long queuedMailboxMessages,
++        long postedMailboxMessages,
++        long deliveredMailboxMessages,
++        long deferredMailboxMessages,
++        long droppedMailboxMessages,
++        long parallelMailboxDrains,
++        long mailboxBudgetSkips
++    ) {
++    }
++
++    public static final record DiagnosticEvent(
++        long sequence,
++        long nanoTime,
++        String threadName,
++        long threadId,
++        DiagnosticType type,
++        String worldId,
++        int minChunkX,
++        int minChunkZ,
++        int maxChunkX,
++        int maxChunkZ,
++        String detail
++    ) {
++    }
++
++    public static final record RegionBoundTask(
++        int chunkX,
++        int chunkZ,
++        int minChunkX,
++        int minChunkZ,
++        int maxChunkX,
++        int maxChunkZ,
++        Runnable task
++    ) {
++        public RegionBoundTask(final int chunkX, final int chunkZ, final Runnable task) {
++            this(chunkX, chunkZ, chunkX, chunkZ, chunkX, chunkZ, task);
++        }
++
++        public RegionBoundTask {
++            Objects.requireNonNull(task, "Task may not be null");
++            if (maxChunkX < minChunkX || maxChunkZ < minChunkZ) {
++                throw new IllegalArgumentException(
++                    "Invalid region bounds for task: ["
++                        + minChunkX + "," + minChunkZ + " -> " + maxChunkX + "," + maxChunkZ + "]"
++                );
++            }
++            if (chunkX < minChunkX || chunkX > maxChunkX || chunkZ < minChunkZ || chunkZ > maxChunkZ) {
++                throw new IllegalArgumentException(
++                    "Dispatch chunk (" + chunkX + "," + chunkZ + ") is outside task bounds ["
++                        + minChunkX + "," + minChunkZ + " -> " + maxChunkX + "," + maxChunkZ + "]"
++                );
++            }
++        }
++    }
++
++    public static final record RegionContext(
++        ServerLevel world,
++        int minChunkX,
++        int minChunkZ,
++        int maxChunkX,
++        int maxChunkZ,
++        @Nullable RegionContext previous,
++        long leaseId,
++        long ownerThreadId
++    ) {
++
++        public boolean contains(final int chunkX, final int chunkZ) {
++            return chunkX >= this.minChunkX && chunkX <= this.maxChunkX
++                && chunkZ >= this.minChunkZ && chunkZ <= this.maxChunkZ;
++        }
++    }
++
++    private static final class RegionBoundBucket {
++
++        private final ServerLevel world;
++        private final List<RegionBoundTask> tasks = new ArrayList<>();
++        private int minChunkX = Integer.MAX_VALUE;
++        private int minChunkZ = Integer.MAX_VALUE;
++        private int maxChunkX = Integer.MIN_VALUE;
++        private int maxChunkZ = Integer.MIN_VALUE;
++
++        private RegionBoundBucket(final ServerLevel world) {
++            this.world = world;
++        }
++
++        private void add(final RegionBoundTask task) {
++            this.tasks.add(task);
++            this.minChunkX = Math.min(this.minChunkX, task.minChunkX());
++            this.minChunkZ = Math.min(this.minChunkZ, task.minChunkZ());
++            this.maxChunkX = Math.max(this.maxChunkX, task.maxChunkX());
++            this.maxChunkZ = Math.max(this.maxChunkZ, task.maxChunkZ());
++        }
++
++        private boolean intersects(final RegionBoundTask task) {
++            return this.minChunkX <= task.maxChunkX()
++                && this.maxChunkX >= task.minChunkX()
++                && this.minChunkZ <= task.maxChunkZ()
++                && this.maxChunkZ >= task.minChunkZ();
++        }
++
++        private boolean intersects(final RegionBoundBucket other) {
++            return this.minChunkX <= other.maxChunkX
++                && this.maxChunkX >= other.minChunkX
++                && this.minChunkZ <= other.maxChunkZ
++                && this.maxChunkZ >= other.minChunkZ;
++        }
++
++        private void absorb(final RegionBoundBucket other) {
++            this.tasks.addAll(other.tasks);
++            this.minChunkX = Math.min(this.minChunkX, other.minChunkX);
++            this.minChunkZ = Math.min(this.minChunkZ, other.minChunkZ);
++            this.maxChunkX = Math.max(this.maxChunkX, other.maxChunkX);
++            this.maxChunkZ = Math.max(this.maxChunkZ, other.maxChunkZ);
++        }
++
++        private int minChunkX() {
++            return this.minChunkX;
++        }
++
++        private int minChunkZ() {
++            return this.minChunkZ;
++        }
++
++        private int maxChunkX() {
++            return this.maxChunkX;
++        }
++
++        private int maxChunkZ() {
++            return this.maxChunkZ;
++        }
++
++        private void run(final String stageName) {
++            final RegionContext context;
++            try {
++                context = pushRegionContext(this.world, this.minChunkX, this.minChunkZ, this.maxChunkX, this.maxChunkZ);
++            } catch (final IllegalStateException ex) {
++                throw new IllegalStateException(
++                    "Failed to claim region context for stage '" + stageName + "' in world "
++                        + this.world.dimension().identifier() + " bounds ["
++                        + this.minChunkX + "," + this.minChunkZ + " -> " + this.maxChunkX + "," + this.maxChunkZ + "]",
++                    ex
++                );
++            }
++            try {
++                for (int i = 0, len = this.tasks.size(); i < len; ++i) {
++                    this.tasks.get(i).task().run();
++                }
++            } finally {
++                popContext(context);
++            }
++        }
++    }
++
++    private static final record ContextLeaseBounds(
++        int minChunkX,
++        int minChunkZ,
++        int maxChunkX,
++        int maxChunkZ
++    ) {
++    }
++}
+\ No newline at end of file
+diff --git a/net/minecraft/server/threading/runtime/DomainClock.java b/net/minecraft/server/threading/runtime/DomainClock.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3085e4ef68956803f401e30d7c4d56005fd2d7d7
+--- /dev/null
++++ b/net/minecraft/server/threading/runtime/DomainClock.java
+@@ -0,0 +1,23 @@
++package net.minecraft.server.threading.runtime;
++
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++
++public final class DomainClock {
++
++    private DomainClock() {
++    }
++
++    public static int currentServerTick(final MinecraftServer server) {
++        return server == null ? 0 : server.getTickCount();
++    }
++
++    public static int currentServerTick() {
++        return currentServerTick(MinecraftServer.getServer());
++    }
++
++    public static int currentWorldTick(final ServerLevel level) {
++        final long gameTime = level.getGameTime();
++        return (int)(gameTime ^ (gameTime >>> 32));
++    }
++}
+\ No newline at end of file
+diff --git a/net/minecraft/server/threading/runtime/ExecutionContextGate.java b/net/minecraft/server/threading/runtime/ExecutionContextGate.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..278aa225303b655a0fd746eda7167dc15bed4256
+--- /dev/null
++++ b/net/minecraft/server/threading/runtime/ExecutionContextGate.java
+@@ -0,0 +1,47 @@
++package net.minecraft.server.threading.runtime;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import net.minecraft.server.threading.TickRegions;
++import org.bukkit.Server;
++import org.jetbrains.annotations.NotNull;
++
++public final class ExecutionContextGate {
++
++    public enum ExecutionDomain {
++        PRIMARY,
++        REGION,
++        ASYNC
++    }
++
++    private ExecutionContextGate() {
++    }
++
++    public static boolean canRunSynchronousCallbacks(final @NotNull Server server) {
++        return server.isPrimaryThread() || (TickThread.isTickThread() && TickRegions.currentContext() != null);
++    }
++
++    public static ExecutionDomain currentDomain(final @NotNull Server server) {
++        if (server.isPrimaryThread()) {
++            return ExecutionDomain.PRIMARY;
++        }
++        if (TickThread.isTickThread()) {
++            return ExecutionDomain.REGION;
++        }
++        return ExecutionDomain.ASYNC;
++    }
++
++    public static String describe(final @NotNull Server server) {
++        final TickRegions.RegionContext context = TickRegions.currentContext();
++        final String contextDetail;
++        if (context == null) {
++            contextDetail = "none";
++        } else {
++            contextDetail = context.world().dimension().identifier() + "[" + context.minChunkX() + "," + context.minChunkZ()
++                + " -> " + context.maxChunkX() + "," + context.maxChunkZ() + "]";
++        }
++
++        return "domain=" + currentDomain(server)
++            + ", thread=" + Thread.currentThread().getName()
++            + ", regionContext=" + contextDetail;
++    }
++}
+\ No newline at end of file
+diff --git a/net/minecraft/server/threading/runtime/OwnershipRouter.java b/net/minecraft/server/threading/runtime/OwnershipRouter.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..dabd90e1056de80a93c2a1c81373040b648be4b7
+--- /dev/null
++++ b/net/minecraft/server/threading/runtime/OwnershipRouter.java
+@@ -0,0 +1,108 @@
++package net.minecraft.server.threading.runtime;
++
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.RejectedExecutionException;
++import java.util.function.Supplier;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.world.level.ChunkPos;
++
++public final class OwnershipRouter {
++
++    private OwnershipRouter() {
++    }
++
++    public static void dispatchToServer(final MinecraftServer server, final Runnable task) {
++        if (server == null || server.hasStopped()) {
++            return;
++        }
++        if (server.isSameThread()) {
++            task.run();
++            return;
++        }
++        server.execute(task);
++    }
++
++    public static CompletableFuture<Void> runOnServer(final MinecraftServer server, final Runnable task) {
++        return supplyOnServer(server, () -> {
++            task.run();
++            return null;
++        });
++    }
++
++    public static <T> CompletableFuture<T> supplyOnServer(final MinecraftServer server, final Supplier<T> supplier) {
++        if (server == null || server.hasStopped()) {
++            return CompletableFuture.failedFuture(new RejectedExecutionException("Server is unavailable"));
++        }
++        if (server.isSameThread()) {
++            try {
++                return CompletableFuture.completedFuture(supplier.get());
++            } catch (final Throwable throwable) {
++                return CompletableFuture.failedFuture(throwable);
++            }
++        }
++        final CompletableFuture<T> future = new CompletableFuture<>();
++        server.execute(() -> {
++            try {
++                future.complete(supplier.get());
++            } catch (final Throwable throwable) {
++                future.completeExceptionally(throwable);
++            }
++        });
++        return future;
++    }
++
++    public static void dispatchToLevel(
++        final ServerLevel level,
++        final int chunkX,
++        final int chunkZ,
++        final String operation,
++        final Runnable task
++    ) {
++        if (TickRegions.isCurrentThreadOwnerQuiet(level, chunkX, chunkZ)) {
++            task.run();
++            return;
++        }
++        TickRegions.sendCrossRegionMessage(
++            level,
++            chunkX,
++            chunkZ,
++            "ownership-router:" + operation,
++            task
++        );
++    }
++
++    public static CompletableFuture<Void> runOnLevel(
++        final ServerLevel level,
++        final int chunkX,
++        final int chunkZ,
++        final String operation,
++        final Runnable task
++    ) {
++        final CompletableFuture<Void> future = new CompletableFuture<>();
++        dispatchToLevel(level, chunkX, chunkZ, operation, () -> {
++            try {
++                task.run();
++                future.complete(null);
++            } catch (final Throwable throwable) {
++                future.completeExceptionally(throwable);
++            }
++        });
++        return future;
++    }
++
++    public static void dispatchToPlayer(final ServerPlayer player, final String operation, final Runnable task) {
++        if (player == null || player.hasDisconnected()) {
++            return;
++        }
++        final ServerLevel level = player.level();
++        final ChunkPos chunkPos = player.chunkPosition();
++        dispatchToLevel(level, chunkPos.x(), chunkPos.z(), "player-" + operation, () -> {
++            if (!player.hasDisconnected()) {
++                task.run();
++            }
++        });
++    }
++}
+\ No newline at end of file
+diff --git a/net/minecraft/server/threading/runtime/ThreadedRegionsCompatibility.java b/net/minecraft/server/threading/runtime/ThreadedRegionsCompatibility.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..248525325a0535487bb709355368552db837acbd
+--- /dev/null
++++ b/net/minecraft/server/threading/runtime/ThreadedRegionsCompatibility.java
+@@ -0,0 +1,79 @@
++package net.minecraft.server.threading.runtime;
++
++import com.mojang.logging.LogUtils;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import org.bukkit.Bukkit;
++import org.slf4j.Logger;
++
++public final class ThreadedRegionsCompatibility {
++
++    private static final Logger LOGGER = LogUtils.getLogger();
++    @FunctionalInterface
++    public interface RegionizedServerInitHook {
++        void fire();
++    }
++
++    private static volatile RegionizedServerInitHook regionizedServerInitHook = () -> {
++    };
++    private static volatile boolean globalSchedulerTickMethodResolved;
++    private static volatile Method globalSchedulerTickMethod;
++
++    private ThreadedRegionsCompatibility() {
++    }
++
++    public static void registerRegionizedServerInitHook(final RegionizedServerInitHook hook) {
++        regionizedServerInitHook = hook == null ? () -> {
++        } : hook;
++    }
++
++    public static void fireRegionizedServerInitEvent() {
++        try {
++            regionizedServerInitHook.fire();
++        } catch (final Throwable exception) {
++            LOGGER.error("Failed to fire RegionizedServerInitEvent", exception);
++        }
++    }
++
++    public static void tickGlobalRegionScheduler() {
++        final Object scheduler = Bukkit.getGlobalRegionScheduler();
++        if (scheduler == null) {
++            return;
++        }
++
++        final Method tickMethod = resolveGlobalSchedulerTickMethod(scheduler);
++        if (tickMethod == null) {
++            return;
++        }
++
++        try {
++            tickMethod.invoke(scheduler);
++        } catch (final InvocationTargetException exception) {
++            LOGGER.error("Global region scheduler tick invocation failed", exception.getCause());
++        } catch (final IllegalAccessException exception) {
++            LOGGER.error("Global region scheduler tick invocation failed", exception);
++        }
++    }
++
++    private static Method resolveGlobalSchedulerTickMethod(final Object scheduler) {
++        if (globalSchedulerTickMethodResolved) {
++            return globalSchedulerTickMethod;
++        }
++
++        synchronized (ThreadedRegionsCompatibility.class) {
++            if (globalSchedulerTickMethodResolved) {
++                return globalSchedulerTickMethod;
++            }
++            Method resolved = null;
++            try {
++                resolved = scheduler.getClass().getMethod("tick");
++                resolved.setAccessible(true);
++            } catch (final NoSuchMethodException ignored) {
++                // No runtime tick method available.
++            }
++            globalSchedulerTickMethod = resolved;
++            globalSchedulerTickMethodResolved = true;
++            return resolved;
++        }
++    }
++}
+\ No newline at end of file

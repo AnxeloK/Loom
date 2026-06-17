@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 2 Jun 2026 14:52:25 +0000
+Subject: [PATCH] Avoid emergency lane for observed-safe compat paths
+
+
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
+index 7e2271895b52d454465de32512bc2fd6c76a0144..b7d60f7ef15fc0eac51df7f6d5cc3942d53c92df 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
+@@ -152,7 +152,12 @@ public final class CompatibilityKernel {
+                 && routingDecision.route() == DispatchRoute.NATIVE_FAST_PATH) {
+                 return new InvocationPlan(InvocationPolicy.NATIVE, ExecutionLane.FAST_LANE, path, "max-compat preserved native fast path");
+             }
+-            return new InvocationPlan(InvocationPolicy.EMERGENCY_COMPATIBILITY, ExecutionLane.EMERGENCY_COMPATIBILITY_LANE, path, "max-compat policy");
++            if (requiresMaxCompatEmergency(profile, state)) {
++                return new InvocationPlan(InvocationPolicy.EMERGENCY_COMPATIBILITY, ExecutionLane.EMERGENCY_COMPATIBILITY_LANE, path, "max-compat degraded path");
++            }
++            final InvocationPolicy policy = this.policyFor(profile);
++            final ExecutionLane lane = laneFor(policy, routingDecision);
++            return new InvocationPlan(policy, lane, path, "max-compat observed-safe path: " + routingDecision.reason());
+         }
+ 
+         if (state == PluginCompatibilityProfile.State.FORCED_MAX_COMPAT) {
+@@ -200,6 +205,16 @@ public final class CompatibilityKernel {
+         };
+     }
+ 
++    private static boolean requiresMaxCompatEmergency(
++        final PluginCompatibilityProfile profile,
++        final PluginCompatibilityProfile.State state
++    ) {
++        return state == PluginCompatibilityProfile.State.FORCED_MAX_COMPAT
++            || state == PluginCompatibilityProfile.State.LEGACY_DEGRADED
++            || profile.mode() == PluginCompatibilityProfile.Mode.LEGACY_INTERNAL
++            || profile.mode() == PluginCompatibilityProfile.Mode.LEGACY_STRICT;
++    }
++
+     private static CompatibilityMode configuredMode() {
+         return LoomConfiguration.compatibilityMode();
+     }
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
+index 9c102025089ca76716a0eac28f9c8d7bfd38274b..8dd11b78741c672f1239c117c3dbe33aab1f9469 100644
+--- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
+@@ -51,7 +51,7 @@ class CompatibilityKernelRoutingTest {
+     }
+ 
+     @Test
+-    void compatibilityModeRoutesLegacyPathsToEmergencyLane() {
++    void compatibilityModeRoutesObservedSafeLegacyPathsToApartmentLane() {
+         LoomConfiguration.setModeForTesting(LoomConfiguration.Mode.COMPATIBILITY);
+ 
+         final CompatibilityKernel kernel = new CompatibilityKernel();
+@@ -60,6 +60,25 @@ class CompatibilityKernelRoutingTest {
+         final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
+         final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
+ 
++        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.APARTMENT, plan.policy());
++        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.APARTMENT_LANE, plan.lane());
++    }
++
++    @Test
++    void compatibilityModeKeepsDegradedPathsOnEmergencyLane() {
++        LoomConfiguration.setModeForTesting(LoomConfiguration.Mode.COMPATIBILITY);
++
++        final CompatibilityKernel kernel = new CompatibilityKernel();
++        final Plugin plugin = mockPlugin("LegacyNormal", "com.example.LegacyNormal", List.of(), List.of());
++        final RegisteredListener listener = listenerFor(plugin);
++        final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
++        final String path = CompatibilityKernel.pathFor(transaction, listener);
++        kernel.profileFor(plugin).noteForcedMaxCompat(path, "test forced path");
++
++        final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
++        final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
++
++        Assertions.assertEquals(path, plan.path());
+         Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.EMERGENCY_COMPATIBILITY, plan.policy());
+         Assertions.assertEquals(CompatibilityKernel.ExecutionLane.EMERGENCY_COMPATIBILITY_LANE, plan.lane());
+     }

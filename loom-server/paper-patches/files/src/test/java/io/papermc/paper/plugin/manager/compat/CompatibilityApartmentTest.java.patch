@@ -1,0 +1,79 @@
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
+@@ -1,0 +_,76 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.logging.Logger;
++import org.bukkit.event.Event;
++import org.bukkit.event.HandlerList;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.RegisteredListener;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class CompatibilityApartmentTest {
++
++    @Test
++    void enterIsNonBlockingAndReportsBusyLease() throws InterruptedException {
++        final Plugin plugin = mockPlugin("LegacyPlugin");
++        final CompatibilityApartment apartment = new CompatibilityApartment(plugin);
++        final CompatibilityTransaction transaction = transactionFor(plugin);
++
++        final AtomicReference<CompatibilityApartment.Scope> otherThreadScope = new AtomicReference<>();
++
++        try (CompatibilityApartment.Scope scope = apartment.enter(transaction, false)) {
++            Assertions.assertTrue(scope.acquired());
++
++            final Thread contender = new Thread(() -> otherThreadScope.set(apartment.enter(transaction, false)), "compat-apartment-contender");
++            contender.start();
++            contender.join();
++
++            final CompatibilityApartment.Scope contenderScope = otherThreadScope.get();
++            Assertions.assertNotNull(contenderScope, "contender scope should be captured");
++            Assertions.assertEquals(CompatibilityApartment.EnterResult.BUSY, contenderScope.result());
++            Assertions.assertNotNull(contenderScope.busyLease());
++            contenderScope.close();
++        }
++    }
++
++    private static CompatibilityTransaction transactionFor(final Plugin plugin) {
++        final DummyEvent event = new DummyEvent();
++        final RegisteredListener[] listeners = new RegisteredListener[0];
++        final EventSemanticIndex.EventSemantics semantics = new EventSemanticIndex().resolve(event, listeners);
++        return new CompatibilityTransaction(event, semantics);
++    }
++
++    private static Plugin mockPlugin(final String name) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn("com.example." + name);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
++
++    private static final class DummyEvent extends Event {
++        private static final HandlerList HANDLERS = new HandlerList();
++
++        @Override
++        public HandlerList getHandlers() {
++            return HANDLERS;
++        }
++
++        public static HandlerList getHandlerList() {
++            return HANDLERS;
++        }
++    }
++}

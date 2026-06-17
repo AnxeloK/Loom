@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 10 Jun 2026 20:45:00 +0000
+Subject: [PATCH] Reduce waypoint connection scan churn
+
+
+diff --git a/net/minecraft/server/waypoints/ServerWaypointManager.java b/net/minecraft/server/waypoints/ServerWaypointManager.java
+index 434f2870d64b1f5ba85338cbd9aff62feaea09f7..1524cc8dc50185c6db912c018a93404c72ef7293 100644
+--- a/net/minecraft/server/waypoints/ServerWaypointManager.java
++++ b/net/minecraft/server/waypoints/ServerWaypointManager.java
+@@ -41,15 +41,21 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     public void updateWaypoint(final WaypointTransmitter waypoint) {
+         if (!this.locatorBarEnabled) return; // Paper - optimize ServerWaypointManager with locator bar disabled
+         if (this.waypoints.contains(waypoint)) {
+-            Map<ServerPlayer, WaypointTransmitter.Connection> playerConnection = Tables.transpose(this.connections).row(waypoint);
+-            SetView<ServerPlayer> potentialPlayers = Sets.difference(this.players, playerConnection.keySet());
++            Map<ServerPlayer, WaypointTransmitter.Connection> playerConnection = this.connections.column(waypoint);
+ 
+             for (Entry<ServerPlayer, WaypointTransmitter.Connection> waypointConnection : ImmutableSet.copyOf(playerConnection.entrySet())) {
+                 this.updateConnection(waypointConnection.getKey(), waypoint, waypointConnection.getValue());
+             }
+ 
+-            for (ServerPlayer player : potentialPlayers) {
+-                this.createConnection(player, waypoint);
++            int expectedConnections = this.players.size();
++            if (waypoint instanceof ServerPlayer waypointPlayer && this.players.contains(waypointPlayer)) {
++                --expectedConnections;
++            }
++            if (playerConnection.size() < expectedConnections) {
++                SetView<ServerPlayer> potentialPlayers = Sets.difference(this.players, playerConnection.keySet());
++                for (ServerPlayer player : potentialPlayers) {
++                    this.createConnection(player, waypoint);
++                }
+             }
+         }
+     }
+@@ -78,14 +84,20 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     public void updatePlayer(final ServerPlayer player) {
+         if (!this.locatorBarEnabled) return; // Paper - optimize ServerWaypointManager with locator bar disabled
+         Map<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnections = this.connections.row(player);
+-        SetView<WaypointTransmitter> potentialWaypoints = Sets.difference(this.waypoints, waypointConnections.keySet());
+ 
+         for (Entry<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnection : ImmutableSet.copyOf(waypointConnections.entrySet())) {
+             this.updateConnection(player, waypointConnection.getKey(), waypointConnection.getValue());
+         }
+ 
+-        for (WaypointTransmitter waypoint : potentialWaypoints) {
+-            this.createConnection(player, waypoint);
++        int expectedConnections = this.waypoints.size();
++        if (this.waypoints.contains((WaypointTransmitter)player)) {
++            --expectedConnections;
++        }
++        if (waypointConnections.size() < expectedConnections) {
++            SetView<WaypointTransmitter> potentialWaypoints = Sets.difference(this.waypoints, waypointConnections.keySet());
++            for (WaypointTransmitter waypoint : potentialWaypoints) {
++                this.createConnection(player, waypoint);
++            }
+         }
+     }
+ 

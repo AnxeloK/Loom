@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 2 Jun 2026 00:52:28 +0000
+Subject: [PATCH] Leave tick thread headroom in performance mode
+
+
+diff --git a/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java b/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java
+index 5d7c6b10526473febce496ea27589c55150800c6..0f666660b8da4fde97d90bcc00f773050b5e4699 100644
+--- a/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java
++++ b/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java
+@@ -74,7 +74,7 @@ public final class MoonriseCommon {
+     }
+ 
+     static int loomPerformanceWorkerThreads(final int totalCores) {
+-        return Math.max(1, totalCores / 2);
++        return Math.max(1, totalCores / 3);
+     }
+ 
+     public static final long IO_QUEUE_HOLD_TIME = (long)(25.0e6); // 25ms
+diff --git a/src/test/java/ca/spottedleaf/moonrise/common/util/MoonriseCommonTest.java b/src/test/java/ca/spottedleaf/moonrise/common/util/MoonriseCommonTest.java
+index 599b339fd082ef349aad91f90f85580609feba1e..2a3f3e92402b887a75c9c1408f8314206b364f76 100644
+--- a/src/test/java/ca/spottedleaf/moonrise/common/util/MoonriseCommonTest.java
++++ b/src/test/java/ca/spottedleaf/moonrise/common/util/MoonriseCommonTest.java
+@@ -8,10 +8,10 @@ import org.junit.jupiter.api.Test;
+ class MoonriseCommonTest {
+ 
+     @Test
+-    void loomPerformanceWorkerDefaultUsesHalfTheAvailableCores() {
++    void loomPerformanceWorkerDefaultLeavesTickThreadHeadroom() {
+         Assertions.assertEquals(1, MoonriseCommon.loomPerformanceWorkerThreads(1));
+         Assertions.assertEquals(1, MoonriseCommon.loomPerformanceWorkerThreads(2));
+-        Assertions.assertEquals(3, MoonriseCommon.loomPerformanceWorkerThreads(6));
+-        Assertions.assertEquals(6, MoonriseCommon.loomPerformanceWorkerThreads(12));
++        Assertions.assertEquals(2, MoonriseCommon.loomPerformanceWorkerThreads(6));
++        Assertions.assertEquals(4, MoonriseCommon.loomPerformanceWorkerThreads(12));
+     }
+ }

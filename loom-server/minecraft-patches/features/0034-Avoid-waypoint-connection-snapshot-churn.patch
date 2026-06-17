@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 10 Jun 2026 21:28:00 +0000
+Subject: [PATCH] Avoid waypoint connection snapshot churn
+
+
+diff --git a/net/minecraft/server/waypoints/ServerWaypointManager.java b/net/minecraft/server/waypoints/ServerWaypointManager.java
+index 1524cc8dc50185c6db912c018a93404c72ef7293..f34cc2f4130505f2b5213f14ab59da3679921cc3 100644
+--- a/net/minecraft/server/waypoints/ServerWaypointManager.java
++++ b/net/minecraft/server/waypoints/ServerWaypointManager.java
+@@ -1,12 +1,13 @@
+ package net.minecraft.server.waypoints;
+ 
+ import com.google.common.collect.HashBasedTable;
+-import com.google.common.collect.ImmutableSet;
+ import com.google.common.collect.Sets;
+ import com.google.common.collect.Table;
+ import com.google.common.collect.Tables;
+ import com.google.common.collect.Sets.SetView;
++import java.util.ArrayList;
+ import java.util.HashSet;
++import java.util.List;
+ import java.util.Map;
+ import java.util.Set;
+ import java.util.Map.Entry;
+@@ -43,8 +44,26 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+         if (this.waypoints.contains(waypoint)) {
+             Map<ServerPlayer, WaypointTransmitter.Connection> playerConnection = this.connections.column(waypoint);
+ 
+-            for (Entry<ServerPlayer, WaypointTransmitter.Connection> waypointConnection : ImmutableSet.copyOf(playerConnection.entrySet())) {
+-                this.updateConnection(waypointConnection.getKey(), waypoint, waypointConnection.getValue());
++            List<BrokenPlayerConnection> brokenConnections = null;
++            for (Entry<ServerPlayer, WaypointTransmitter.Connection> waypointConnection : playerConnection.entrySet()) {
++                final ServerPlayer player = waypointConnection.getKey();
++                final WaypointTransmitter.Connection connection = waypointConnection.getValue();
++                if (player == waypoint || !this.isLocatorBarEnabledFor(player)) {
++                    continue;
++                }
++                if (!connection.isBroken()) {
++                    connection.update();
++                } else {
++                    if (brokenConnections == null) {
++                        brokenConnections = new ArrayList<>();
++                    }
++                    brokenConnections.add(new BrokenPlayerConnection(player, connection));
++                }
++            }
++            if (brokenConnections != null) {
++                for (BrokenPlayerConnection brokenConnection : brokenConnections) {
++                    this.replaceBrokenConnection(brokenConnection.player(), waypoint, brokenConnection.connection());
++                }
+             }
+ 
+             int expectedConnections = this.players.size();
+@@ -85,8 +104,26 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+         if (!this.locatorBarEnabled) return; // Paper - optimize ServerWaypointManager with locator bar disabled
+         Map<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnections = this.connections.row(player);
+ 
+-        for (Entry<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnection : ImmutableSet.copyOf(waypointConnections.entrySet())) {
+-            this.updateConnection(player, waypointConnection.getKey(), waypointConnection.getValue());
++        List<BrokenWaypointConnection> brokenConnections = null;
++        for (Entry<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnection : waypointConnections.entrySet()) {
++            final WaypointTransmitter waypoint = waypointConnection.getKey();
++            final WaypointTransmitter.Connection connection = waypointConnection.getValue();
++            if (player == waypoint || !this.isLocatorBarEnabledFor(player)) {
++                continue;
++            }
++            if (!connection.isBroken()) {
++                connection.update();
++            } else {
++                if (brokenConnections == null) {
++                    brokenConnections = new ArrayList<>();
++                }
++                brokenConnections.add(new BrokenWaypointConnection(waypoint, connection));
++            }
++        }
++        if (brokenConnections != null) {
++            for (BrokenWaypointConnection brokenConnection : brokenConnections) {
++                this.replaceBrokenConnection(player, brokenConnection.waypoint(), brokenConnection.connection());
++            }
+         }
+ 
+         int expectedConnections = this.waypoints.size();
+@@ -155,15 +192,25 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+                 if (!connection.isBroken()) {
+                     connection.update();
+                 } else {
+-                    waypoint.makeWaypointConnectionWith(player).ifPresentOrElse(newConnection -> {
+-                        newConnection.connect();
+-                        this.connections.put(player, waypoint, newConnection);
+-                    }, () -> {
+-                        connection.disconnect();
+-                        this.connections.remove(player, waypoint);
+-                    });
++                    this.replaceBrokenConnection(player, waypoint, connection);
+                 }
+             }
+         }
+     }
++
++    private void replaceBrokenConnection(final ServerPlayer player, final WaypointTransmitter waypoint, final WaypointTransmitter.Connection connection) {
++        waypoint.makeWaypointConnectionWith(player).ifPresentOrElse(newConnection -> {
++            newConnection.connect();
++            this.connections.put(player, waypoint, newConnection);
++        }, () -> {
++            connection.disconnect();
++            this.connections.remove(player, waypoint);
++        });
++    }
++
++    private record BrokenPlayerConnection(ServerPlayer player, WaypointTransmitter.Connection connection) {
++    }
++
++    private record BrokenWaypointConnection(WaypointTransmitter waypoint, WaypointTransmitter.Connection connection) {
++    }
+ }

@@ -1,0 +1,34 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityMode.java
+@@ -1,0 +_,31 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import java.util.Locale;
++
++public enum CompatibilityMode {
++    STRICT("strict"),
++    HYBRID("hybrid"),
++    MAX_COMPAT("max-compat");
++
++    private final String configValue;
++
++    CompatibilityMode(final String configValue) {
++        this.configValue = configValue;
++    }
++
++    public String configValue() {
++        return this.configValue;
++    }
++
++    public static CompatibilityMode fromConfig(final String value) {
++        if (value == null || value.isBlank()) {
++            return HYBRID;
++        }
++        final String normalized = value.trim().toLowerCase(Locale.ROOT);
++        return switch (normalized) {
++            case "strict" -> STRICT;
++            case "max-compat", "max_compat", "maxcompat" -> MAX_COMPAT;
++            default -> HYBRID;
++        };
++    }
++}

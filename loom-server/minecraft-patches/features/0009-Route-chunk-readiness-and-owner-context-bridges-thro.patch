@@ -1,0 +1,505 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sun, 31 May 2026 13:58:42 +0000
+Subject: [PATCH] Route chunk readiness and owner-context bridges through
+ compatibility kernel
+
+
+diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
+index ce2d08456ed4ca4c2d349bd9043fa573bc9992b3..834942432c96af7a16de7a764b8dfad9321008de 100644
+--- a/net/minecraft/network/PacketProcessor.java
++++ b/net/minecraft/network/PacketProcessor.java
+@@ -102,18 +102,23 @@ public class PacketProcessor implements AutoCloseable {
+             final int minChunkZ = chunkPos.z() - radius;
+             final int maxChunkX = chunkPos.x() + radius;
+             final int maxChunkZ = chunkPos.z() + radius;
+-            if (net.minecraft.server.threading.TickRegions.currentContext() != null
+-                && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
+-                action.run();
+-                return;
+-            }
++            try (final net.minecraft.server.threading.runtime.OwnerDomainExecutor.Scope ownerScope =
++                     net.minecraft.server.threading.runtime.OwnerDomainExecutor.enterRegion(
++                         level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, "packet-listener-owner-context"
++                     )) {
++                if (net.minecraft.server.threading.TickRegions.currentContext() != null
++                    && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++                    action.run();
++                    return;
++                }
+ 
+-            final net.minecraft.server.threading.TickRegions.RegionContext context =
+-                net.minecraft.server.threading.TickRegions.pushRegionContext(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
+-            try {
+-                action.run();
+-            } finally {
+-                net.minecraft.server.threading.TickRegions.popContext(context);
++                final net.minecraft.server.threading.TickRegions.RegionContext context =
++                    net.minecraft.server.threading.TickRegions.pushRegionContext(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
++                try {
++                    action.run();
++                } finally {
++                    net.minecraft.server.threading.TickRegions.popContext(context);
++                }
+             }
+             return;
+         }
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index c5861671a73649e1445c0dafb8c66a54169309d2..566c130ac058ebf7ca13e5f78ebd99be29f6bdf7 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -2778,7 +2778,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     // Paper start - rewrite chunk system
+     @Override
+     public boolean isSameThread() {
+-        return ca.spottedleaf.moonrise.common.util.TickThread.isTickThread();
++        return net.minecraft.server.threading.runtime.OwnerDomainExecutor.canRunSynchronousCallbacks();
+     }
+     // Paper end - rewrite chunk system
+ 
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index 6e391bb0f3625195907e8c05adb826bcb6f0b77b..fb71e2e6a208752b381130720757ba6266bed87e 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -939,16 +939,22 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+             return false;
+         }
+ 
+-        level.loadChunksForMoveAsync(
++        net.minecraft.server.threading.runtime.OwnershipRouter.runWhenMoveChunksReady(
++            level,
+             this.getBoundingBox(),
+             ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "player-current-chunk-ready",
+             chunks -> {
+                 final ServerChunkCache chunkCache = level.getChunkSource();
+                 for (final net.minecraft.world.level.chunk.ChunkAccess chunk : chunks) {
+                     chunkCache.addTicketAtLevel(TicketType.POST_TELEPORT, chunk.getPos(), ChunkLevel.FULL_CHUNK_LEVEL);
+                 }
+             }
+-        );
++        ).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                LOGGER.error("Failed to prime current movement chunks for {}", this.getScoreboardName(), throwable);
++            }
++        });
+         return true;
+     }
+ 
+@@ -1646,24 +1652,35 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+         final int targetMinChunkZ = targetChunkZ - ownerRadius;
+         final int targetMaxChunkX = targetChunkX + ownerRadius;
+         final int targetMaxChunkZ = targetChunkZ + ownerRadius;
+-        net.minecraft.server.threading.TickRegions.RegionContext currentContext = null;
+-        net.minecraft.server.threading.TickRegions.RegionContext targetContext = null;
+-        if (!net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, currentMinChunkX, currentMinChunkZ, currentMaxChunkX, currentMaxChunkZ)) {
+-            currentContext = net.minecraft.server.threading.TickRegions.pushRegionContext(
+-                level, currentMinChunkX, currentMinChunkZ, currentMaxChunkX, currentMaxChunkZ
+-            );
+-        }
+-        if (!net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, targetMinChunkX, targetMinChunkZ, targetMaxChunkX, targetMaxChunkZ)) {
+-            targetContext = net.minecraft.server.threading.TickRegions.pushRegionContext(level, targetMinChunkX, targetMinChunkZ, targetMaxChunkX, targetMaxChunkZ);
+-        }
+-        try {
+-            action.run();
+-        } finally {
+-            if (targetContext != null) {
+-                net.minecraft.server.threading.TickRegions.popContext(targetContext);
++        try (
++            final net.minecraft.server.threading.runtime.OwnerDomainExecutor.Scope currentOwnerScope =
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.enterRegion(
++                    level, currentMinChunkX, currentMinChunkZ, currentMaxChunkX, currentMaxChunkZ, "player-teleport-current-owner"
++                );
++            final net.minecraft.server.threading.runtime.OwnerDomainExecutor.Scope targetOwnerScope =
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.enterRegion(
++                    level, targetMinChunkX, targetMinChunkZ, targetMaxChunkX, targetMaxChunkZ, "player-teleport-target-owner"
++                )
++        ) {
++            net.minecraft.server.threading.TickRegions.RegionContext currentContext = null;
++            net.minecraft.server.threading.TickRegions.RegionContext targetContext = null;
++            if (!net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, currentMinChunkX, currentMinChunkZ, currentMaxChunkX, currentMaxChunkZ)) {
++                currentContext = net.minecraft.server.threading.TickRegions.pushRegionContext(
++                    level, currentMinChunkX, currentMinChunkZ, currentMaxChunkX, currentMaxChunkZ
++                );
+             }
+-            if (currentContext != null) {
+-                net.minecraft.server.threading.TickRegions.popContext(currentContext);
++            if (!net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, targetMinChunkX, targetMinChunkZ, targetMaxChunkX, targetMaxChunkZ)) {
++                targetContext = net.minecraft.server.threading.TickRegions.pushRegionContext(level, targetMinChunkX, targetMinChunkZ, targetMaxChunkX, targetMaxChunkZ);
++            }
++            try {
++                action.run();
++            } finally {
++                if (targetContext != null) {
++                    net.minecraft.server.threading.TickRegions.popContext(targetContext);
++                }
++                if (currentContext != null) {
++                    net.minecraft.server.threading.TickRegions.popContext(currentContext);
++                }
+             }
+         }
+     }
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index e11595a7b1132060c29f760053866f8d123f91de..f854281a6a06118941c910aa56abe281a3f35afe 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -1966,16 +1966,22 @@ public class ServerGamePacketListenerImpl
+         final PositionMoveRotation absoluteDestination = PositionMoveRotation.calculateAbsolute(PositionMoveRotation.of(this.player), destination, relatives);
+         final Vec3 position = absoluteDestination.position();
+         final ServerLevel level = this.player.level();
+-        level.loadChunksForMoveAsync(
++        net.minecraft.server.threading.runtime.OwnershipRouter.runWhenMoveChunksReady(
++            level,
+             this.player.getBoundingBoxAt(position.x(), position.y(), position.z()),
+             ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "packet-teleport-target-ready",
+             chunks -> {
+                 final net.minecraft.server.level.ServerChunkCache chunkCache = level.getChunkSource();
+                 for (final net.minecraft.world.level.chunk.ChunkAccess chunk : chunks) {
+                     chunkCache.addTicketAtLevel(net.minecraft.server.level.TicketType.POST_TELEPORT, chunk.getPos(), net.minecraft.server.level.ChunkLevel.FULL_CHUNK_LEVEL);
+                 }
+             }
+-        );
++        ).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                LOGGER.error("Failed to prime teleport target chunks for {}", this.player.getScoreboardName(), throwable);
++            }
++        });
+     }
+ 
+     private boolean waitForPlayerChunkIfUnloaded(final ServerLevel level) {
+@@ -1984,19 +1990,25 @@ public class ServerGamePacketListenerImpl
+             return false;
+         }
+ 
+-        level.loadChunks(
++        net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
++            level,
+             chunkPos.x(),
+             chunkPos.z(),
+             chunkPos.x(),
+             chunkPos.z(),
+             ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "packet-player-chunk-ready",
+             chunks -> {
+                 final net.minecraft.server.level.ServerChunkCache chunkCache = level.getChunkSource();
+                 for (final net.minecraft.world.level.chunk.ChunkAccess chunk : chunks) {
+                     chunkCache.addTicketAtLevel(net.minecraft.server.level.TicketType.POST_TELEPORT, chunk.getPos(), net.minecraft.server.level.ChunkLevel.FULL_CHUNK_LEVEL);
+                 }
+             }
+-        );
++        ).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                LOGGER.error("Failed to prime player chunk {} for {}", chunkPos, this.player.getScoreboardName(), throwable);
++            }
++        });
+         return true;
+     }
+ 
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 6a358dea5ab373775a541192be246087afc94b5b..616d70d40c924f907ed279351879ff1bc83101d7 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -164,34 +164,42 @@ public abstract class PlayerList {
+         final int minChunkZ = chunkPos.z() - radius;
+         final int maxChunkX = chunkPos.x() + radius;
+         final int maxChunkZ = chunkPos.z() + radius;
+-        if (net.minecraft.server.threading.TickRegions.currentContext() != null
+-            && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
+-            action.run();
+-            return;
+-        }
++        try (final net.minecraft.server.threading.runtime.OwnerDomainExecutor.Scope ownerScope =
++                 net.minecraft.server.threading.runtime.OwnerDomainExecutor.enterRegion(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, "player-list-player-context")) {
++            if (net.minecraft.server.threading.TickRegions.currentContext() != null
++                && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++                action.run();
++                return;
++            }
+ 
+-        final net.minecraft.server.threading.TickRegions.RegionContext context =
+-            net.minecraft.server.threading.TickRegions.pushRegionContext(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
+-        try {
+-            action.run();
+-        } finally {
+-            net.minecraft.server.threading.TickRegions.popContext(context);
++            final net.minecraft.server.threading.TickRegions.RegionContext context =
++                net.minecraft.server.threading.TickRegions.pushRegionContext(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
++            try {
++                action.run();
++            } finally {
++                net.minecraft.server.threading.TickRegions.popContext(context);
++            }
+         }
+     }
+ 
+     private static void runWithLevelContext(final ServerLevel level, final Runnable action) {
+-        if (net.minecraft.server.threading.TickRegions.currentContext() != null
+-            && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
+-            action.run();
+-            return;
+-        }
++        try (final net.minecraft.server.threading.runtime.OwnerDomainExecutor.Scope ownerScope =
++                 net.minecraft.server.threading.runtime.OwnerDomainExecutor.enterRegion(
++                     level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, "player-list-level-context"
++                 )) {
++            if (net.minecraft.server.threading.TickRegions.currentContext() != null
++                && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
++                action.run();
++                return;
++            }
+ 
+-        final net.minecraft.server.threading.TickRegions.RegionContext context =
+-            net.minecraft.server.threading.TickRegions.pushLevelContext(level);
+-        try {
+-            action.run();
+-        } finally {
+-            net.minecraft.server.threading.TickRegions.popContext(context);
++            final net.minecraft.server.threading.TickRegions.RegionContext context =
++                net.minecraft.server.threading.TickRegions.pushLevelContext(level);
++            try {
++                action.run();
++            } finally {
++                net.minecraft.server.threading.TickRegions.popContext(context);
++            }
+         }
+     }
+ 
+diff --git a/net/minecraft/server/threading/runtime/OwnershipRouter.java b/net/minecraft/server/threading/runtime/OwnershipRouter.java
+index 699ed1f7ee89c5646617368a1c41803bc1533cc5..69c8122401e4f83d3fd651cdfaae476dbfb927ee 100644
+--- a/net/minecraft/server/threading/runtime/OwnershipRouter.java
++++ b/net/minecraft/server/threading/runtime/OwnershipRouter.java
+@@ -1,10 +1,17 @@
+ package net.minecraft.server.threading.runtime;
+ 
++import ca.spottedleaf.concurrentutil.util.Priority;
++import java.util.List;
++import java.util.Objects;
+ import java.util.concurrent.CompletableFuture;
++import java.util.function.Consumer;
+ import java.util.function.Supplier;
+ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.util.Mth;
++import net.minecraft.world.level.chunk.ChunkAccess;
++import net.minecraft.world.phys.AABB;
+ 
+ public final class OwnershipRouter {
+ 
+@@ -46,4 +53,86 @@ public final class OwnershipRouter {
+     public static void dispatchToPlayer(final ServerPlayer player, final String operation, final Runnable task) {
+         OwnerDomainExecutor.execute(OwnerDomainExecutor.player(player, operation), task);
+     }
++
++    public static CompletableFuture<Void> runWhenMoveChunksReady(
++        final ServerLevel level,
++        final AABB box,
++        final Priority priority,
++        final String operation,
++        final Consumer<List<ChunkAccess>> onReady
++    ) {
++        Objects.requireNonNull(level, "level");
++        Objects.requireNonNull(box, "box");
++        Objects.requireNonNull(priority, "priority");
++        Objects.requireNonNull(operation, "operation");
++        Objects.requireNonNull(onReady, "onReady");
++
++        // Keep ownership bounds aligned with ServerLevel#loadChunksForMoveAsync's expansion.
++        final int minBlockX = Mth.floor(box.minX - 1.0E-7) - 3;
++        final int minBlockZ = Mth.floor(box.minZ - 1.0E-7) - 3;
++        final int maxBlockX = Mth.floor(box.maxX + 1.0E-7) + 3;
++        final int maxBlockZ = Mth.floor(box.maxZ + 1.0E-7) + 3;
++        final int minChunkX = minBlockX >> 4;
++        final int minChunkZ = minBlockZ >> 4;
++        final int maxChunkX = maxBlockX >> 4;
++        final int maxChunkZ = maxBlockZ >> 4;
++
++        final CompletableFuture<Void> future = new CompletableFuture<>();
++        level.loadChunksForMoveAsync(box, priority, chunks -> {
++            try {
++                OwnerDomainExecutor.execute(
++                    OwnerDomainExecutor.region(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation),
++                    () -> completeChunkReadyCallback(future, chunks, onReady)
++                );
++            } catch (final Throwable throwable) {
++                future.completeExceptionally(throwable);
++            }
++        });
++        return future;
++    }
++
++    public static CompletableFuture<Void> runWhenChunksReady(
++        final ServerLevel level,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final Priority priority,
++        final String operation,
++        final Consumer<List<ChunkAccess>> onReady
++    ) {
++        Objects.requireNonNull(level, "level");
++        Objects.requireNonNull(priority, "priority");
++        Objects.requireNonNull(operation, "operation");
++        Objects.requireNonNull(onReady, "onReady");
++        if (maxChunkX < minChunkX || maxChunkZ < minChunkZ) {
++            throw new IllegalArgumentException("Invalid chunk bounds for runWhenChunksReady");
++        }
++
++        final CompletableFuture<Void> future = new CompletableFuture<>();
++        level.loadChunks(minChunkX, minChunkZ, maxChunkX, maxChunkZ, priority, chunks -> {
++            try {
++                OwnerDomainExecutor.execute(
++                    OwnerDomainExecutor.region(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation),
++                    () -> completeChunkReadyCallback(future, chunks, onReady)
++                );
++            } catch (final Throwable throwable) {
++                future.completeExceptionally(throwable);
++            }
++        });
++        return future;
++    }
++
++    private static void completeChunkReadyCallback(
++        final CompletableFuture<Void> future,
++        final List<ChunkAccess> chunks,
++        final Consumer<List<ChunkAccess>> onReady
++    ) {
++        try {
++            onReady.accept(chunks);
++            future.complete(null);
++        } catch (final Throwable throwable) {
++            future.completeExceptionally(throwable);
++        }
++    }
+ }
+diff --git a/net/minecraft/world/entity/PortalProcessor.java b/net/minecraft/world/entity/PortalProcessor.java
+index 5538a93f1ae5af424432e78d652fcf451b5946b3..a8081eee40c792a49fa300b33be0371db9b509b8 100644
+--- a/net/minecraft/world/entity/PortalProcessor.java
++++ b/net/minecraft/world/entity/PortalProcessor.java
+@@ -5,6 +5,7 @@ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.CompletionException;
+ import net.minecraft.core.BlockPos;
+ import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.runtime.OwnershipRouter;
+ import net.minecraft.world.level.block.Portal;
+ import net.minecraft.world.level.portal.TeleportTransition;
+ import org.jspecify.annotations.Nullable;
+@@ -48,7 +49,8 @@ public class PortalProcessor {
+ 
+             CompletableFuture<@Nullable TeleportTransition> destination = this.pendingDestination;
+             this.pendingDestination = null;
+-            return completePortalDestination(destination);
++            final TeleportTransition transition = completePortalDestination(destination);
++            return transition == null ? null : this.ensureDestinationChunksReady(entity, transition);
+         }
+ 
+         CompletableFuture<@Nullable TeleportTransition> destination = this.portal.getPortalDestinationAsync(serverLevel, entity, this.entryPosition);
+@@ -58,7 +60,8 @@ public class PortalProcessor {
+             return null;
+         }
+ 
+-        return completePortalDestination(destination);
++        final TeleportTransition transition = completePortalDestination(destination);
++        return transition == null ? null : this.ensureDestinationChunksReady(entity, transition);
+     }
+ 
+     private static @Nullable TeleportTransition completePortalDestination(final CompletableFuture<@Nullable TeleportTransition> destination) {
+@@ -75,6 +78,42 @@ public class PortalProcessor {
+         return this.destinationPending;
+     }
+ 
++    private @Nullable TeleportTransition ensureDestinationChunksReady(final Entity entity, final TeleportTransition transition) {
++        final ServerLevel destinationLevel = transition.newLevel();
++        final net.minecraft.world.phys.Vec3 destinationPos = transition.position();
++        final net.minecraft.world.phys.AABB destinationBox = entity.getBoundingBoxAt(destinationPos.x(), destinationPos.y(), destinationPos.z());
++        if (destinationLevel.areChunksLoadedForMove(destinationBox)) {
++            return transition;
++        }
++
++        final CompletableFuture<@Nullable TeleportTransition> destination = new CompletableFuture<>();
++        OwnershipRouter.runWhenMoveChunksReady(
++            destinationLevel,
++            destinationBox,
++            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "portal-destination-chunks-ready",
++            chunks -> {
++                final net.minecraft.server.level.ServerChunkCache chunkCache = destinationLevel.getChunkSource();
++                for (final net.minecraft.world.level.chunk.ChunkAccess chunk : chunks) {
++                    chunkCache.addTicketAtLevel(
++                        net.minecraft.server.level.TicketType.POST_TELEPORT,
++                        chunk.getPos(),
++                        net.minecraft.server.level.ChunkLevel.FULL_CHUNK_LEVEL
++                    );
++                }
++                destination.complete(transition);
++            }
++        ).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                destination.completeExceptionally(throwable);
++            }
++        });
++
++        this.pendingDestination = destination;
++        this.destinationPending = true;
++        return null;
++    }
++
+     public Portal.Transition getPortalLocalTransition() {
+         return this.portal.getLocalTransition();
+     }
+diff --git a/net/minecraft/world/level/block/EndPortalBlock.java b/net/minecraft/world/level/block/EndPortalBlock.java
+index 002420a41c60bebad18d66804c3bcff60716a502..192fc32101e94e8844a4cfa5eae89fd14fa9469b 100644
+--- a/net/minecraft/world/level/block/EndPortalBlock.java
++++ b/net/minecraft/world/level/block/EndPortalBlock.java
+@@ -161,14 +161,20 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
+                 });
+         });
+ 
+-        newLevel.loadChunks(
++        net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
++            newLevel,
+             minChunkX,
+             minChunkZ,
+             maxChunkX,
+             maxChunkZ,
+             ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "end-platform-chunks-ready",
+             chunks -> createPlatform.run()
+-        );
++        ).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                destination.completeExceptionally(throwable);
++            }
++        });
+         return destination;
+     }
+ 
+diff --git a/net/minecraft/world/level/block/NetherPortalBlock.java b/net/minecraft/world/level/block/NetherPortalBlock.java
+index 5142942a5b7ba5ead3fad1abb9409d0c64ea7e03..63fb4fb57522ddb1cf277b087d510173a8094028 100644
+--- a/net/minecraft/world/level/block/NetherPortalBlock.java
++++ b/net/minecraft/world/level/block/NetherPortalBlock.java
+@@ -218,14 +218,20 @@ public class NetherPortalBlock extends Block implements Portal {
+             }
+         });
+ 
+-        newLevel.loadChunks(
++        net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
++            newLevel,
+             minChunkX,
+             minChunkZ,
+             maxChunkX,
+             maxChunkZ,
+             ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "nether-portal-chunks-ready",
+             chunks -> computeDestination.run()
+-        );
++        ).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                destination.completeExceptionally(throwable);
++            }
++        });
+         return destination;
+     }
+ 

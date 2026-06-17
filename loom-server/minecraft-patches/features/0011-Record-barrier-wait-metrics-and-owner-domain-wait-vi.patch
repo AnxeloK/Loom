@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sun, 31 May 2026 17:40:06 +0000
+Subject: [PATCH] Record barrier wait metrics and owner-domain wait violations
+
+
+diff --git a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
+index 4dae8a2c25d141700c2a6120cd9905534d31b26b..e3ef3686addda221f8d5af0f53f6441836f87356 100644
+--- a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
++++ b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
+@@ -56,26 +56,53 @@ public final class ThreadedRegionsBlockingBarrier {
+ 
+     public static void awaitPluginFuture(final Condition condition) throws InterruptedException {
+         assertOffOwnerDomain("plugin future wait");
+-        condition.await();
++        final long started = System.nanoTime();
++        try {
++            condition.await();
++        } finally {
++            noteWaitMetrics("plugin future wait", System.nanoTime() - started);
++        }
+     }
+ 
+     public static boolean awaitPluginFuture(final Condition condition, final long time, final TimeUnit unit) throws InterruptedException {
+         assertOffOwnerDomain("timed plugin future wait");
+-        return condition.await(time, unit);
++        final long started = System.nanoTime();
++        try {
++            return condition.await(time, unit);
++        } finally {
++            noteWaitMetrics("timed plugin future wait", System.nanoTime() - started);
++        }
+     }
+ 
+     public static <T> T awaitNonOwnerFuture(final CompletableFuture<T> future, final String operation) {
+         assertOffOwnerDomain(operation);
+-        return future.join();
++        final long started = System.nanoTime();
++        try {
++            return future.join();
++        } finally {
++            noteWaitMetrics(operation, System.nanoTime() - started);
++        }
+     }
+ 
+     private static void assertOffOwnerDomain(final String operation) {
+         if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
+             final org.bukkit.plugin.Plugin plugin = CompatibilityRuntimeContext.currentPlugin();
+             if (plugin != null) {
+-                CompatibilityDiagnostics.global().profileFor(plugin).noteOwnerDomainWaitViolation(operation);
++                final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
++                diagnostics.recordOwnerDomainWaitViolation(diagnostics.profileFor(plugin), operation);
+             }
+             throw new IllegalStateException("Owner-domain violation: " + operation + " cannot block an owner-domain thread");
+         }
+     }
++
++    private static void noteWaitMetrics(final String operation, final long nanos) {
++        final org.bukkit.plugin.Plugin plugin = CompatibilityRuntimeContext.currentPlugin();
++        if (plugin == null) {
++            return;
++        }
++        final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
++        final io.papermc.paper.plugin.manager.compat.PluginCompatibilityProfile profile = diagnostics.profileFor(plugin);
++        diagnostics.recordOwnerRpcWait(profile, operation, nanos);
++        diagnostics.recordBarrierWait(profile, "GLOBAL_STRICT", operation, nanos);
++    }
+ }

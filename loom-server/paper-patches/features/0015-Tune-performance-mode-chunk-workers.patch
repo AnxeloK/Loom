@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 2 Jun 2026 00:33:46 +0000
+Subject: [PATCH] Tune performance mode chunk workers
+
+
+diff --git a/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java b/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java
+index b9f788693b0c4be48e8a923a3dec50555d135e7e..5d7c6b10526473febce496ea27589c55150800c6 100644
+--- a/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java
++++ b/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java
+@@ -62,6 +62,21 @@ public final class MoonriseCommon {
+         LOGGER.info(PlatformHooks.get().getBrand() + " is using " + workerThreads + " worker threads, " + ioThreads + " I/O threads");
+     }
+ 
++    public static void applyLoomPerformanceModeDefaults(final int configWorkerThreads, final int configIoThreads) {
++        final String workerThreadProperty = PlatformHooks.get().getBrand() + ".WorkerThreadCount";
++        if (configWorkerThreads > 0 || System.getProperty(workerThreadProperty) != null) {
++            return;
++        }
++
++        final int workerThreads = loomPerformanceWorkerThreads(OSNuma.getNativeInstance().getTotalCores());
++        adjustWorkerThreads(workerThreads, configIoThreads);
++        LOGGER.info("Loom performance mode raised the implicit chunk worker default to " + workerThreads + " threads");
++    }
++
++    static int loomPerformanceWorkerThreads(final int totalCores) {
++        return Math.max(1, totalCores / 2);
++    }
++
+     public static final long IO_QUEUE_HOLD_TIME = (long)(25.0e6); // 25ms
+     public static final BalancedPrioritisedThreadPool IO_POOL = new BalancedPrioritisedThreadPool(
+         IO_QUEUE_HOLD_TIME,
+diff --git a/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java b/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java
+index c64d460e2a1cfa6488076b7dc548306709017aaf..651f3ebc6d6db7cd965e02d9a867bc54cd2555e8 100644
+--- a/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java
++++ b/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java
+@@ -38,6 +38,7 @@ public final class LoomConfiguration {
+ 
+             mode = resolved;
+             sourcePath = configFile.toAbsolutePath();
++            applyRuntimePolicy(resolved);
+             LOGGER.info("Loaded Loom compatibility mode '{}' from {}", resolved.configValue(), sourcePath);
+         } catch (final IOException ex) {
+             mode = Mode.COMPATIBILITY;
+@@ -46,6 +47,20 @@ public final class LoomConfiguration {
+         }
+     }
+ 
++    private static void applyRuntimePolicy(final Mode resolved) {
++        if (resolved != Mode.PERFORMANCE) {
++            return;
++        }
++        final GlobalConfiguration globalConfiguration = GlobalConfiguration.get();
++        if (globalConfiguration == null || globalConfiguration.chunkSystem == null) {
++            return;
++        }
++        ca.spottedleaf.moonrise.common.util.MoonriseCommon.applyLoomPerformanceModeDefaults(
++            globalConfiguration.chunkSystem.workerThreads,
++            globalConfiguration.chunkSystem.ioThreads
++        );
++    }
++
+     public static Mode mode() {
+         return mode;
+     }
+diff --git a/src/test/java/ca/spottedleaf/moonrise/common/util/MoonriseCommonTest.java b/src/test/java/ca/spottedleaf/moonrise/common/util/MoonriseCommonTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..599b339fd082ef349aad91f90f85580609feba1e
+--- /dev/null
++++ b/src/test/java/ca/spottedleaf/moonrise/common/util/MoonriseCommonTest.java
+@@ -0,0 +1,17 @@
++package ca.spottedleaf.moonrise.common.util;
++
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++
++@Normal
++class MoonriseCommonTest {
++
++    @Test
++    void loomPerformanceWorkerDefaultUsesHalfTheAvailableCores() {
++        Assertions.assertEquals(1, MoonriseCommon.loomPerformanceWorkerThreads(1));
++        Assertions.assertEquals(1, MoonriseCommon.loomPerformanceWorkerThreads(2));
++        Assertions.assertEquals(3, MoonriseCommon.loomPerformanceWorkerThreads(6));
++        Assertions.assertEquals(6, MoonriseCommon.loomPerformanceWorkerThreads(12));
++    }
++}

@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 2 Jun 2026 15:14:38 +0000
+Subject: [PATCH] Apply Loom worker headroom policy to all modes
+
+
+diff --git a/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java b/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java
+index 3e05fee1a7fc5d40f629625d77eb3cabbd671231..c9134e159b66b7a42f4502064dd28219b9207f70 100644
+--- a/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java
++++ b/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java
+@@ -63,6 +63,10 @@ public final class MoonriseCommon {
+     }
+ 
+     public static void applyLoomPerformanceModeDefaults(final int configWorkerThreads, final int configIoThreads) {
++        applyLoomModeWorkerDefaults("performance", configWorkerThreads, configIoThreads);
++    }
++
++    public static void applyLoomModeWorkerDefaults(final String modeName, final int configWorkerThreads, final int configIoThreads) {
+         final String workerThreadProperty = PlatformHooks.get().getBrand() + ".WorkerThreadCount";
+         if (configWorkerThreads > 0 || System.getProperty(workerThreadProperty) != null) {
+             return;
+@@ -70,7 +74,7 @@ public final class MoonriseCommon {
+ 
+         final int workerThreads = loomPerformanceWorkerThreads(OSNuma.getNativeInstance().getTotalCores());
+         adjustWorkerThreads(workerThreads, configIoThreads);
+-        LOGGER.info("Loom performance mode set the implicit chunk worker default to " + workerThreads + " threads");
++        LOGGER.info("Loom " + modeName + " mode set the implicit chunk worker default to " + workerThreads + " threads");
+     }
+ 
+     static int loomPerformanceWorkerThreads(final int totalCores) {
+diff --git a/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java b/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java
+index 651f3ebc6d6db7cd965e02d9a867bc54cd2555e8..3c39d6013b2a225a76c7831523068e75cc5ff3f9 100644
+--- a/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java
++++ b/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java
+@@ -48,14 +48,12 @@ public final class LoomConfiguration {
+     }
+ 
+     private static void applyRuntimePolicy(final Mode resolved) {
+-        if (resolved != Mode.PERFORMANCE) {
+-            return;
+-        }
+         final GlobalConfiguration globalConfiguration = GlobalConfiguration.get();
+         if (globalConfiguration == null || globalConfiguration.chunkSystem == null) {
+             return;
+         }
+-        ca.spottedleaf.moonrise.common.util.MoonriseCommon.applyLoomPerformanceModeDefaults(
++        ca.spottedleaf.moonrise.common.util.MoonriseCommon.applyLoomModeWorkerDefaults(
++            resolved.configValue(),
+             globalConfiguration.chunkSystem.workerThreads,
+             globalConfiguration.chunkSystem.ioThreads
+         );

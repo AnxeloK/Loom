@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 1 Jun 2026 11:55:39 +0000
+Subject: [PATCH] Fix LoomConfiguration catch type hierarchy
+
+
+diff --git a/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java b/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java
+index 176e4487bbb45ce48a079f1308a262bd21045bff..c64d460e2a1cfa6488076b7dc548306709017aaf 100644
+--- a/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java
++++ b/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java
+@@ -7,7 +7,6 @@ import java.nio.file.Files;
+ import java.nio.file.Path;
+ import java.util.Locale;
+ import org.slf4j.Logger;
+-import org.spongepowered.configurate.ConfigurateException;
+ import org.spongepowered.configurate.ConfigurationNode;
+ import org.spongepowered.configurate.yaml.YamlConfigurationLoader;
+ import org.jetbrains.annotations.VisibleForTesting;
+@@ -40,7 +39,7 @@ public final class LoomConfiguration {
+             mode = resolved;
+             sourcePath = configFile.toAbsolutePath();
+             LOGGER.info("Loaded Loom compatibility mode '{}' from {}", resolved.configValue(), sourcePath);
+-        } catch (final ConfigurateException | IOException ex) {
++        } catch (final IOException ex) {
+             mode = Mode.COMPATIBILITY;
+             sourcePath = configFile.toAbsolutePath();
+             LOGGER.error("Failed to load {}, defaulting Loom mode to '{}'", sourcePath, mode.configValue(), ex);

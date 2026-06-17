@@ -1,0 +1,60 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
+@@ -1,0 +_,57 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import java.util.ArrayDeque;
++import java.util.Deque;
++import org.bukkit.plugin.Plugin;
++import org.jspecify.annotations.Nullable;
++
++public final class CompatibilityRuntimeContext {
++
++    public record ScopeState(Plugin plugin, long transactionId, boolean strictFallback) {
++    }
++
++    private static final ThreadLocal<Deque<ScopeState>> STACK = ThreadLocal.withInitial(ArrayDeque::new);
++
++    private CompatibilityRuntimeContext() {
++    }
++
++    public static Scope enter(final Plugin plugin, final long transactionId, final boolean strictFallback) {
++        final Deque<ScopeState> stack = STACK.get();
++        stack.addLast(new ScopeState(plugin, transactionId, strictFallback));
++        return new Scope();
++    }
++
++    public static @Nullable Plugin currentPlugin() {
++        final Deque<ScopeState> stack = STACK.get();
++        return stack.isEmpty() ? null : stack.getLast().plugin();
++    }
++
++    public static long currentTransactionId() {
++        final Deque<ScopeState> stack = STACK.get();
++        return stack.isEmpty() ? -1L : stack.getLast().transactionId();
++    }
++
++    public static boolean isStrictFallback() {
++        final Deque<ScopeState> stack = STACK.get();
++        return !stack.isEmpty() && stack.getLast().strictFallback();
++    }
++
++    public static final class Scope implements AutoCloseable {
++        private boolean closed;
++
++        @Override
++        public void close() {
++            if (this.closed) {
++                return;
++            }
++            this.closed = true;
++            final Deque<ScopeState> stack = STACK.get();
++            if (!stack.isEmpty()) {
++                stack.removeLast();
++            }
++            if (stack.isEmpty()) {
++                STACK.remove();
++            }
++        }
++    }
++}

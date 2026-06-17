@@ -1,0 +1,108 @@
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransactionTest.java
+@@ -1,0 +_,105 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.List;
++import java.util.logging.Logger;
++import org.bukkit.event.Cancellable;
++import org.bukkit.event.Event;
++import org.bukkit.event.EventPriority;
++import org.bukkit.event.HandlerList;
++import org.bukkit.event.Listener;
++import org.bukkit.plugin.EventExecutor;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.RegisteredListener;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class CompatibilityTransactionTest {
++
++    @Test
++    void monitorLaneMutationIsDetectedAndTransactionAbortsOnCancel() throws Throwable {
++        final Plugin plugin = mockPlugin("OldClaims");
++        final Listener listener = Mockito.mock(Listener.class);
++        final EventExecutor executor = (ignored, event) -> {
++            final TestCancellableEvent cancellableEvent = (TestCancellableEvent)event;
++            cancellableEvent.setPayload("mutated-by-monitor");
++            cancellableEvent.setCancelled(true);
++        };
++        final RegisteredListener registered = new RegisteredListener(
++            listener,
++            executor,
++            EventPriority.MONITOR,
++            plugin,
++            false
++        );
++
++        final TestCancellableEvent event = new TestCancellableEvent();
++        final EventSemanticIndex index = new EventSemanticIndex();
++        final EventSemanticIndex.EventSemantics semantics = index.resolve(event, new RegisteredListener[] {registered});
++        final CompatibilityTransaction transaction = new CompatibilityTransaction(event, semantics);
++
++        final CompatibilityTransaction.ListenerSnapshot before = transaction.beforeListener();
++        final long started = System.nanoTime();
++        registered.callEvent(event);
++        transaction.afterListener(registered, EventSemanticIndex.lane(registered.getPriority()), before, System.nanoTime() - started);
++        transaction.finish();
++
++        Assertions.assertEquals(CompatibilityTransaction.State.ABORTED, transaction.state());
++        Assertions.assertEquals(1, transaction.monitorMutations().size());
++        final CompatibilityTransaction.MonitorMutation mutation = transaction.monitorMutations().getFirst();
++        Assertions.assertTrue(mutation.cancelledChanged());
++        Assertions.assertEquals("OldClaims", mutation.plugin());
++    }
++
++    private static Plugin mockPlugin(final String name) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn("com.example." + name);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
++
++    private static final class TestCancellableEvent extends Event implements Cancellable {
++        private static final HandlerList HANDLERS = new HandlerList();
++
++        private boolean cancelled;
++        private String payload = "initial";
++
++        @Override
++        public boolean isCancelled() {
++            return this.cancelled;
++        }
++
++        @Override
++        public void setCancelled(final boolean cancel) {
++            this.cancelled = cancel;
++        }
++
++        public String payload() {
++            return this.payload;
++        }
++
++        public void setPayload(final String payload) {
++            this.payload = payload;
++        }
++
++        @Override
++        public HandlerList getHandlers() {
++            return HANDLERS;
++        }
++
++        public static HandlerList getHandlerList() {
++            return HANDLERS;
++        }
++    }
++}

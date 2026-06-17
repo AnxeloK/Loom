@@ -1,0 +1,322 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
+@@ -1,0 +_,319 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import com.mojang.logging.LogUtils;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ConcurrentMap;
++import java.util.concurrent.atomic.LongAdder;
++import org.slf4j.Logger;
++
++public final class CompatibilityDiagnostics {
++
++    public record EventSummary(
++        String event,
++        long transactions,
++        long committed,
++        long aborted,
++        long totalNanos,
++        long monitorMutations
++    ) {
++    }
++
++    public record Snapshot(
++        List<PluginCompatibilityProfile.Snapshot> plugins,
++        List<EventSummary> hotEvents,
++        long transactions,
++        long monitorMutations,
++        long strictFallbacks,
++        long refusals,
++        long asyncViolations
++    ) {
++    }
++
++    private static final Logger LOGGER = LogUtils.getLogger();
++    private static final CompatibilityDiagnostics GLOBAL = new CompatibilityDiagnostics();
++
++    private final ConcurrentMap<String, PluginCompatibilityProfile> profiles = new ConcurrentHashMap<>();
++    private final ConcurrentMap<String, EventCounter> events = new ConcurrentHashMap<>();
++
++    private final LongAdder transactions = new LongAdder();
++    private final LongAdder monitorMutations = new LongAdder();
++    private final LongAdder strictFallbacks = new LongAdder();
++    private final LongAdder refusals = new LongAdder();
++    private final LongAdder asyncViolations = new LongAdder();
++
++    public static CompatibilityDiagnostics global() {
++        return GLOBAL;
++    }
++
++    public PluginCompatibilityProfile profileFor(final org.bukkit.plugin.Plugin plugin) {
++        return this.profiles.computeIfAbsent(plugin.getPluginMeta().getName(), ignored -> new PluginCompatibilityProfile(plugin));
++    }
++
++    public void recordTransaction(final CompatibilityTransaction transaction) {
++        this.transactions.increment();
++
++        final EventCounter counter = this.events.computeIfAbsent(transaction.event().getEventName(), ignored -> new EventCounter());
++        counter.transactions.increment();
++        counter.totalNanos.add(transaction.durationNanos());
++        if (transaction.state() == CompatibilityTransaction.State.COMMITTED) {
++            counter.committed.increment();
++        } else if (transaction.state() == CompatibilityTransaction.State.ABORTED) {
++            counter.aborted.increment();
++        }
++
++        final List<CompatibilityTransaction.MonitorMutation> monitorChanges = transaction.monitorMutations();
++        if (!monitorChanges.isEmpty()) {
++            final long count = monitorChanges.size();
++            counter.monitorMutations.add(count);
++            this.monitorMutations.add(count);
++            this.logStructured(
++                "monitor_mutation",
++                Map.of(
++                    "event", transaction.event().getEventName(),
++                    "transactionId", transaction.id(),
++                    "count", count,
++                    "state", transaction.state().name()
++                )
++            );
++        }
++    }
++
++    public void recordStrictFallback(final PluginCompatibilityProfile profile, final String reason) {
++        this.strictFallbacks.increment();
++        profile.noteStrictFallback(reason);
++        this.logStructured(
++            "strict_fallback",
++            Map.of(
++                "plugin", profile.pluginName(),
++                "reason", reason,
++                "mode", profile.mode().name()
++            )
++        );
++    }
++
++    public void recordRefusal(final PluginCompatibilityProfile profile, final String reason) {
++        this.refusals.increment();
++        profile.noteRefusal(reason);
++        this.logStructured(
++            "refusal",
++            Map.of(
++                "plugin", profile.pluginName(),
++                "reason", reason,
++                "mode", profile.mode().name()
++            )
++        );
++    }
++
++    public void recordAsyncViolation(final String reason) {
++        this.asyncViolations.increment();
++        final org.bukkit.plugin.Plugin current = CompatibilityRuntimeContext.currentPlugin();
++        if (current != null) {
++            this.profileFor(current).noteAsyncBukkitAccess(reason);
++        }
++        this.logStructured(
++            "async_bukkit_violation",
++            Map.of(
++                "plugin", current == null ? "<none>" : current.getPluginMeta().getName(),
++                "reason", reason,
++                "thread", Thread.currentThread().getName()
++            )
++        );
++    }
++
++    public Snapshot snapshot() {
++        final List<PluginCompatibilityProfile.Snapshot> pluginSnapshots = new ArrayList<>(this.profiles.size());
++        for (final PluginCompatibilityProfile profile : this.profiles.values()) {
++            pluginSnapshots.add(profile.snapshot());
++        }
++        pluginSnapshots.sort(Comparator.comparingLong(PluginCompatibilityProfile.Snapshot::callbackTimeNanos).reversed());
++
++        final List<EventSummary> hotEvents = new ArrayList<>(this.events.size());
++        for (final Map.Entry<String, EventCounter> entry : this.events.entrySet()) {
++            final EventCounter value = entry.getValue();
++            hotEvents.add(new EventSummary(
++                entry.getKey(),
++                value.transactions.longValue(),
++                value.committed.longValue(),
++                value.aborted.longValue(),
++                value.totalNanos.longValue(),
++                value.monitorMutations.longValue()
++            ));
++        }
++        hotEvents.sort(Comparator.comparingLong(EventSummary::totalNanos).reversed());
++
++        return new Snapshot(
++            pluginSnapshots,
++            hotEvents,
++            this.transactions.longValue(),
++            this.monitorMutations.longValue(),
++            this.strictFallbacks.longValue(),
++            this.refusals.longValue(),
++            this.asyncViolations.longValue()
++        );
++    }
++
++    public List<String> renderHumanReadable(final int pluginLimit, final int eventLimit) {
++        final Snapshot snapshot = this.snapshot();
++        final List<String> lines = new ArrayList<>();
++
++        lines.add("Compatibility Kernel:");
++        lines.add("  transactions=" + snapshot.transactions()
++            + ", monitorMutations=" + snapshot.monitorMutations()
++            + ", strictFallbacks=" + snapshot.strictFallbacks()
++            + ", refusals=" + snapshot.refusals()
++            + ", asyncViolations=" + snapshot.asyncViolations());
++
++        lines.add("  Plugins:");
++        int pluginCount = 0;
++        for (final PluginCompatibilityProfile.Snapshot plugin : snapshot.plugins()) {
++            if (pluginCount++ >= pluginLimit) {
++                break;
++            }
++            final String hotEvents = plugin.hotEvents().stream()
++                .map(event -> event.eventName() + "=" + formatNanos(event.callbackTimeNanos()))
++                .reduce((left, right) -> left + ", " + right)
++                .orElse("none");
++            lines.add("    " + plugin.plugin()
++                + " mode=" + plugin.mode().name().toLowerCase(Locale.ROOT)
++                + " callback=" + formatNanos(plugin.callbackTimeNanos())
++                + " ownerRpc=" + formatNanos(plugin.ownerRpcWaitNanos())
++                + " barrier=" + formatNanos(plugin.barrierTimeNanos())
++                + " ordered=" + plugin.orderedTransactions()
++                + " monitor=" + plugin.monitorMutationAttempts()
++                + " async=" + plugin.asyncBukkitViolations()
++                + " hotEvents=" + hotEvents);
++        }
++
++        lines.add("  Events:");
++        int eventCount = 0;
++        for (final EventSummary event : snapshot.hotEvents()) {
++            if (eventCount++ >= eventLimit) {
++                break;
++            }
++            lines.add("    " + event.event()
++                + " tx=" + event.transactions()
++                + " commit=" + event.committed()
++                + " abort=" + event.aborted()
++                + " monitor=" + event.monitorMutations()
++                + " total=" + formatNanos(event.totalNanos()));
++        }
++
++        return lines;
++    }
++
++    public String renderStructuredJson() {
++        final Snapshot snapshot = this.snapshot();
++        final Map<String, Object> root = new LinkedHashMap<>();
++        root.put("transactions", snapshot.transactions());
++        root.put("monitorMutations", snapshot.monitorMutations());
++        root.put("strictFallbacks", snapshot.strictFallbacks());
++        root.put("refusals", snapshot.refusals());
++        root.put("asyncViolations", snapshot.asyncViolations());
++
++        final List<Map<String, Object>> plugins = new ArrayList<>();
++        for (final PluginCompatibilityProfile.Snapshot plugin : snapshot.plugins()) {
++            final Map<String, Object> pluginJson = new LinkedHashMap<>();
++            pluginJson.put("plugin", plugin.plugin());
++            pluginJson.put("mode", plugin.mode().name());
++            pluginJson.put("callbackNanos", plugin.callbackTimeNanos());
++            pluginJson.put("ownerRpcWaitNanos", plugin.ownerRpcWaitNanos());
++            pluginJson.put("barrierNanos", plugin.barrierTimeNanos());
++            pluginJson.put("orderedTransactions", plugin.orderedTransactions());
++            pluginJson.put("monitorMutationAttempts", plugin.monitorMutationAttempts());
++            pluginJson.put("asyncBukkitViolations", plugin.asyncBukkitViolations());
++            pluginJson.put("strictFallbacks", plugin.strictFallbacks());
++            pluginJson.put("refusals", plugin.refusals());
++            plugins.add(pluginJson);
++        }
++        root.put("plugins", plugins);
++
++        final List<Map<String, Object>> events = new ArrayList<>();
++        for (final EventSummary event : snapshot.hotEvents()) {
++            final Map<String, Object> eventJson = new LinkedHashMap<>();
++            eventJson.put("event", event.event());
++            eventJson.put("transactions", event.transactions());
++            eventJson.put("committed", event.committed());
++            eventJson.put("aborted", event.aborted());
++            eventJson.put("monitorMutations", event.monitorMutations());
++            eventJson.put("totalNanos", event.totalNanos());
++            events.add(eventJson);
++        }
++        root.put("events", events);
++
++        return toJson(root);
++    }
++
++    private void logStructured(final String type, final Map<String, Object> payload) {
++        final Map<String, Object> event = new LinkedHashMap<>();
++        event.put("type", type);
++        event.put("timestamp", System.currentTimeMillis());
++        event.putAll(payload);
++        LOGGER.info("[loom.compat] {}", toJson(event));
++    }
++
++    private static String formatNanos(final long nanos) {
++        return String.format(Locale.ROOT, "%.3fms", nanos / 1_000_000.0D);
++    }
++
++    private static String toJson(final Object value) {
++        if (value == null) {
++            return "null";
++        }
++        if (value instanceof Number || value instanceof Boolean) {
++            return value.toString();
++        }
++        if (value instanceof String string) {
++            return '"' + escape(string) + '"';
++        }
++        if (value instanceof Map<?, ?> map) {
++            final StringBuilder builder = new StringBuilder("{");
++            boolean first = true;
++            for (final Map.Entry<?, ?> entry : map.entrySet()) {
++                if (!first) {
++                    builder.append(',');
++                }
++                first = false;
++                builder.append(toJson(String.valueOf(entry.getKey())));
++                builder.append(':');
++                builder.append(toJson(entry.getValue()));
++            }
++            return builder.append('}').toString();
++        }
++        if (value instanceof Iterable<?> iterable) {
++            final StringBuilder builder = new StringBuilder("[");
++            boolean first = true;
++            for (final Object entry : iterable) {
++                if (!first) {
++                    builder.append(',');
++                }
++                first = false;
++                builder.append(toJson(entry));
++            }
++            return builder.append(']').toString();
++        }
++        return toJson(String.valueOf(value));
++    }
++
++    private static String escape(final String input) {
++        return input
++            .replace("\\", "\\\\")
++            .replace("\"", "\\\"")
++            .replace("\n", "\\n")
++            .replace("\r", "\\r")
++            .replace("\t", "\\t");
++    }
++
++    private static final class EventCounter {
++        private final LongAdder transactions = new LongAdder();
++        private final LongAdder committed = new LongAdder();
++        private final LongAdder aborted = new LongAdder();
++        private final LongAdder totalNanos = new LongAdder();
++        private final LongAdder monitorMutations = new LongAdder();
++    }
++}

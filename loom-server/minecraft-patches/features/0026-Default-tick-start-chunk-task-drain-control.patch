@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 9 Jun 2026 23:38:14 +0000
+Subject: [PATCH] Default tick-start chunk task drain control
+
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
+index c58fcf4998454f8c4d4c1f480b57dd551132dbe0..9c31b02bc395989edaf79bb775da4877bf39d0d2 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
+@@ -67,14 +67,14 @@ public final class ChunkTaskScheduler {
+     private static final Logger LOGGER = LogUtils.getClassLogger();
+     private static final int LOOM_TICK_START_CHUNK_TASK_MAX_TASKS = Math.max(
+         1,
+-        Integer.getInteger("Loom.TickStartChunkTaskMaxTasks", Integer.MAX_VALUE)
++        Integer.getInteger("Loom.TickStartChunkTaskMaxTasks", 2)
+     );
+     private static final int LOOM_TICK_START_CHUNK_TASK_MIN_PROGRESS = Math.min(
+         LOOM_TICK_START_CHUNK_TASK_MAX_TASKS,
+         Math.max(1, Integer.getInteger("Loom.TickStartChunkTaskMinProgress", 1))
+     );
+     private static final long LOOM_TICK_START_CHUNK_TASK_BUDGET_NANOS = Long.getLong(
+-        "Loom.TickStartChunkTaskBudgetNanos", Long.MAX_VALUE
++        "Loom.TickStartChunkTaskBudgetNanos", 1_000_000L
+     );
+ 
+     public static final TicketType CHUNK_LOAD = ChunkSystemTicketType.create("chunk_system:chunk_load", Long::compareTo);

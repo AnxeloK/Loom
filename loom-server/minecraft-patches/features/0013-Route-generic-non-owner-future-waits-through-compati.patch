@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 1 Jun 2026 14:17:48 +0000
+Subject: [PATCH] Route generic non-owner future waits through compatibility
+ bridge
+
+
+diff --git a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
+index a9f8180d042e516bcac4c1f26b441250b91bd1da..568c538a56589aeefa0d77e38d4bdd3bc187420c 100644
+--- a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
++++ b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
+@@ -2,6 +2,7 @@ package net.minecraft.server.threading.runtime;
+ 
+ import io.papermc.paper.plugin.manager.compat.CompatibilityChunkBridge;
+ import io.papermc.paper.plugin.manager.compat.CompatibilityDiagnostics;
++import io.papermc.paper.plugin.manager.compat.CompatibilitySyncBridge;
+ import io.papermc.paper.plugin.manager.compat.PluginCompatibilityProfile;
+ import io.papermc.paper.plugin.manager.compat.CompatibilityRuntimeContext;
+ import java.util.concurrent.CompletableFuture;
+@@ -15,6 +16,8 @@ import net.minecraft.world.level.chunk.status.ChunkStatus;
+ 
+ public final class ThreadedRegionsBlockingBarrier {
+ 
++    private static final String GENERIC_COMPATIBILITY_LANE = "LEGACY_SYNC_WAIT_BRIDGE";
++
+     private ThreadedRegionsBlockingBarrier() {
+     }
+ 
+@@ -60,6 +63,7 @@ public final class ThreadedRegionsBlockingBarrier {
+     }
+ 
+     public static void awaitPluginFuture(final Condition condition) throws InterruptedException {
++        // `Condition` ownership is tied to the current thread lock state, so this wait cannot be continuation-handoff bridged safely.
+         assertOffOwnerDomain("plugin future wait");
+         final long started = System.nanoTime();
+         try {
+@@ -70,6 +74,7 @@ public final class ThreadedRegionsBlockingBarrier {
+     }
+ 
+     public static boolean awaitPluginFuture(final Condition condition, final long time, final TimeUnit unit) throws InterruptedException {
++        // `Condition` ownership is tied to the current thread lock state, so this wait cannot be continuation-handoff bridged safely.
+         assertOffOwnerDomain("timed plugin future wait");
+         final long started = System.nanoTime();
+         try {
+@@ -80,6 +85,10 @@ public final class ThreadedRegionsBlockingBarrier {
+     }
+ 
+     public static <T> T awaitNonOwnerFuture(final CompletableFuture<T> future, final String operation) {
++        final BridgeResult<T> bridged = awaitCompatibilityFuture(future, operation);
++        if (bridged.applied()) {
++            return bridged.value();
++        }
+         assertOffOwnerDomain(operation);
+         final long started = System.nanoTime();
+         try {
+@@ -124,4 +133,14 @@ public final class ThreadedRegionsBlockingBarrier {
+         CompatibilityChunkBridge.awaitChunkFuture(future, operation);
+         return true;
+     }
++
++    private static <T> BridgeResult<T> awaitCompatibilityFuture(final CompletableFuture<T> future, final String operation) {
++        if (!CompatibilitySyncBridge.isEnabledForCurrentContext()) {
++            return new BridgeResult<>(false, null);
++        }
++        return new BridgeResult<>(true, CompatibilitySyncBridge.awaitFuture(future, operation, GENERIC_COMPATIBILITY_LANE));
++    }
++
++    private record BridgeResult<T>(boolean applied, T value) {
++    }
+ }

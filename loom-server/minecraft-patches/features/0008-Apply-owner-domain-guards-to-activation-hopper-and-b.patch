@@ -1,0 +1,193 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 8 May 2026 17:38:31 +0000
+Subject: [PATCH] Apply owner-domain guards to activation, hopper, and block
+ updates
+
+
+diff --git a/io/papermc/paper/entity/activation/ActivationRange.java b/io/papermc/paper/entity/activation/ActivationRange.java
+index ce6b57eeeeb1bd652f4bb53c19dcfbc05126c7e9..f44f9be27f8d3e5f3d9607f3618f40c8074f73cc 100644
+--- a/io/papermc/paper/entity/activation/ActivationRange.java
++++ b/io/papermc/paper/entity/activation/ActivationRange.java
+@@ -1,7 +1,7 @@
+ package io.papermc.paper.entity.activation;
+ 
+ import net.minecraft.core.BlockPos;
+-import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.threading.runtime.DomainClock;
+ import net.minecraft.world.entity.Entity;
+ import net.minecraft.world.entity.EntityType;
+ import net.minecraft.world.entity.ExperienceOrb;
+@@ -45,6 +45,14 @@ public final class ActivationRange {
+     private ActivationRange() {
+     }
+ 
++    private static int currentTick(final Entity entity) {
++        return DomainClock.currentEntityTick(entity);
++    }
++
++    private static int currentTick(final Level level) {
++        return DomainClock.currentLevelTick(level);
++    }
++
+     static Activity[] VILLAGER_PANIC_IMMUNITIES = {
+         Activity.HIDE,
+         Activity.PRE_RAID,
+@@ -55,7 +63,7 @@ public final class ActivationRange {
+     private static int checkInactiveWakeup(final Entity entity) {
+         final Level world = entity.level();
+         final SpigotWorldConfig config = world.spigotConfig;
+-        final long inactiveFor = MinecraftServer.currentTick - entity.activatedTick;
++        final long inactiveFor = currentTick(entity) - entity.activatedTick;
+         if (entity.activationType == ActivationType.VILLAGER) {
+             if (inactiveFor > config.wakeUpInactiveVillagersEvery && world.wakeupInactiveRemainingVillagers > 0) {
+                 world.wakeupInactiveRemainingVillagers--;
+@@ -142,7 +150,7 @@ public final class ActivationRange {
+         maxRange = Math.min((world.spigotConfig.simulationDistance << 4) - 8, maxRange);
+ 
+         for (final Player player : world.players()) {
+-            player.activatedTick = MinecraftServer.currentTick;
++            player.activatedTick = currentTick(world);
+             if (world.spigotConfig.ignoreSpectatorActivation && player.isSpectator()) {
+                 continue;
+             }
+@@ -175,13 +183,14 @@ public final class ActivationRange {
+      * @param entity
+      */
+     private static void activateEntity(final Entity entity) {
+-        if (MinecraftServer.currentTick > entity.activatedTick) {
++        final int currentTick = currentTick(entity);
++        if (currentTick > entity.activatedTick) {
+             if (entity.defaultActivationState) {
+-                entity.activatedTick = MinecraftServer.currentTick;
++                entity.activatedTick = currentTick;
+                 return;
+             }
+             if (entity.activationType.boundingBox.intersects(entity.getBoundingBox())) {
+-                entity.activatedTick = MinecraftServer.currentTick;
++                entity.activatedTick = currentTick;
+             }
+         }
+     }
+@@ -202,10 +211,11 @@ public final class ActivationRange {
+         if (entity.getRemainingFireTicks() > 0) {
+             return 2;
+         }
+-        if (entity.activatedImmunityTick >= MinecraftServer.currentTick) {
++        final int currentTick = currentTick(entity);
++        if (entity.activatedImmunityTick >= currentTick) {
+             return 1;
+         }
+-        final long inactiveFor = MinecraftServer.currentTick - entity.activatedTick;
++        final long inactiveFor = currentTick - entity.activatedTick;
+         if ((entity.activationType != ActivationType.WATER && entity.isInWater() && entity.isPushedByFluid())) {
+             return 100;
+         }
+@@ -302,16 +312,17 @@ public final class ActivationRange {
+             return true;
+         }
+ 
+-        boolean isActive = entity.activatedTick >= MinecraftServer.currentTick;
++        final int currentTick = currentTick(entity);
++        boolean isActive = entity.activatedTick >= currentTick;
+         entity.isTemporarilyActive = false;
+ 
+         // Should this entity tick?
+         if (!isActive) {
+-            if ((MinecraftServer.currentTick - entity.activatedTick - 1) % 20 == 0) {
++            if ((currentTick - entity.activatedTick - 1) % 20 == 0) {
+                 // Check immunities every 20 ticks.
+                 final int immunity = checkEntityImmunities(entity);
+                 if (immunity >= 0) {
+-                    entity.activatedTick = MinecraftServer.currentTick + immunity;
++                    entity.activatedTick = currentTick + immunity;
+                 } else {
+                     entity.isTemporarilyActive = true;
+                 }
+diff --git a/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java b/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java
+index 06ab7c48b18c03af494ab10fc2b584cefc776749..3465a5fc23f7f91fbfadceed2f74fe643fab390c 100644
+--- a/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java
++++ b/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java
+@@ -148,7 +148,7 @@ public class MinecartHopper extends AbstractMinecartContainer implements Hopper
+ 
+     // Paper start
+     public void immunize() {
+-        this.activatedImmunityTick = Math.max(this.activatedImmunityTick, net.minecraft.server.MinecraftServer.currentTick + 20);
++        this.activatedImmunityTick = Math.max(this.activatedImmunityTick, net.minecraft.server.threading.runtime.DomainClock.currentEntityTick(this) + 20);
+     }
+     // Paper end
+ 
+diff --git a/net/minecraft/world/level/block/FarmlandBlock.java b/net/minecraft/world/level/block/FarmlandBlock.java
+index 902735a0ae76c0a8b3397c00bb8e4480b4120c6e..fe8b768d2f77f11aad17e54fb47116eed1ead201 100644
+--- a/net/minecraft/world/level/block/FarmlandBlock.java
++++ b/net/minecraft/world/level/block/FarmlandBlock.java
+@@ -4,6 +4,7 @@ import com.mojang.serialization.MapCodec;
+ import net.minecraft.core.BlockPos;
+ import net.minecraft.core.Direction;
+ import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.runtime.DomainClock;
+ import net.minecraft.tags.BlockTags;
+ import net.minecraft.tags.FluidTags;
+ import net.minecraft.util.RandomSource;
+@@ -94,8 +95,9 @@ public class FarmlandBlock extends Block {
+     @Override
+     protected void randomTick(final BlockState state, final ServerLevel level, final BlockPos pos, final RandomSource random) {
+         int moisture = state.getValue(MOISTURE);
+-        if (moisture > 0 && level.paperConfig().tickRates.wetFarmland != 1 && (level.paperConfig().tickRates.wetFarmland < 1 || (net.minecraft.server.MinecraftServer.currentTick + pos.hashCode()) % level.paperConfig().tickRates.wetFarmland != 0)) { return; } // Paper - Configurable random tick rates for blocks
+-        if (moisture == 0 && level.paperConfig().tickRates.dryFarmland != 1 && (level.paperConfig().tickRates.dryFarmland < 1 || (net.minecraft.server.MinecraftServer.currentTick + pos.hashCode()) % level.paperConfig().tickRates.dryFarmland != 0)) { return; } // Paper - Configurable random tick rates for blocks
++        final int currentTick = DomainClock.currentWorldTick(level);
++        if (moisture > 0 && level.paperConfig().tickRates.wetFarmland != 1 && (level.paperConfig().tickRates.wetFarmland < 1 || (currentTick + pos.hashCode()) % level.paperConfig().tickRates.wetFarmland != 0)) { return; } // Paper - Configurable random tick rates for blocks
++        if (moisture == 0 && level.paperConfig().tickRates.dryFarmland != 1 && (level.paperConfig().tickRates.dryFarmland < 1 || (currentTick + pos.hashCode()) % level.paperConfig().tickRates.dryFarmland != 0)) { return; } // Paper - Configurable random tick rates for blocks
+         if (!isNearWater(level, pos) && !level.isRainingAt(pos.above())) {
+             if (moisture > 0) {
+                 org.bukkit.craftbukkit.event.CraftEventFactory.handleMoistureChangeEvent(level, pos, state.setValue(MOISTURE, moisture - 1), Block.UPDATE_CLIENTS); // CraftBukkit
+diff --git a/net/minecraft/world/level/block/SpreadingSnowyBlock.java b/net/minecraft/world/level/block/SpreadingSnowyBlock.java
+index f868b1ccfa0e373c47344d000f26fbe8507c3510..029747dc28a4f2d70aa392da4cc5aa2357d71e92 100644
+--- a/net/minecraft/world/level/block/SpreadingSnowyBlock.java
++++ b/net/minecraft/world/level/block/SpreadingSnowyBlock.java
+@@ -8,6 +8,7 @@ import net.minecraft.core.Registry;
+ import net.minecraft.core.registries.Registries;
+ import net.minecraft.resources.ResourceKey;
+ import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.runtime.DomainClock;
+ import net.minecraft.tags.FluidTags;
+ import net.minecraft.util.RandomSource;
+ import net.minecraft.world.level.LevelReader;
+@@ -57,7 +58,7 @@ public abstract class SpreadingSnowyBlock extends SnowyBlock {
+ 
+     @Override
+     protected void randomTick(final BlockState state, final ServerLevel level, final BlockPos pos, final RandomSource random) {
+-        if (this instanceof GrassBlock && level.paperConfig().tickRates.grassSpread != 1 && (level.paperConfig().tickRates.grassSpread < 1 || (net.minecraft.server.MinecraftServer.currentTick + pos.hashCode()) % level.paperConfig().tickRates.grassSpread != 0)) { return; } // Paper - Configurable random tick rates for blocks
++        if (this instanceof GrassBlock && level.paperConfig().tickRates.grassSpread != 1 && (level.paperConfig().tickRates.grassSpread < 1 || (DomainClock.currentWorldTick(level) + pos.hashCode()) % level.paperConfig().tickRates.grassSpread != 0)) { return; } // Paper - Configurable random tick rates for blocks
+         Registry<Block> blocks = level.registryAccess().lookupOrThrow(Registries.BLOCK);
+         Optional<Block> baseBlock = blocks.getOptional(this.baseBlock);
+         if (!baseBlock.isEmpty()) {
+diff --git a/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java b/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java
+index f904c587fafe7395473450f766354d874e36ebac..3446e5f230e0cbbf0f31ccc7d08e9dc05de6d3b9 100644
+--- a/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java
++++ b/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java
+@@ -160,8 +160,9 @@ public class PistonMovingBlockEntity extends BlockEntity {
+ 
+                                 entity.setDeltaMovement(dx, dy, dz);
+                                 // Paper - EAR items stuck in slime pushed by a piston
+-                                entity.activatedTick = Math.max(entity.activatedTick, net.minecraft.server.MinecraftServer.currentTick + 10);
+-                                entity.activatedImmunityTick = Math.max(entity.activatedImmunityTick, net.minecraft.server.MinecraftServer.currentTick + 10);
++                                final int currentTick = net.minecraft.server.threading.runtime.DomainClock.currentEntityTick(entity);
++                                entity.activatedTick = Math.max(entity.activatedTick, currentTick + 10);
++                                entity.activatedImmunityTick = Math.max(entity.activatedImmunityTick, currentTick + 10);
+                                 // Paper end
+                                 break;
+                             }
+diff --git a/net/minecraft/world/level/block/state/BlockBehaviour.java b/net/minecraft/world/level/block/state/BlockBehaviour.java
+index ca77680b645c352456744b148e0ff4ac31b05aa2..8020dd2a33057da352ea70aa18f45fa6fc16ab6b 100644
+--- a/net/minecraft/world/level/block/state/BlockBehaviour.java
++++ b/net/minecraft/world/level/block/state/BlockBehaviour.java
+@@ -170,7 +170,7 @@ public abstract class BlockBehaviour implements FeatureElement {
+     }
+ 
+     protected void onPlace(final BlockState state, final Level level, final BlockPos pos, final BlockState oldState, final boolean movedByPiston) {
+-        org.spigotmc.AsyncCatcher.catchOp("block onPlace"); // Spigot
++        org.spigotmc.AsyncCatcher.catchOp("block onPlace", level, pos); // Spigot
+     }
+ 
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {

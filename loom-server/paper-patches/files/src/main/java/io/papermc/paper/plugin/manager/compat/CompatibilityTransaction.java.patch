@@ -1,0 +1,218 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransaction.java
+@@ -1,0 +_,215 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import java.lang.reflect.Array;
++import java.lang.reflect.Field;
++import java.lang.reflect.Modifier;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Comparator;
++import java.util.List;
++import java.util.Objects;
++import java.util.concurrent.atomic.AtomicLong;
++import org.bukkit.event.Cancellable;
++import org.bukkit.event.Event;
++import org.bukkit.plugin.RegisteredListener;
++
++public final class CompatibilityTransaction {
++
++    public enum State {
++        OPEN,
++        COMMITTED,
++        ABORTED
++    }
++
++    public record MonitorMutation(
++        String plugin,
++        String event,
++        long transactionId,
++        boolean cancelledChanged,
++        int beforeDigest,
++        int afterDigest
++    ) {
++    }
++
++    public record ListenerPass(
++        String plugin,
++        EventSemanticIndex.Lane lane,
++        long durationNanos,
++        boolean cancelledBefore,
++        boolean cancelledAfter
++    ) {
++    }
++
++    public record ListenerSnapshot(
++        int digest,
++        boolean cancelled
++    ) {
++    }
++
++    private static final AtomicLong NEXT_ID = new AtomicLong(1L);
++
++    private final long id;
++    private final long startedNanos;
++    private final Event event;
++    private final EventSemanticIndex.EventSemantics semantics;
++    private final boolean cancellable;
++    private final boolean initialCancelled;
++
++    private volatile State state = State.OPEN;
++    private volatile long finishedNanos;
++
++    private final List<MonitorMutation> monitorMutations = new ArrayList<>();
++    private final List<ListenerPass> listenerPasses = new ArrayList<>();
++
++    public CompatibilityTransaction(final Event event, final EventSemanticIndex.EventSemantics semantics) {
++        this.id = NEXT_ID.getAndIncrement();
++        this.startedNanos = System.nanoTime();
++        this.event = Objects.requireNonNull(event, "event");
++        this.semantics = Objects.requireNonNull(semantics, "semantics");
++        this.cancellable = event instanceof Cancellable;
++        this.initialCancelled = this.cancellable && ((Cancellable)event).isCancelled();
++    }
++
++    public long id() {
++        return this.id;
++    }
++
++    public Event event() {
++        return this.event;
++    }
++
++    public EventSemanticIndex.EventSemantics semantics() {
++        return this.semantics;
++    }
++
++    public boolean cancellable() {
++        return this.cancellable;
++    }
++
++    public boolean initialCancelled() {
++        return this.initialCancelled;
++    }
++
++    public State state() {
++        return this.state;
++    }
++
++    public long durationNanos() {
++        final long end = this.finishedNanos == 0L ? System.nanoTime() : this.finishedNanos;
++        return Math.max(0L, end - this.startedNanos);
++    }
++
++    public ListenerSnapshot beforeListener() {
++        return new ListenerSnapshot(eventDigest(this.event), this.cancellable && ((Cancellable)this.event).isCancelled());
++    }
++
++    public void afterListener(
++        final RegisteredListener listener,
++        final EventSemanticIndex.Lane lane,
++        final ListenerSnapshot before,
++        final long durationNanos
++    ) {
++        final boolean cancelledAfter = this.cancellable && ((Cancellable)this.event).isCancelled();
++        final int afterDigest = eventDigest(this.event);
++        this.listenerPasses.add(new ListenerPass(
++            listener.getPlugin().getPluginMeta().getName(),
++            lane,
++            Math.max(0L, durationNanos),
++            before.cancelled(),
++            cancelledAfter
++        ));
++
++        if (lane == EventSemanticIndex.Lane.MONITOR && (afterDigest != before.digest() || cancelledAfter != before.cancelled())) {
++            this.monitorMutations.add(new MonitorMutation(
++                listener.getPlugin().getPluginMeta().getName(),
++                this.event.getEventName(),
++                this.id,
++                cancelledAfter != before.cancelled(),
++                before.digest(),
++                afterDigest
++            ));
++        }
++    }
++
++    public void finish() {
++        if (this.state != State.OPEN) {
++            return;
++        }
++        if (this.cancellable && ((Cancellable)this.event).isCancelled()) {
++            this.state = State.ABORTED;
++        } else {
++            this.state = State.COMMITTED;
++        }
++        this.finishedNanos = System.nanoTime();
++    }
++
++    public List<MonitorMutation> monitorMutations() {
++        return List.copyOf(this.monitorMutations);
++    }
++
++    public List<ListenerPass> listenerPasses() {
++        return List.copyOf(this.listenerPasses);
++    }
++
++    private static int eventDigest(final Event event) {
++        int hash = 1;
++        for (Class<?> current = event.getClass(); current != null && Event.class.isAssignableFrom(current); current = current.getSuperclass()) {
++            final Field[] fields = current.getDeclaredFields();
++            Arrays.sort(fields, Comparator.comparing(Field::getName));
++            for (final Field field : fields) {
++                if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic()) {
++                    continue;
++                }
++                field.setAccessible(true);
++                hash = 31 * hash + field.getName().hashCode();
++                try {
++                    hash = 31 * hash + deepHash(field.get(event));
++                } catch (final IllegalAccessException ignored) {
++                    hash = 31 * hash + 7;
++                }
++            }
++        }
++        return hash;
++    }
++
++    private static int deepHash(final Object value) {
++        if (value == null) {
++            return 0;
++        }
++        final Class<?> type = value.getClass();
++        if (!type.isArray()) {
++            return value.hashCode();
++        }
++        if (type == byte[].class) {
++            return Arrays.hashCode((byte[])value);
++        }
++        if (type == short[].class) {
++            return Arrays.hashCode((short[])value);
++        }
++        if (type == int[].class) {
++            return Arrays.hashCode((int[])value);
++        }
++        if (type == long[].class) {
++            return Arrays.hashCode((long[])value);
++        }
++        if (type == char[].class) {
++            return Arrays.hashCode((char[])value);
++        }
++        if (type == float[].class) {
++            return Arrays.hashCode((float[])value);
++        }
++        if (type == double[].class) {
++            return Arrays.hashCode((double[])value);
++        }
++        if (type == boolean[].class) {
++            return Arrays.hashCode((boolean[])value);
++        }
++
++        int hash = 1;
++        final int length = Array.getLength(value);
++        for (int i = 0; i < length; ++i) {
++            hash = 31 * hash + deepHash(Array.get(value, i));
++        }
++        return hash;
++    }
++}

@@ -1,0 +1,118 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 1 Jun 2026 11:50:13 +0000
+Subject: [PATCH] Route sync chunk waits through compatibility bridge mode
+
+
+diff --git a/net/minecraft/server/dedicated/DedicatedServer.java b/net/minecraft/server/dedicated/DedicatedServer.java
+index bc857ea218018e5cf651ecd81093b4b4e566034e..9b79ab22b95e86f102fc609f493a6731d37da4fe 100644
+--- a/net/minecraft/server/dedicated/DedicatedServer.java
++++ b/net/minecraft/server/dedicated/DedicatedServer.java
+@@ -281,6 +281,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+         // Paper start - initialize global and world-defaults configuration
+         this.paperConfigurations.initializeGlobalConfiguration(this.registryAccess());
+         this.paperConfigurations.initializeWorldDefaultsConfiguration(this.registryAccess());
++        io.papermc.paper.configuration.LoomConfiguration.initialize(((java.io.File)this.options.valueOf("paper-settings-directory")).toPath());
+         // Paper end - initialize global and world-defaults configuration
+         this.server.spark.enableEarlyIfRequested(); // Paper - spark
+         // Paper start - fix converting txt to json file; convert old users earlier after PlayerList creation but before file load/save
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index 2f2e0d13dd90e0d40bc56c55c08e797cca4b5c22..173a0605cdbbef5a9b672afc5b17f3dc065bba80 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -118,7 +118,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         if (!completable.isDone()) {
+             ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.pushChunkWait(this.level, chunkX, chunkZ);
+             try {
+-                ThreadedRegionsBlockingBarrier.awaitStartupChunkLoad(this.mainThreadProcessor, completable::isDone, this.level, chunkX, chunkZ, toStatus);
++                ThreadedRegionsBlockingBarrier.awaitStartupChunkLoad(this.mainThreadProcessor, completable, this.level, chunkX, chunkZ, toStatus);
+             } finally {
+                 ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.popChunkWait();
+             }
+diff --git a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
+index e3ef3686addda221f8d5af0f53f6441836f87356..a9f8180d042e516bcac4c1f26b441250b91bd1da 100644
+--- a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
++++ b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
+@@ -1,11 +1,12 @@
+ package net.minecraft.server.threading.runtime;
+ 
++import io.papermc.paper.plugin.manager.compat.CompatibilityChunkBridge;
+ import io.papermc.paper.plugin.manager.compat.CompatibilityDiagnostics;
++import io.papermc.paper.plugin.manager.compat.PluginCompatibilityProfile;
+ import io.papermc.paper.plugin.manager.compat.CompatibilityRuntimeContext;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.locks.Condition;
+-import java.util.function.BooleanSupplier;
+ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.server.threading.TickRegions;
+@@ -30,28 +31,32 @@ public final class ThreadedRegionsBlockingBarrier {
+         return Thread.currentThread() == server.serverThread;
+     }
+ 
+-    public static void awaitStartupChunkLoad(
++    public static <T> void awaitStartupChunkLoad(
+         final BlockableEventLoop<?> owner,
+-        final BooleanSupplier done,
++        final CompletableFuture<T> future,
+         final ServerLevel level,
+         final int chunkX,
+         final int chunkZ,
+         final ChunkStatus status
+     ) {
+-        if (done.getAsBoolean()) {
++        if (future.isDone()) {
+             return;
+         }
+-        if (!isStartupChunkLoadBarrier(level)) {
+-            throw new IllegalStateException(
+-                "Non-blocking runtime cannot synchronously wait for chunk " + chunkX + "," + chunkZ + " status " + status
+-            );
++        if (isStartupChunkLoadBarrier(level)) {
++            final TickRegions.RegionContext context = TickRegions.pushLevelContext(level);
++            try {
++                owner.managedBlock(future::isDone);
++            } finally {
++                TickRegions.popContext(context);
++            }
++            return;
+         }
+-        final TickRegions.RegionContext context = TickRegions.pushLevelContext(level);
+-        try {
+-            owner.managedBlock(done);
+-        } finally {
+-            TickRegions.popContext(context);
++        if (awaitCompatibilityChunkLoad(future, chunkX, chunkZ, status)) {
++            return;
+         }
++        throw new IllegalStateException(
++            "Non-blocking runtime cannot synchronously wait for chunk " + chunkX + "," + chunkZ + " status " + status
++        );
+     }
+ 
+     public static void awaitPluginFuture(final Condition condition) throws InterruptedException {
+@@ -101,8 +106,22 @@ public final class ThreadedRegionsBlockingBarrier {
+             return;
+         }
+         final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
+-        final io.papermc.paper.plugin.manager.compat.PluginCompatibilityProfile profile = diagnostics.profileFor(plugin);
++        final PluginCompatibilityProfile profile = diagnostics.profileFor(plugin);
+         diagnostics.recordOwnerRpcWait(profile, operation, nanos);
+         diagnostics.recordBarrierWait(profile, "GLOBAL_STRICT", operation, nanos);
+     }
++
++    private static <T> boolean awaitCompatibilityChunkLoad(
++        final CompletableFuture<T> future,
++        final int chunkX,
++        final int chunkZ,
++        final ChunkStatus status
++    ) {
++        if (!CompatibilityChunkBridge.isEnabledForCurrentContext()) {
++            return false;
++        }
++        final String operation = "compatibility sync chunk wait " + chunkX + "," + chunkZ + " status " + status;
++        CompatibilityChunkBridge.awaitChunkFuture(future, operation);
++        return true;
++    }
+ }

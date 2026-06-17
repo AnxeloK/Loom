@@ -1,0 +1,495 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 10 Jun 2026 03:44:48 +0000
+Subject: [PATCH] Add tick section diagnostics
+
+
+diff --git a/net/minecraft/server/level/LoomTickSectionDiagnostics.java b/net/minecraft/server/level/LoomTickSectionDiagnostics.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..85da845af413754031e7ebfb94e2f7bd20412a22
+--- /dev/null
++++ b/net/minecraft/server/level/LoomTickSectionDiagnostics.java
+@@ -0,0 +1,161 @@
++package net.minecraft.server.level;
++
++import com.mojang.logging.LogUtils;
++import java.util.Arrays;
++import java.util.Locale;
++import org.slf4j.Logger;
++
++final class LoomTickSectionDiagnostics {
++    static final boolean ENABLED = Boolean.getBoolean("Loom.TickSectionDiagnostics");
++
++    static final int WORLD_SETUP = 0;
++    static final int PENDING_TICKS = 1;
++    static final int RAID = 2;
++    static final int CHUNK_SOURCE = 3;
++    static final int BLOCK_EVENTS = 4;
++    static final int ENTITY_ACTIVATION = 5;
++    static final int ENTITY_DESPAWN = 6;
++    static final int ENTITY_TICK = 7;
++    static final int BLOCK_ENTITIES = 8;
++    static final int ENTITY_MANAGEMENT = 9;
++    static final int DEBUG = 10;
++    static final int CHUNK_DISTANCE = 11;
++    static final int CHUNK_PLAYER_LOADER = 12;
++    static final int CHUNK_TICK_CHUNKS = 13;
++    static final int CHUNK_MAP_TICK = 14;
++    static final int CHUNK_UNLOAD = 15;
++    static final int CHUNK_CLEAR_CACHE = 16;
++    static final int CHUNK_NATURAL_SPAWN_COUNT = 17;
++    static final int CHUNK_SPAWN_SETUP = 18;
++    static final int CHUNK_COLLECT_SPAWNING = 19;
++    static final int CHUNK_SHUFFLE_SPAWNING = 20;
++    static final int CHUNK_SPAWNING_CHUNKS = 21;
++    static final int CHUNK_BROADCAST = 22;
++    static final int CHUNK_TICKING_CHUNKS = 23;
++    static final int CHUNK_CUSTOM_SPAWNERS = 24;
++
++    private static final int SECTION_COUNT = 25;
++    private static final long LOG_INTERVAL_NANOS = Math.max(
++        1_000_000_000L, Long.getLong("Loom.TickSectionDiagnosticIntervalNanos", 5_000_000_000L)
++    );
++    private static final Logger LOGGER = LogUtils.getLogger();
++    private static final String[] SECTION_NAMES = {
++        "world_setup",
++        "pending_ticks",
++        "raid",
++        "chunk_source",
++        "block_events",
++        "entity_activation",
++        "entity_despawn",
++        "entity_tick",
++        "block_entities",
++        "entity_management",
++        "debug",
++        "chunk_distance",
++        "chunk_player_loader",
++        "chunk_tick_chunks",
++        "chunk_map_tick",
++        "chunk_unload",
++        "chunk_clear_cache",
++        "chunk_natural_spawn_count",
++        "chunk_spawn_setup",
++        "chunk_collect_spawning",
++        "chunk_shuffle_spawning",
++        "chunk_spawning_chunks",
++        "chunk_broadcast",
++        "chunk_ticking_chunks",
++        "chunk_custom_spawners",
++    };
++
++    private final long[] currentNanos = new long[SECTION_COUNT];
++    private final long[] totalNanos = new long[SECTION_COUNT];
++    private final long[] maxNanos = new long[SECTION_COUNT];
++    private final long[] worstTickNanos = new long[SECTION_COUNT];
++    private long intervalStartNanos = System.nanoTime();
++    private long tickCount;
++    private long totalTickNanos;
++    private long maxTickNanos;
++    private long ticksOver50Millis;
++    private long ticksOver100Millis;
++
++    static LoomTickSectionDiagnostics create() {
++        return ENABLED ? new LoomTickSectionDiagnostics() : null;
++    }
++
++    void beginTick() {
++        Arrays.fill(this.currentNanos, 0L);
++    }
++
++    void record(final int section, final long nanos) {
++        if (nanos <= 0L) {
++            return;
++        }
++        this.currentNanos[section] += nanos;
++        this.totalNanos[section] += nanos;
++        this.maxNanos[section] = Math.max(this.maxNanos[section], nanos);
++    }
++
++    void endTick(final ServerLevel level, final long tickStartNanos) {
++        final long now = System.nanoTime();
++        final long tickNanos = now - tickStartNanos;
++        ++this.tickCount;
++        this.totalTickNanos += tickNanos;
++        if (tickNanos > this.maxTickNanos) {
++            this.maxTickNanos = tickNanos;
++            System.arraycopy(this.currentNanos, 0, this.worstTickNanos, 0, SECTION_COUNT);
++        }
++        if (tickNanos >= 50_000_000L) {
++            ++this.ticksOver50Millis;
++        }
++        if (tickNanos >= 100_000_000L) {
++            ++this.ticksOver100Millis;
++        }
++        if ((now - this.intervalStartNanos) >= LOG_INTERVAL_NANOS) {
++            this.logAndReset(level, now);
++        }
++    }
++
++    private void logAndReset(final ServerLevel level, final long now) {
++        if (this.tickCount == 0L) {
++            return;
++        }
++
++        LOGGER.info(
++            "[loom.tick-sections] world={} ticks={} tick_avg_ms={} tick_max_ms={} ticks_over_50ms={} ticks_over_100ms={} avg_ms={} max_ms={} worst_tick_ms={}",
++            level.dimension(),
++            this.tickCount,
++            formatMillis(this.totalTickNanos / this.tickCount),
++            formatMillis(this.maxTickNanos),
++            this.ticksOver50Millis,
++            this.ticksOver100Millis,
++            this.formatSections(this.totalNanos, this.tickCount),
++            this.formatSections(this.maxNanos, 1L),
++            this.formatSections(this.worstTickNanos, 1L)
++        );
++
++        Arrays.fill(this.totalNanos, 0L);
++        Arrays.fill(this.maxNanos, 0L);
++        Arrays.fill(this.worstTickNanos, 0L);
++        this.intervalStartNanos = now;
++        this.tickCount = 0L;
++        this.totalTickNanos = 0L;
++        this.maxTickNanos = 0L;
++        this.ticksOver50Millis = 0L;
++        this.ticksOver100Millis = 0L;
++    }
++
++    private String formatSections(final long[] values, final long divisor) {
++        final StringBuilder builder = new StringBuilder(384);
++        for (int i = 0; i < SECTION_COUNT; ++i) {
++            if (i != 0) {
++                builder.append(',');
++            }
++            builder.append(SECTION_NAMES[i]).append('=').append(formatMillis(values[i] / divisor));
++        }
++        return builder.toString();
++    }
++
++    private static String formatMillis(final long nanos) {
++        return String.format(Locale.ROOT, "%.3f", nanos / 1_000_000.0D);
++    }
++}
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index 173a0605cdbbef5a9b672afc5b17f3dc065bba80..c0c5d5f8f26e910274a5be116eddd02c6dc404af 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -485,6 +485,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+ 
+     @Override
+     public void tick(final BooleanSupplier haveTime, final boolean tickChunks) {
++        final LoomTickSectionDiagnostics loomDiagnostics = this.level.loom$getTickSectionDiagnostics();
++        long loomSectionStart = loomDiagnostics == null ? 0L : System.nanoTime();
+         ProfilerFiller profiler = Profiler.get();
+         profiler.push("purge");
+         if (this.level.tickRateManager().runsNormally() || !tickChunks || this.level.spigotConfig.unloadFrozenChunks) { // Spigot
+@@ -492,17 +494,45 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         }
+ 
+         this.runDistanceManagerUpdates();
++        if (loomDiagnostics != null) {
++            final long now = System.nanoTime();
++            loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_DISTANCE, now - loomSectionStart);
++            loomSectionStart = now;
++        }
+         profiler.popPush("chunks");
+         if (tickChunks) {
+             ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)this.level).moonrise$getPlayerChunkLoader().tick(); // Paper - rewrite chunk system
++            if (loomDiagnostics != null) {
++                final long now = System.nanoTime();
++                loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_PLAYER_LOADER, now - loomSectionStart);
++                loomSectionStart = now;
++            }
+             this.tickChunks();
++            if (loomDiagnostics != null) {
++                final long now = System.nanoTime();
++                loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_TICK_CHUNKS, now - loomSectionStart);
++                loomSectionStart = now;
++            }
+             this.chunkMap.tick();
++            if (loomDiagnostics != null) {
++                final long now = System.nanoTime();
++                loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_MAP_TICK, now - loomSectionStart);
++                loomSectionStart = now;
++            }
+         }
+ 
+         profiler.popPush("unload");
+         this.chunkMap.tick(haveTime);
++        if (loomDiagnostics != null) {
++            final long now = System.nanoTime();
++            loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_UNLOAD, now - loomSectionStart);
++            loomSectionStart = now;
++        }
+         profiler.pop();
+         this.clearCache();
++        if (loomDiagnostics != null) {
++            loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_CLEAR_CACHE, System.nanoTime() - loomSectionStart);
++        }
+     }
+ 
+     private void tickChunks() {
+@@ -524,6 +554,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+     }
+ 
+     private void broadcastChangedChunks(final ProfilerFiller profiler) {
++        final LoomTickSectionDiagnostics loomDiagnostics = this.level.loom$getTickSectionDiagnostics();
++        final long loomSectionStart = loomDiagnostics == null ? 0L : System.nanoTime();
+         profiler.push("broadcast");
+ 
+         for (ChunkHolder chunkHolder : this.chunkHoldersToBroadcast) {
+@@ -535,9 +567,14 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+ 
+         this.chunkHoldersToBroadcast.clear();
+         profiler.pop();
++        if (loomDiagnostics != null) {
++            loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_BROADCAST, System.nanoTime() - loomSectionStart);
++        }
+     }
+ 
+     private void tickChunks(final ProfilerFiller profiler, final long timeDiff) {
++        final LoomTickSectionDiagnostics loomDiagnostics = this.level.loom$getTickSectionDiagnostics();
++        long loomSectionStart = loomDiagnostics == null ? 0L : System.nanoTime();
+         profiler.push("naturalSpawnCount");
+         int chunkCount = this.distanceManager.getNaturalSpawnChunkCount();
+         // Paper start - Optional per player mob spawns
+@@ -563,6 +600,11 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         }
+         // Paper end - Optional per player mob spawns
+         this.lastSpawnState = spawnCookie;
++        if (loomDiagnostics != null) {
++            final long now = System.nanoTime();
++            loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_NATURAL_SPAWN_COUNT, now - loomSectionStart);
++            loomSectionStart = now;
++        }
+         boolean doMobSpawning = this.level.getGameRules().get(GameRules.SPAWN_MOBS) && !this.level.players().isEmpty(); // CraftBukkit
+         int tickSpeed = this.level.getGameRules().get(GameRules.RANDOM_TICK_SPEED);
+         List<MobCategory> spawningCategories;
+@@ -580,17 +622,32 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         } else {
+             spawningCategories = List.of();
+         }
++        if (loomDiagnostics != null) {
++            final long now = System.nanoTime();
++            loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_SPAWN_SETUP, now - loomSectionStart);
++            loomSectionStart = now;
++        }
+ 
+         List<LevelChunk> spawningChunks = this.spawningChunks;
+ 
+         try {
+             profiler.popPush("filteringSpawningChunks");
+             this.chunkMap.collectSpawningChunks(spawningChunks);
++            if (loomDiagnostics != null) {
++                final long now = System.nanoTime();
++                loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_COLLECT_SPAWNING, now - loomSectionStart);
++                loomSectionStart = now;
++            }
+             profiler.popPush("shuffleSpawningChunks");
+             // Paper start - chunk tick iteration optimisation
+             this.shuffleRandom.setSeed(this.level.getRandom().nextLong());
+             if (!this.level.paperConfig().entities.spawning.perPlayerMobSpawns) Util.shuffle(spawningChunks, this.level.getRandom()); // Paper - Optional per player mob spawns; do not need this when per-player is enabled
+             // Paper end - chunk tick iteration optimisation
++            if (loomDiagnostics != null) {
++                final long now = System.nanoTime();
++                loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_SHUFFLE_SPAWNING, now - loomSectionStart);
++                loomSectionStart = now;
++            }
+             profiler.popPush("tickSpawningChunks");
+ 
+             for (LevelChunk chunk : spawningChunks) {
+@@ -599,12 +656,25 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         } finally {
+             spawningChunks.clear();
+         }
++        if (loomDiagnostics != null) {
++            final long now = System.nanoTime();
++            loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_SPAWNING_CHUNKS, now - loomSectionStart);
++            loomSectionStart = now;
++        }
+ 
+         profiler.popPush("tickTickingChunks");
+         this.iterateTickingChunksFaster(); // Paper - chunk tick iteration optimizations
++        if (loomDiagnostics != null) {
++            final long now = System.nanoTime();
++            loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_TICKING_CHUNKS, now - loomSectionStart);
++            loomSectionStart = now;
++        }
+         if (doMobSpawning) {
+             profiler.popPush("customSpawners");
+             this.level.tickCustomSpawners(this.spawnEnemies);
++            if (loomDiagnostics != null) {
++                loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_CUSTOM_SPAWNERS, System.nanoTime() - loomSectionStart);
++            }
+         }
+ 
+         profiler.pop();
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 72152331e738d7e1141bd3f58103acf21857bf5a..ad9e062e2bd74dc36cda2ab65a11f7cf753605a6 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -193,6 +193,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     private static final int MAX_SCHEDULED_TICKS_PER_TICK = 65536;
+     private final List<ServerPlayer> players = Lists.newArrayList();
+     public final ServerChunkCache chunkSource;
++    private final @Nullable LoomTickSectionDiagnostics loomTickSectionDiagnostics = LoomTickSectionDiagnostics.create();
+     private final MinecraftServer server;
+     public final io.papermc.paper.world.saveddata.PaperLevelOverrides serverLevelData; // Paper - type
+     private final EntityTickList entityTickList = new EntityTickList();
+@@ -765,6 +766,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         return this.environmentAttributes;
+     }
+ 
++    @Nullable LoomTickSectionDiagnostics loom$getTickSectionDiagnostics() {
++        return this.loomTickSectionDiagnostics;
++    }
++
+     @Deprecated
+     @VisibleForTesting
+     public EnvironmentAttributeSystem setEnvironmentAttributes(final EnvironmentAttributeSystem environmentAttributes) {
+@@ -774,6 +779,12 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     }
+ 
+     public void tick(final BooleanSupplier haveTime) {
++        final LoomTickSectionDiagnostics loomDiagnostics = this.loomTickSectionDiagnostics;
++        final long loomTickStart = loomDiagnostics == null ? 0L : System.nanoTime();
++        long loomSectionStart = loomTickStart;
++        if (loomDiagnostics != null) {
++            loomDiagnostics.beginTick();
++        }
+         ProfilerFiller profiler = Profiler.get();
+         this.handlingTick = true;
+         TickRateManager tickRateManager = this.tickRateManager();
+@@ -817,6 +828,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             this.tickTime();
+         }
+ 
++        if (loomDiagnostics != null) {
++            final long now = System.nanoTime();
++            loomDiagnostics.record(LoomTickSectionDiagnostics.WORLD_SETUP, now - loomSectionStart);
++            loomSectionStart = now;
++        }
+         profiler.push("tickPending");
+         if (!this.isDebug() && runs) {
+             long tick = this.getGameTime();
+@@ -827,18 +843,37 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             profiler.pop();
+         }
+ 
++        if (loomDiagnostics != null) {
++            final long now = System.nanoTime();
++            loomDiagnostics.record(LoomTickSectionDiagnostics.PENDING_TICKS, now - loomSectionStart);
++            loomSectionStart = now;
++        }
+         profiler.popPush("raid");
+         if (runs) {
+             this.raids.tick(this);
+         }
+ 
++        if (loomDiagnostics != null) {
++            final long now = System.nanoTime();
++            loomDiagnostics.record(LoomTickSectionDiagnostics.RAID, now - loomSectionStart);
++            loomSectionStart = now;
++        }
+         profiler.popPush("chunkSource");
+         this.getChunkSource().tick(haveTime, true);
++        if (loomDiagnostics != null) {
++            final long now = System.nanoTime();
++            loomDiagnostics.record(LoomTickSectionDiagnostics.CHUNK_SOURCE, now - loomSectionStart);
++            loomSectionStart = now;
++        }
+         profiler.popPush("blockEvents");
+         if (runs) {
+             this.runBlockEvents();
+         }
+ 
++        if (loomDiagnostics != null) {
++            final long now = System.nanoTime();
++            loomDiagnostics.record(LoomTickSectionDiagnostics.BLOCK_EVENTS, now - loomSectionStart);
++        }
+         this.handlingTick = false;
+         profiler.pop();
+         boolean isActive = !paperConfig().unsupportedSettings.disableWorldTickingWhenEmpty || this.chunkSource.hasActiveTickets(); // CraftBukkit - this prevents entity cleanup, other issues on servers with no players // Paper - restore this
+@@ -852,6 +887,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+ 
+         if (this.emptyTime < 300) {
+             profiler.push("entities");
++            long loomEntitySectionStart = loomDiagnostics == null ? 0L : System.nanoTime();
+             if (this.dragonFight != null && runs) {
+                 profiler.push("dragonFight");
+                 this.dragonFight.tick();
+@@ -859,13 +895,22 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             }
+ 
+             io.papermc.paper.entity.activation.ActivationRange.activateEntities(this); // Paper - EAR
++            if (loomDiagnostics != null) {
++                final long now = System.nanoTime();
++                loomDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_ACTIVATION, now - loomEntitySectionStart);
++                loomEntitySectionStart = now;
++            }
+             this.entityTickList
+                 .forEach(
+                     entity -> {
+                         if (!entity.isRemoved()) {
+                             if (!tickRateManager.isEntityFrozen(entity)) {
+                                 profiler.push("checkDespawn");
++                                final long loomDespawnStart = loomDiagnostics == null ? 0L : System.nanoTime();
+                                 entity.checkDespawn();
++                                if (loomDiagnostics != null) {
++                                    loomDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_DESPAWN, System.nanoTime() - loomDespawnStart);
++                                }
+                                 profiler.pop();
+                                 if (true) { // Paper - rewrite chunk system
+                                     Entity vehicle = entity.getVehicle();
+@@ -878,7 +923,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+                                     }
+ 
+                                     profiler.push("tick");
++                                    final long loomEntityTickStart = loomDiagnostics == null ? 0L : System.nanoTime();
+                                     this.guardEntityTick(this::tickNonPassenger, entity);
++                                    if (loomDiagnostics != null) {
++                                        loomDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_TICK, System.nanoTime() - loomEntityTickStart);
++                                    }
+                                     profiler.pop();
+                                 }
+                             }
+@@ -886,13 +935,23 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+                     }
+                 );
+             profiler.popPush("blockEntities");
++            final long loomBlockEntitiesStart = loomDiagnostics == null ? 0L : System.nanoTime();
+             this.tickBlockEntities();
++            if (loomDiagnostics != null) {
++                loomDiagnostics.record(LoomTickSectionDiagnostics.BLOCK_ENTITIES, System.nanoTime() - loomBlockEntitiesStart);
++            }
+             profiler.pop();
+         }
+ 
++        loomSectionStart = loomDiagnostics == null ? 0L : System.nanoTime();
+         profiler.push("entityManagement");
+         // Paper - rewrite chunk system
+         profiler.pop();
++        if (loomDiagnostics != null) {
++            final long now = System.nanoTime();
++            loomDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_MANAGEMENT, now - loomSectionStart);
++            loomSectionStart = now;
++        }
+         profiler.push("debugSynchronizers");
+         if (this.debugSynchronizers.hasAnySubscriberFor(DebugSubscriptions.NEIGHBOR_UPDATES)) {
+             this.neighborUpdater
+@@ -903,7 +962,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+ 
+         this.debugSynchronizers.tick(this.server.debugSubscribers());
+         profiler.pop();
++        if (loomDiagnostics != null) {
++            final long now = System.nanoTime();
++            loomDiagnostics.record(LoomTickSectionDiagnostics.DEBUG, now - loomSectionStart);
++        }
+         this.environmentAttributes().invalidateTickCache();
++        if (loomDiagnostics != null) {
++            loomDiagnostics.endTick(this, loomTickStart);
++        }
+     }
+ 
+     @Override

@@ -1,0 +1,101 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/EventSemanticIndex.java
+@@ -1,0 +_,98 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.CopyOnWriteArrayList;
++import org.bukkit.event.Cancellable;
++import org.bukkit.event.Event;
++import org.bukkit.event.EventPriority;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.RegisteredListener;
++
++public final class EventSemanticIndex {
++
++    public enum Lane {
++        LOWEST,
++        LOW,
++        NORMAL,
++        HIGH,
++        HIGHEST,
++        MONITOR
++    }
++
++    public record ListenerSemantic(
++        String plugin,
++        EventPriority priority,
++        boolean ignoreCancelled,
++        Lane lane
++    ) {
++    }
++
++    public record EventSemantics(
++        String eventName,
++        boolean cancellable,
++        boolean orderedDecision,
++        boolean monitorListeners,
++        List<ListenerSemantic> listeners
++    ) {
++    }
++
++    private final Map<Class<? extends Event>, CopyOnWriteArrayList<ListenerSemantic>> listenerIndex = new ConcurrentHashMap<>();
++
++    public void recordRegistration(
++        final Class<? extends Event> eventClass,
++        final Plugin plugin,
++        final EventPriority priority,
++        final boolean ignoreCancelled
++    ) {
++        final ListenerSemantic listener = new ListenerSemantic(
++            plugin.getPluginMeta().getName(),
++            priority,
++            ignoreCancelled,
++            lane(priority)
++        );
++        this.listenerIndex.computeIfAbsent(eventClass, ignored -> new CopyOnWriteArrayList<>()).add(listener);
++    }
++
++    public EventSemantics resolve(final Event event, final RegisteredListener[] listeners) {
++        final Class<? extends Event> eventClass = event.getClass();
++        final boolean cancellable = event instanceof Cancellable;
++
++        final List<ListenerSemantic> resolved = new ArrayList<>(listeners.length);
++        boolean hasMonitor = false;
++        for (final RegisteredListener listener : listeners) {
++            final ListenerSemantic semantic = new ListenerSemantic(
++                listener.getPlugin().getPluginMeta().getName(),
++                listener.getPriority(),
++                listener.isIgnoringCancelled(),
++                lane(listener.getPriority())
++            );
++            resolved.add(semantic);
++            hasMonitor |= semantic.lane() == Lane.MONITOR;
++        }
++
++        this.listenerIndex.put(eventClass, new CopyOnWriteArrayList<>(resolved));
++
++        // All Bukkit dispatches are ordered, but cancellable events are decision-critical.
++        final boolean orderedDecision = cancellable || listeners.length > 1;
++        return new EventSemantics(event.getEventName(), cancellable, orderedDecision, hasMonitor, resolved);
++    }
++
++    public List<ListenerSemantic> snapshot(final Class<? extends Event> eventClass) {
++        final CopyOnWriteArrayList<ListenerSemantic> listeners = this.listenerIndex.get(eventClass);
++        return listeners == null ? List.of() : List.copyOf(listeners);
++    }
++
++    public static Lane lane(final EventPriority priority) {
++        return switch (priority) {
++            case LOWEST -> Lane.LOWEST;
++            case LOW -> Lane.LOW;
++            case NORMAL -> Lane.NORMAL;
++            case HIGH -> Lane.HIGH;
++            case HIGHEST -> Lane.HIGHEST;
++            case MONITOR -> Lane.MONITOR;
++        };
++    }
++}

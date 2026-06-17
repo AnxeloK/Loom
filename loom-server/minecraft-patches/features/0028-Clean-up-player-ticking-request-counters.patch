@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 10 Jun 2026 14:50:00 +0000
+Subject: [PATCH] Clean up player ticking request counters
+
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index ad9e062e2bd74dc36cda2ab65a11f7cf753605a6..a00d52729d405d7ef3f8ec166a8e7d42b8908bd4 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -544,7 +544,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     @Override
+     public final void moonrise$markChunkForPlayerTicking(final LevelChunk chunk) {
+         final ChunkPos pos = chunk.getPos();
+-        if (!this.playerTickingRequests.containsKey(ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkKey(pos))) {
++        if (this.playerTickingRequests.get(ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkKey(pos)) <= 0) {
+             return;
+         }
+ 
+@@ -585,6 +585,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         final int val = this.playerTickingRequests.addTo(chunkKey, -1);
+ 
+         if (val <= 0) {
++            this.playerTickingRequests.remove(chunkKey);
+             throw new IllegalStateException("Negative counter");
+         }
+ 
+@@ -593,6 +594,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             return;
+         }
+ 
++        this.playerTickingRequests.remove(chunkKey);
++
+         final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder chunkHolder = ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)(ServerLevel)(Object)this).moonrise$getChunkTaskScheduler()
+             .chunkHolderManager.getChunkHolder(chunkKey);
+ 

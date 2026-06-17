@@ -1,0 +1,1407 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 8 May 2026 17:37:33 +0000
+Subject: [PATCH] Route networking, login, and packet handling through owner
+ domains
+
+
+diff --git a/io/papermc/paper/util/KeepAlive.java b/io/papermc/paper/util/KeepAlive.java
+index 66d6af2833d76af28fbeb2ce70c194a559572460..7a260cf3b908b1752031d2feb35d9b95531c0c30 100644
+--- a/io/papermc/paper/util/KeepAlive.java
++++ b/io/papermc/paper/util/KeepAlive.java
+@@ -37,15 +37,17 @@ public class KeepAlive {
+         }
+ 
+         private void copyFrom(PingCalculator other) {
+-            for (KeepAliveResponse response : other.responses) {
+-                this.responses.add(response);
++            synchronized (other) {
++                for (KeepAliveResponse response : other.responses) {
++                    this.responses.add(response);
++                }
++                this.timeSumNS = other.timeSumNS;
++                this.timeSumCount = other.timeSumCount;
++                this.lastAverageNS = other.lastAverageNS;
+             }
+-            this.timeSumNS = other.timeSumNS;
+-            this.timeSumCount = other.timeSumCount;
+-            this.lastAverageNS = other.lastAverageNS;
+         }
+ 
+-        public void update(KeepAliveResponse response) {
++        public synchronized void update(KeepAliveResponse response) {
+             long currTime = response.txTimeNS;
+ 
+             this.responses.add(response);
+@@ -71,7 +73,7 @@ public class KeepAlive {
+             return this.lastAverageNS;
+         }
+ 
+-        public it.unimi.dsi.fastutil.longs.LongArrayList getAllNS() {
++        public synchronized it.unimi.dsi.fastutil.longs.LongArrayList getAllNS() {
+             it.unimi.dsi.fastutil.longs.LongArrayList ret = new it.unimi.dsi.fastutil.longs.LongArrayList();
+ 
+             for (KeepAliveResponse response : this.responses) {
+diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
+index 5a23f95aff982ecc58d2e2bc994f4e495285069c..f278e1371fb73157010bcb117058239e4546a12a 100644
+--- a/net/minecraft/network/Connection.java
++++ b/net/minecraft/network/Connection.java
+@@ -43,6 +43,7 @@ import net.minecraft.network.protocol.handshake.ServerHandshakePacketListener;
+ import net.minecraft.network.protocol.login.ClientLoginPacketListener;
+ import net.minecraft.network.protocol.login.ClientboundLoginDisconnectPacket;
+ import net.minecraft.network.protocol.login.LoginProtocols;
++import net.minecraft.server.threading.runtime.DomainClock;
+ import net.minecraft.network.protocol.status.ClientStatusPacketListener;
+ import net.minecraft.network.protocol.status.StatusProtocols;
+ import net.minecraft.server.RunningOnDifferentThreadException;
+@@ -58,6 +59,7 @@ import org.slf4j.MarkerFactory;
+ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+     private static final float AVERAGE_PACKETS_SMOOTHING = 0.75F;
+     private static final Logger LOGGER = LogUtils.getLogger();
++    public static final int READ_TIMEOUT_SECONDS = Math.max(30, Integer.getInteger("paper.playerconnection.read-timeout", Integer.getInteger("paper.playerconnection.keepalive", 30)));
+     public static final Marker ROOT_MARKER = MarkerFactory.getMarker("NETWORK");
+     public static final Marker PACKET_MARKER = Util.make(MarkerFactory.getMarker("NETWORK_PACKETS"), m -> m.add(ROOT_MARKER));
+     public static final Marker PACKET_RECEIVED_MARKER = Util.make(MarkerFactory.getMarker("PACKET_RECEIVED"), m -> m.add(PACKET_MARKER));
+@@ -554,23 +556,59 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+     private static final int MAX_PER_TICK = io.papermc.paper.configuration.GlobalConfiguration.get().misc.maxJoinsPerTick; // Paper - Buffer joins to world
+     private static int joinAttemptsThisTick; // Paper - Buffer joins to world
+     private static int currTick; // Paper - Buffer joins to world
++
++    private static void runListenerInOwnerContext(final PacketListener listener, final Runnable action) {
++        if (listener instanceof net.minecraft.server.network.ServerGamePacketListenerImpl gameListener) {
++            final net.minecraft.server.level.ServerPlayer player = gameListener.player;
++            final net.minecraft.server.level.ServerLevel level = player.level();
++            final net.minecraft.world.level.ChunkPos chunkPos = player.chunkPosition();
++            final int radius = Math.max(io.papermc.paper.FeatureHooks.getViewDistance(level), io.papermc.paper.FeatureHooks.getSimulationDistance(level)) + 1;
++            final int minChunkX = chunkPos.x() - radius;
++            final int minChunkZ = chunkPos.z() - radius;
++            final int maxChunkX = chunkPos.x() + radius;
++            final int maxChunkZ = chunkPos.z() + radius;
++            if (net.minecraft.server.threading.TickRegions.currentContext() != null
++                && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++                action.run();
++                return;
++            }
++
++            final net.minecraft.server.threading.TickRegions.RegionContext context =
++                net.minecraft.server.threading.TickRegions.pushRegionContext(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
++            try {
++                action.run();
++            } finally {
++                net.minecraft.server.threading.TickRegions.popContext(context);
++            }
++            return;
++        }
++
++        action.run();
++    }
++
++    private static void tickListenerInOwnerContext(final PacketListener listener, final TickablePacketListener tickable) {
++        runListenerInOwnerContext(listener, tickable::tick);
++    }
++
+     public void tick() {
+         this.flushQueue();
+         // Paper start - Buffer joins to world
+-        if (Connection.currTick != net.minecraft.server.MinecraftServer.currentTick) {
+-            Connection.currTick = net.minecraft.server.MinecraftServer.currentTick;
++        final int currentTick = DomainClock.currentServerTick();
++        if (Connection.currTick != currentTick) {
++            Connection.currTick = currentTick;
+             Connection.joinAttemptsThisTick = 0;
+         }
+         // Paper end - Buffer joins to world
+-        if (this.packetListener instanceof TickablePacketListener tickable) {
++        final PacketListener listener = this.packetListener;
++        if (listener instanceof TickablePacketListener tickable) {
+             // Paper start - Buffer joins to world
+-            if (!(this.packetListener instanceof net.minecraft.server.network.ServerLoginPacketListenerImpl loginPacketListener)
++            if (!(listener instanceof net.minecraft.server.network.ServerLoginPacketListenerImpl loginPacketListener)
+                 || loginPacketListener.state != net.minecraft.server.network.ServerLoginPacketListenerImpl.State.VERIFYING
+                 || Connection.joinAttemptsThisTick++ < MAX_PER_TICK) {
+             // Paper start - detailed watchdog information
+-            net.minecraft.network.PacketProcessor.packetProcessing.push(this.packetListener);
++            net.minecraft.network.PacketProcessor.packetProcessing.push(listener);
+             try {
+-            tickable.tick();
++            tickListenerInOwnerContext(listener, tickable);
+             } finally {
+                 net.minecraft.network.PacketProcessor.packetProcessing.pop();
+             } // Paper end - detailed watchdog information
+@@ -578,7 +616,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+         }
+ 
+         if (!this.isConnected() && !this.disconnectionHandled) {
+-            this.handleDisconnection();
++            this.handleDisconnectionInOwnerContext();
+         }
+ 
+         if (this.channel != null) {
+@@ -664,7 +702,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+                 } catch (ChannelException var3) {
+                 }
+ 
+-                ChannelPipeline pipeline = channel.pipeline().addLast(HandlerNames.TIMEOUT, new ReadTimeoutHandler(30));
++                ChannelPipeline pipeline = channel.pipeline().addLast(HandlerNames.TIMEOUT, new ReadTimeoutHandler(Connection.READ_TIMEOUT_SECONDS));
+                 Connection.configureSerialization(pipeline, PacketFlow.CLIENTBOUND, false, connection.bandwidthDebugMonitor);
+                 connection.configurePacketHandler(pipeline);
+             }
+@@ -856,6 +894,12 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+         }
+     }
+ 
++    public void handleDisconnectionInOwnerContext() {
++        final PacketListener packetListener = this.getPacketListener();
++        final PacketListener disconnectListener = packetListener != null ? packetListener : this.disconnectListener;
++        runListenerInOwnerContext(disconnectListener, this::handleDisconnection);
++    }
++
+     public float getAverageReceivedPackets() {
+         return this.averageReceivedPackets;
+     }
+diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
+index 197adf43de3618fbd4c72bb2a4736b1cd61fbee7..ce2d08456ed4ca4c2d349bd9043fa573bc9992b3 100644
+--- a/net/minecraft/network/PacketProcessor.java
++++ b/net/minecraft/network/PacketProcessor.java
+@@ -35,8 +35,8 @@ public class PacketProcessor implements AutoCloseable {
+     }
+     // Paper end - improve tick loop
+ 
+-    public boolean isSameThread() {
+-        return Thread.currentThread() == this.runningThread;
++    public boolean canHandleInline() {
++        return net.minecraft.server.threading.runtime.OwnerDomainExecutor.canRunSynchronousCallbacks();
+     }
+ 
+     public <T extends PacketListener> void scheduleIfPossible(final T listener, final Packet<T> packet) {
+@@ -66,6 +66,10 @@ public class PacketProcessor implements AutoCloseable {
+         }
+     }
+ 
++    public static <T extends PacketListener> void handlePacketOnCurrentThread(final T listener, final Packet<T> packet) {
++        new PacketProcessor.ListenerAndPacket<>(listener, packet).handle();
++    }
++
+     @Override
+     public void close() {
+         this.closed = true;
+@@ -87,25 +91,58 @@ public class PacketProcessor implements AutoCloseable {
+ 
+         return listeners;
+     }
++
++    private static void runListenerInOwnerContext(final PacketListener listener, final Runnable action) {
++        if (listener instanceof net.minecraft.server.network.ServerGamePacketListenerImpl gameListener) {
++            final net.minecraft.server.level.ServerPlayer player = gameListener.player;
++            final net.minecraft.server.level.ServerLevel level = player.level();
++            final net.minecraft.world.level.ChunkPos chunkPos = player.chunkPosition();
++            final int radius = Math.max(io.papermc.paper.FeatureHooks.getViewDistance(level), io.papermc.paper.FeatureHooks.getSimulationDistance(level)) + 1;
++            final int minChunkX = chunkPos.x() - radius;
++            final int minChunkZ = chunkPos.z() - radius;
++            final int maxChunkX = chunkPos.x() + radius;
++            final int maxChunkZ = chunkPos.z() + radius;
++            if (net.minecraft.server.threading.TickRegions.currentContext() != null
++                && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++                action.run();
++                return;
++            }
++
++            final net.minecraft.server.threading.TickRegions.RegionContext context =
++                net.minecraft.server.threading.TickRegions.pushRegionContext(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
++            try {
++                action.run();
++            } finally {
++                net.minecraft.server.threading.TickRegions.popContext(context);
++            }
++            return;
++        }
++
++        action.run();
++    }
++
+     // Paper end - detailed watchdog information
+ 
+     private record ListenerAndPacket<T extends PacketListener>(T listener, Packet<T> packet) {
+         public void handle() {
+             packetProcessing.push(this.listener); // Paper - detailed watchdog information
+             try { // Paper - detailed watchdog information
+-            if (this.listener.shouldHandleMessage(this.packet)) {
+-                try {
+-                    this.packet.handle(this.listener);
+-                } catch (Exception var3) {
+-                    if (var3 instanceof ReportedException re && re.getCause() instanceof OutOfMemoryError) {
+-                        throw PacketUtils.makeReportedException(var3, this.packet, this.listener);
++            runListenerInOwnerContext(this.listener, () -> {
++                if (this.listener instanceof net.minecraft.server.network.ServerCommonPacketListenerImpl serverCommonPacketListener && serverCommonPacketListener.processedDisconnect) return; // Paper - Don't handle sync packets for kicked players
++                if (this.listener.shouldHandleMessage(this.packet)) {
++                    try {
++                        this.packet.handle(this.listener);
++                    } catch (Exception var3) {
++                        if (var3 instanceof ReportedException re && re.getCause() instanceof OutOfMemoryError) {
++                            throw PacketUtils.makeReportedException(var3, this.packet, this.listener);
++                        }
++
++                        this.listener.onPacketError(this.packet, var3);
+                     }
+-
+-                    this.listener.onPacketError(this.packet, var3);
++                } else {
++                    PacketProcessor.LOGGER.debug("Ignoring packet due to disconnection: {}", this.packet);
+                 }
+-            } else {
+-                PacketProcessor.LOGGER.debug("Ignoring packet due to disconnection: {}", this.packet);
+-            }
++            });
+             // Paper start - detailed watchdog information
+             } finally {
+                 totalMainThreadPacketsProcessed.getAndIncrement();
+diff --git a/net/minecraft/network/PacketSendListener.java b/net/minecraft/network/PacketSendListener.java
+index cf02121b48890c3c50b35c7f95c6dbd1ba1fdfe3..e832a506de4a64dc37eb68b4f43263831e1d2485 100644
+--- a/net/minecraft/network/PacketSendListener.java
++++ b/net/minecraft/network/PacketSendListener.java
+@@ -2,6 +2,7 @@ package net.minecraft.network;
+ 
+ import com.mojang.logging.LogUtils;
+ import io.netty.channel.ChannelFutureListener;
++import java.nio.channels.ClosedChannelException;
+ import java.util.function.Supplier;
+ import net.minecraft.network.protocol.Packet;
+ import org.jspecify.annotations.Nullable;
+@@ -24,6 +25,10 @@ public class PacketSendListener {
+             if (!future.isSuccess()) {
+                 Packet<?> newPacket = handler.get();
+                 if (newPacket != null) {
++                    if (future.cause() instanceof ClosedChannelException) {
++                        LOGGER.debug("Skipping fallback {} because the channel is already closed", newPacket.type(), future.cause());
++                        return;
++                    }
+                     LOGGER.warn("Failed to deliver packet, sending fallback {}", newPacket.type(), future.cause());
+                     future.channel().writeAndFlush(newPacket, future.channel().voidPromise());
+                 } else {
+diff --git a/net/minecraft/network/protocol/PacketUtils.java b/net/minecraft/network/protocol/PacketUtils.java
+index 144c18c08bf8f03d907b97f968aa171a9fbf997f..2757948dc4ddd040c812e7aabacc43a49430329c 100644
+--- a/net/minecraft/network/protocol/PacketUtils.java
++++ b/net/minecraft/network/protocol/PacketUtils.java
+@@ -19,7 +19,7 @@ public class PacketUtils {
+     }
+ 
+     public static <T extends PacketListener> void ensureRunningOnSameThread(final Packet<T> packet, final T listener, final PacketProcessor packetProcessor) throws RunningOnDifferentThreadException {
+-        if (!packetProcessor.isSameThread()) {
++        if (!packetProcessor.canHandleInline()) {
+             packetProcessor.scheduleIfPossible(listener, packet);
+             throw RunningOnDifferentThreadException.RUNNING_ON_DIFFERENT_THREAD;
+         }
+diff --git a/net/minecraft/server/network/LegacyTextFilter.java b/net/minecraft/server/network/LegacyTextFilter.java
+index 43d6640a5e6afdf3e269be121b888b56f80e690a..d710a6a0a74935686dffb20dc8e956a7636e71ae 100644
+--- a/net/minecraft/server/network/LegacyTextFilter.java
++++ b/net/minecraft/server/network/LegacyTextFilter.java
+@@ -128,7 +128,7 @@ public class LegacyTextFilter extends ServerTextFilter {
+             }
+ 
+             @Override
+-            public void join() {
++            public void joinFilter() {
+                 LegacyTextFilter.this.processJoinOrLeave(
+                     this.profile, LegacyTextFilter.this.joinEndpoint, LegacyTextFilter.this.joinEncoder, this.streamExecutor
+                 );
+diff --git a/net/minecraft/server/network/PlayerSafetyServiceTextFilter.java b/net/minecraft/server/network/PlayerSafetyServiceTextFilter.java
+index 607c4923fef6bcba0cc5e8f2b5a0eb9b29aed94b..aa80bd235ac56130999252df057bc92604082d7f 100644
+--- a/net/minecraft/server/network/PlayerSafetyServiceTextFilter.java
++++ b/net/minecraft/server/network/PlayerSafetyServiceTextFilter.java
+@@ -19,6 +19,7 @@ import java.util.HashSet;
+ import java.util.Locale;
+ import java.util.Set;
+ import java.util.concurrent.ExecutorService;
++import net.minecraft.server.threading.runtime.ThreadedRegionsBlockingBarrier;
+ import net.minecraft.util.GsonHelper;
+ import org.jspecify.annotations.Nullable;
+ 
+@@ -111,7 +112,7 @@ public class PlayerSafetyServiceTextFilter extends ServerTextFilter {
+     }
+ 
+     private IAuthenticationResult aquireIAuthenticationResult() {
+-        return this.client.acquireToken(this.clientParameters).join();
++        return ThreadedRegionsBlockingBarrier.awaitNonOwnerFuture(this.client.acquireToken(this.clientParameters), "player safety service token acquisition");
+     }
+ 
+     @Override
+diff --git a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+index 7ed50fc00c58c7781c958df1d828a67adf696f3e..67662f842d30ffc9582d7f925ae845479234f022 100644
+--- a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+@@ -49,6 +49,7 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+     private volatile boolean suspendFlushingOnServerThread = false;
+     // CraftBukkit start
+     public final org.bukkit.craftbukkit.CraftServer cserver;
++    public boolean processedDisconnect;
+     // CraftBukkit end
+     public final java.util.Map<java.util.UUID, net.kyori.adventure.resource.ResourcePackCallback> packCallbacks = new java.util.concurrent.ConcurrentHashMap<>(); // Paper - adventure resource pack callbacks
+     private static final long KEEPALIVE_LIMIT = Long.getLong("paper.playerconnection.keepalive", 30) * 1000; // Paper - provide property to set keepalive limit
+@@ -101,18 +102,18 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+ 
+     @Override
+     public void handleKeepAlive(final ServerboundKeepAlivePacket packet) {
++        // Loom start - process keepalive responses on the packet thread
++        // Keepalive response handling only updates connection latency bookkeeping backed by concurrent queues.
++        // Routing it through the global owner queue can falsely timeout players when join/chunk bursts delay
++        // global work even though the client response already arrived.
++        // Loom end
+         // Paper start - improve keepalives
+         long now = System.nanoTime();
+         io.papermc.paper.util.KeepAlive.PendingKeepAlive pending = this.keepAlive.pendingKeepAlives.peek();
+         if (pending != null && pending.challengeId() == packet.getId()) {
+             this.keepAlive.pendingKeepAlives.remove(pending);
+-
+-            io.papermc.paper.util.KeepAlive.KeepAliveResponse response = new io.papermc.paper.util.KeepAlive.KeepAliveResponse(pending.txTimeNS(), now);
+-
+-            this.keepAlive.pingCalculator1m.update(response);
+-            this.keepAlive.pingCalculator5s.update(response);
+-
+-            this.latency = this.keepAlive.pingCalculator5s.getAvgLatencyMS();
++            this.discardAnsweredKeepAlives(pending.challengeId());
++            this.acceptKeepAliveResponse(pending, now);
+             return;
+         }
+ 
+@@ -120,18 +121,33 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+             io.papermc.paper.util.KeepAlive.PendingKeepAlive ka = itr.next();
+             if (ka.challengeId() == packet.getId()) {
+                 itr.remove();
+-
+-                LOGGER.info("Disconnecting {} for sending keepalive response ({}) out-of-order!", this.playerProfile().name(), packet.getId());
+-                this.disconnectAsync(TIMEOUT_DISCONNECTION_MESSAGE, io.papermc.paper.connection.DisconnectionReason.TIMEOUT);
++                this.discardAnsweredKeepAlives(ka.challengeId());
++                this.acceptKeepAliveResponse(ka, now);
+                 return;
+             }
+         }
+ 
+-        LOGGER.info("Disconnecting {} for sending keepalive response ({}) without matching challenge!", this.playerProfile().name(), packet.getId());
+-        this.disconnectAsync(TIMEOUT_DISCONNECTION_MESSAGE, io.papermc.paper.connection.DisconnectionReason.TIMEOUT);
++        // Ignore stale or duplicate replies. The timeout path in keepConnectionAlive owns real dead-connection detection.
+         // Paper end - improve keepalives
+     }
+ 
++    private void discardAnsweredKeepAlives(final long challengeId) {
++        for (final java.util.Iterator<io.papermc.paper.util.KeepAlive.PendingKeepAlive> itr = this.keepAlive.pendingKeepAlives.iterator(); itr.hasNext();) {
++            if (itr.next().challengeId() <= challengeId) {
++                itr.remove();
++            }
++        }
++    }
++
++    private void acceptKeepAliveResponse(final io.papermc.paper.util.KeepAlive.PendingKeepAlive pending, final long now) {
++        final io.papermc.paper.util.KeepAlive.KeepAliveResponse response = new io.papermc.paper.util.KeepAlive.KeepAliveResponse(pending.txTimeNS(), now);
++
++        this.keepAlive.pingCalculator1m.update(response);
++        this.keepAlive.pingCalculator5s.update(response);
++
++        this.latency = this.keepAlive.pingCalculator5s.getAvgLatencyMS();
++    }
++
+     @Override
+     public void handlePong(final ServerboundPongPacket serverboundPongPacket) {
+     }
+@@ -257,7 +273,7 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+         Profiler.get().push("keepAlive");
+         long now = Util.getMillis();
+         // Paper start - improve keepalives
+-        if (this.checkIfClosed(now)) {
++        if (this.checkIfClosed(now) && !this.processedDisconnect) {
+             long currTime = System.nanoTime();
+ 
+             if ((currTime - this.keepAlive.lastKeepAliveTx) >= java.util.concurrent.TimeUnit.SECONDS.toNanos(1L)) {
+@@ -306,7 +322,7 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+ 
+     public void send(final Packet<?> packet, final @Nullable ChannelFutureListener listener) {
+         // CraftBukkit start
+-        if (packet == null) {
++        if (packet == null || this.processedDisconnect) { // Spigot
+             return;
+         } else if (packet instanceof net.minecraft.network.protocol.game.ClientboundSetDefaultSpawnPositionPacket defaultSpawnPositionPacket && this instanceof ServerGamePacketListenerImpl serverGamePacketListener) {
+             serverGamePacketListener.player.compassTarget = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(defaultSpawnPositionPacket.respawnData().pos(), serverGamePacketListener.getPlayer().level());
+@@ -316,7 +332,8 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+             this.close();
+         }
+ 
+-        boolean flush = !this.suspendFlushingOnServerThread || !this.server.isSameThread();
++        boolean flush = !this.suspendFlushingOnServerThread
++            || !net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this.server);
+ 
+         try {
+             this.connection.send(packet, listener, flush);
+@@ -341,27 +358,15 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+ 
+     public void disconnect(final DisconnectionDetails details) {
+         // CraftBukkit start - fire PlayerKickEvent
+-        if (!this.connection.isConnected()) {
++        if (this.processedDisconnect) {
+             return;
+         }
+-        if (!this.cserver.isPrimaryThread()) {
+-            org.bukkit.craftbukkit.util.Waitable waitable = new org.bukkit.craftbukkit.util.Waitable() {
+-                @Override
+-                protected @Nullable Object evaluate() {
+-                    ServerCommonPacketListenerImpl.this.disconnect(details);
+-                    return null;
+-                }
+-            };
+-
+-            this.server.processQueue.add(waitable);
+-
+-            try {
+-                waitable.get();
+-            } catch (InterruptedException e) {
+-                Thread.currentThread().interrupt();
+-            } catch (java.util.concurrent.ExecutionException e) {
+-                throw new RuntimeException(e);
+-            }
++        if (!net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this.server)) {
++            this.connection.setReadOnly();
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this.server, "common-disconnect"),
++                () -> ServerCommonPacketListenerImpl.this.disconnect(details)
++            );
+             return;
+         }
+ 
+@@ -389,7 +394,7 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+             }
+ 
+             reason = io.papermc.paper.adventure.PaperAdventure.asVanilla(event.reason());
+-            leaveMessage = io.papermc.paper.adventure.PaperAdventure.asVanilla(event.leaveMessage());
++            leaveMessage =  io.papermc.paper.adventure.PaperAdventure.asVanilla(event.leaveMessage());
+             serverGamePacketListener.player.quitReason = org.bukkit.event.player.PlayerQuitEvent.QuitReason.KICKED; // Paper - Add API for quit reason
+             // Log kick to console *after* event was processed.
+             switch (cause) {
+@@ -407,9 +412,15 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+     }
+ 
+     private void disconnect0(final DisconnectionDetails details) {
++        // CraftBukkit end
+         this.connection.send(new ClientboundDisconnectPacket(details.reason()), PacketSendListener.thenRun(() -> this.connection.disconnect(details)));
++        this.onDisconnect(details); // CraftBukkit - fire quit instantly
+         this.connection.setReadOnly();
+-        this.connection.handleConnectionDisconnectOnNextTick = true; // Paper - Force kill connection ticking. Let this close the connection
++        // CraftBukkit - Don't wait
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this.server, "connection-disconnection"),
++            this.connection::handleDisconnectionInOwnerContext
++        ); // Paper
+     }
+ 
+     // Paper start - add proper async disconnect
+@@ -447,16 +458,6 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+     }
+ 
+     protected CommonListenerCookie createCookie(final ClientInformation clientInformation) {
+-        // Paper start - listener handoff should reset pending keepalive expectations
+-        return new CommonListenerCookie(
+-            this.playerProfile(),
+-            this.latency,
+-            clientInformation,
+-            this.transferred,
+-            this.playerBrand,
+-            this.pluginMessagerChannels,
+-            this.keepAlive.copyForListenerHandoff()
+-        );
+-        // Paper end - listener handoff should reset pending keepalive expectations
++        return new CommonListenerCookie(this.playerProfile(), this.latency, clientInformation, this.transferred, this.playerBrand, this.pluginMessagerChannels, this.keepAlive); // Paper // Paper
+     }
+ }
+diff --git a/net/minecraft/server/network/ServerConfigurationPacketListenerImpl.java b/net/minecraft/server/network/ServerConfigurationPacketListenerImpl.java
+index 02eeb819e2e6c38fafe401585ca3264f8f6326fb..7f397d80e5e80e2b1464abe34502ee6a8182076e 100644
+--- a/net/minecraft/server/network/ServerConfigurationPacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerConfigurationPacketListenerImpl.java
+@@ -260,15 +260,16 @@ public class ServerConfigurationPacketListenerImpl extends ServerCommonPacketLis
+     // Paper start
+     @Override
+     public void disconnectAsync(final net.minecraft.network.DisconnectionDetails disconnectionInfo) {
+-        if (this.cserver.isPrimaryThread()) {
++        if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this.server)) {
+             this.disconnect(disconnectionInfo);
+             return;
+         }
+ 
+         this.connection.setReadOnly();
+-        this.server.scheduleOnMain(() -> {
+-            this.disconnect(disconnectionInfo); // Currently you cannot cancel disconnect during the config stage
+-        });
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this.server, "configuration-disconnect"),
++            () -> this.disconnect(disconnectionInfo) // Currently you cannot cancel disconnect during the config stage
++        );
+     }
+ 
+     @Override
+diff --git a/net/minecraft/server/network/ServerConnectionListener.java b/net/minecraft/server/network/ServerConnectionListener.java
+index 19a77c8269c3f1998985d533d9099c7e6cf76af4..92bda2d0638411ed23cc4a2499b8100ca8f7adfb 100644
+--- a/net/minecraft/server/network/ServerConnectionListener.java
++++ b/net/minecraft/server/network/ServerConnectionListener.java
+@@ -35,6 +35,7 @@ import net.minecraft.network.chat.Component;
+ import net.minecraft.network.protocol.PacketFlow;
+ import net.minecraft.network.protocol.common.ClientboundDisconnectPacket;
+ import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.threading.runtime.DomainClock;
+ import org.jspecify.annotations.Nullable;
+ import org.slf4j.Logger;
+ 
+@@ -99,7 +100,7 @@ public class ServerConnectionListener {
+                                     }
+ 
+                                     if (!disableFlushConsolidation) channel.pipeline().addFirst(new io.netty.handler.flush.FlushConsolidationHandler()); // Paper - Optimize network
+-                                    ChannelPipeline pipeline = channel.pipeline().addLast(HandlerNames.TIMEOUT, new ReadTimeoutHandler(30));
++                                    ChannelPipeline pipeline = channel.pipeline().addLast(HandlerNames.TIMEOUT, new ReadTimeoutHandler(Connection.READ_TIMEOUT_SECONDS));
+                                     if (ServerConnectionListener.this.server.repliesToStatus()) {
+                                         pipeline.addLast(HandlerNames.LEGACY_QUERY, new LegacyQueryHandler(ServerConnectionListener.this.getServer()));
+                                     }
+@@ -225,7 +226,7 @@ public class ServerConnectionListener {
+             // Spigot start
+             this.addPending(); // Paper - prevent blocking on adding a new connection while the server is ticking
+             // This prevents players from 'gaming' the server, and strategically relogging to increase their position in the tick order
+-            if (org.spigotmc.SpigotConfig.playerShuffle > 0 && MinecraftServer.currentTick % org.spigotmc.SpigotConfig.playerShuffle == 0) {
++            if (org.spigotmc.SpigotConfig.playerShuffle > 0 && DomainClock.currentServerTick(this.server) % org.spigotmc.SpigotConfig.playerShuffle == 0) {
+                 Collections.shuffle(this.connections);
+             }
+             // Spigot end
+@@ -235,13 +236,6 @@ public class ServerConnectionListener {
+                 Connection connection = iterator.next();
+                 if (!connection.isConnecting()) {
+                     if (connection.isConnected()) {
+-                        // Paper start - Force kill connection ticking
+-                        // also call this multiple times, doesnt matter
+-                        // See MC-307764
+-                        if (connection.handleConnectionDisconnectOnNextTick) {
+-                            continue;
+-                        }
+-                        // Paper end - Force kill connection ticking
+                         try {
+                             connection.tick();
+                         } catch (Exception var7) {
+@@ -257,7 +251,7 @@ public class ServerConnectionListener {
+                     } else {
+                         if (connection.preparing) continue; // Spigot - Fix a race condition where a Connection could be unregistered just before connection
+                         iterator.remove();
+-                        connection.handleDisconnection();
++                        connection.handleDisconnectionInOwnerContext();
+                     }
+                 }
+             }
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d123f91de 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -150,6 +150,7 @@ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.server.level.ServerPlayer;
+ import net.minecraft.server.permissions.Permissions;
+ import net.minecraft.server.players.PlayerList;
++import net.minecraft.server.threading.runtime.DomainClock;
+ import net.minecraft.util.FutureChain;
+ import net.minecraft.util.Mth;
+ import net.minecraft.util.ProblemReporter;
+@@ -301,10 +302,10 @@ public class ServerGamePacketListenerImpl
+     private int knownMovePacketCount;
+     private boolean receivedMovementThisTick;
+     // CraftBukkit start - add fields
+-    private int lastTick = MinecraftServer.currentTick;
++    private int lastTick = DomainClock.currentServerTick();
+     private int allowedPlayerTicks = 1;
+-    private int lastDropTick = MinecraftServer.currentTick;
+-    private int lastBookTick  = MinecraftServer.currentTick;
++    private int lastDropTick = DomainClock.currentServerTick();
++    private int lastBookTick  = DomainClock.currentServerTick();
+     private int dropCount = 0;
+ 
+     private boolean hasMoved = false;
+@@ -335,7 +336,7 @@ public class ServerGamePacketListenerImpl
+         this.chunkSender = new PlayerChunkSender(connection.isMemoryConnection());
+         this.player = player;
+         player.connection = this;
+-        player.getTextFilter().join();
++        player.getTextFilter().joinFilter();
+         this.signedMessageDecoder = SignedMessageChain.Decoder.unsigned(player.getUUID(), server::enforceSecureProfile);
+         this.chatMessageChain = new FutureChain(server.chatExecutor); // CraftBukkit - async chat
+         this.tickEndEvent = new io.papermc.paper.event.packet.ClientTickEndEvent(player.getBukkitEntity()); // Paper - add client tick end event
+@@ -356,6 +357,7 @@ public class ServerGamePacketListenerImpl
+ 
+     @Override
+     public void tick() {
++        if (this.isDisconnected()) return; // Paper
+         if (this.ackBlockChangesUpTo > -1) {
+             this.send(new ClientboundBlockChangedAckPacket(this.ackBlockChangesUpTo));
+             this.ackBlockChangesUpTo = -1;
+@@ -879,8 +881,10 @@ public class ServerGamePacketListenerImpl
+                 return;
+             }
+ 
+-            // This needs to be on main
+-            this.server.scheduleOnMain(() -> this.sendServerSuggestions(packet, command));
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this.server, "command-suggestions"),
++                () -> this.sendServerSuggestions(packet, command)
++            );
+         } else if (!completions.isEmpty()) {
+             final com.mojang.brigadier.suggestion.SuggestionsBuilder builder0 = new com.mojang.brigadier.suggestion.SuggestionsBuilder(packet.getCommand(), command.getTotalLength());
+             final com.mojang.brigadier.suggestion.SuggestionsBuilder builder = builder0.createOffset(builder0.getInput().lastIndexOf(' ') + 1);
+@@ -893,7 +897,7 @@ public class ServerGamePacketListenerImpl
+                 }
+             }
+             // Paper start - Brigadier API
+-            com.mojang.brigadier.suggestion.Suggestions suggestions = builder.buildFuture().join();
++            com.mojang.brigadier.suggestion.Suggestions suggestions = builder.build();
+             com.destroystokyo.paper.event.brigadier.AsyncPlayerSendSuggestionsEvent suggestEvent = new com.destroystokyo.paper.event.brigadier.AsyncPlayerSendSuggestionsEvent(this.getCraftPlayer(), suggestions, packet.getCommand());
+             suggestEvent.setCancelled(suggestions.isEmpty());
+             if (suggestEvent.callEvent()) {
+@@ -1333,7 +1337,7 @@ public class ServerGamePacketListenerImpl
+     public void handleEditBook(final ServerboundEditBookPacket packet) {
+         // Paper start - Book size limits
+         final io.papermc.paper.configuration.type.number.IntOr.Disabled pageMax = io.papermc.paper.configuration.GlobalConfiguration.get().itemValidation.bookSize.pageMax;
+-        if (!this.cserver.isPrimaryThread() && pageMax.enabled()) {
++        if (!net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this.server) && pageMax.enabled()) {
+             final List<String> pageList = packet.pages();
+             long byteTotal = 0;
+             final int maxBookPageSize = pageMax.intValue();
+@@ -1370,11 +1374,12 @@ public class ServerGamePacketListenerImpl
+         }
+         // Paper end - Book size limits
+         // CraftBukkit start
+-        if (this.lastBookTick + 20 > MinecraftServer.currentTick) {
++        final int currentTick = DomainClock.currentServerTick(this.server);
++        if (this.lastBookTick + 20 > currentTick) {
+             this.disconnectAsync(Component.literal("Book edited too quickly!"), org.bukkit.event.player.PlayerKickEvent.Cause.ILLEGAL_ACTION); // Paper - kick event cause // Paper - add proper async disconnect
+             return;
+         }
+-        this.lastBookTick = MinecraftServer.currentTick;
++        this.lastBookTick = currentTick;
+         // CraftBukkit end
+         int slot = packet.slot();
+         if (Inventory.isHotbarSlot(slot) || slot == 40) {
+@@ -1462,6 +1467,9 @@ public class ServerGamePacketListenerImpl
+             this.disconnect(Component.translatable("multiplayer.disconnect.invalid_player_movement"), org.bukkit.event.player.PlayerKickEvent.Cause.INVALID_PLAYER_MOVEMENT); // Paper - kick event cause
+         } else {
+             ServerLevel level = this.player.level();
++            if (this.waitForPlayerChunkIfUnloaded(level)) {
++                return;
++            }
+             if (!this.player.wonGame && !this.player.isImmobile()) { // CraftBukkit
+                 if (this.tickCount == 0) {
+                     this.resetPosition();
+@@ -1919,7 +1927,7 @@ public class ServerGamePacketListenerImpl
+     }
+ 
+     public void internalTeleport(PositionMoveRotation destination, Set<Relative> relatives) {
+-        org.spigotmc.AsyncCatcher.catchOp("teleport"); // Paper
++        org.spigotmc.AsyncCatcher.catchOp("teleport", this.player); // Paper
+         // Paper start - Prevent teleporting dead entities
+         if (this.player.isRemoved()) {
+             LOGGER.info("Attempt to teleport removed player {} restricted", this.player.getScoreboardName());
+@@ -1941,6 +1949,7 @@ public class ServerGamePacketListenerImpl
+             this.awaitingTeleport = 0;
+         }
+ 
++        this.loadTeleportTargetAsync(destination, relatives);
+         this.player.teleportSetPosition(destination, relatives);
+         this.awaitingPositionFromClient = this.player.position();
+         // CraftBukkit start - update last location
+@@ -1953,6 +1962,44 @@ public class ServerGamePacketListenerImpl
+         this.send(ClientboundPlayerPositionPacket.of(this.awaitingTeleport, destination, relatives));
+     }
+ 
++    private void loadTeleportTargetAsync(final PositionMoveRotation destination, final Set<Relative> relatives) {
++        final PositionMoveRotation absoluteDestination = PositionMoveRotation.calculateAbsolute(PositionMoveRotation.of(this.player), destination, relatives);
++        final Vec3 position = absoluteDestination.position();
++        final ServerLevel level = this.player.level();
++        level.loadChunksForMoveAsync(
++            this.player.getBoundingBoxAt(position.x(), position.y(), position.z()),
++            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            chunks -> {
++                final net.minecraft.server.level.ServerChunkCache chunkCache = level.getChunkSource();
++                for (final net.minecraft.world.level.chunk.ChunkAccess chunk : chunks) {
++                    chunkCache.addTicketAtLevel(net.minecraft.server.level.TicketType.POST_TELEPORT, chunk.getPos(), net.minecraft.server.level.ChunkLevel.FULL_CHUNK_LEVEL);
++                }
++            }
++        );
++    }
++
++    private boolean waitForPlayerChunkIfUnloaded(final ServerLevel level) {
++        final net.minecraft.world.level.ChunkPos chunkPos = this.player.chunkPosition();
++        if (level.getChunkIfLoaded(chunkPos.x(), chunkPos.z()) != null) {
++            return false;
++        }
++
++        level.loadChunks(
++            chunkPos.x(),
++            chunkPos.z(),
++            chunkPos.x(),
++            chunkPos.z(),
++            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            chunks -> {
++                final net.minecraft.server.level.ServerChunkCache chunkCache = level.getChunkSource();
++                for (final net.minecraft.world.level.chunk.ChunkAccess chunk : chunks) {
++                    chunkCache.addTicketAtLevel(net.minecraft.server.level.TicketType.POST_TELEPORT, chunk.getPos(), net.minecraft.server.level.ChunkLevel.FULL_CHUNK_LEVEL);
++                }
++            }
++        );
++        return true;
++    }
++
+     @Override
+     public void handlePlayerAction(final ServerboundPlayerActionPacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
+@@ -2009,9 +2056,10 @@ public class ServerGamePacketListenerImpl
+                     if (!this.player.isSpectator()) {
+                         // limit how quickly items can be dropped
+                         // If the ticks aren't the same then the count starts from 0 and we update the lastDropTick.
+-                        if (this.lastDropTick != MinecraftServer.currentTick) {
++                        final int currentTick = DomainClock.currentServerTick(this.server);
++                        if (this.lastDropTick != currentTick) {
+                             this.dropCount = 0;
+-                            this.lastDropTick = MinecraftServer.currentTick;
++                            this.lastDropTick = currentTick;
+                         } else {
+                             // Else we increment the drop count and check the amount.
+                             this.dropCount++;
+@@ -2288,6 +2336,20 @@ public class ServerGamePacketListenerImpl
+ 
+     @Override
+     public void onDisconnect(final DisconnectionDetails details) {
++        if (!ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(this.player)) {
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(this.player, "game-disconnect"),
++                () -> this.onDisconnect(details)
++            );
++            return;
++        }
++        // CraftBukkit start - Rarely it would send a disconnect line twice
++        if (this.processedDisconnect) {
++            return;
++        } else {
++            this.processedDisconnect = true;
++        }
++        // CraftBukkit end
+         LOGGER.info("{} lost connection: {}", this.player.getPlainTextName(), details.reason().getString());
+         // Paper start - Fix kick event leave message not being sent
+         final net.kyori.adventure.text.Component quitMessage = details.quitMessage().map(io.papermc.paper.adventure.PaperAdventure::asAdventure).orElse(null);
+@@ -2381,7 +2443,9 @@ public class ServerGamePacketListenerImpl
+                 CompletableFuture<Component> decoratedFuture = this.server.getChatDecorator().decorate(this.player, null, signedMessage.decoratedContent()); // Paper - Adventure
+ 
+                 this.chatMessageChain.append(CompletableFuture.allOf(filteredFuture, decoratedFuture), ($) -> { // Paper - Adventure
+-                    PlayerChatMessage filteredMessage = signedMessage.withUnsignedContent(decoratedFuture.join()).filter(filteredFuture.join().mask()); // Paper - Adventure
++                    final Component decoratedContent = decoratedFuture.getNow(signedMessage.decoratedContent());
++                    final FilteredText filteredText = filteredFuture.getNow(FilteredText.passThrough(signedMessage.signedContent()));
++                    PlayerChatMessage filteredMessage = signedMessage.withUnsignedContent(decoratedContent).filter(filteredText.mask()); // Paper - Adventure
+                     this.broadcastChatMessage(filteredMessage);
+                 });
+             }, false); // CraftBukkit - async chat
+@@ -2553,7 +2617,12 @@ public class ServerGamePacketListenerImpl
+             this.player.resetLastActionTime();
+             // CraftBukkit start
+             if (sync) {
+-                this.server.execute(chatHandler);
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                    isCommand
++                        ? net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this.server, "command-handler")
++                        : net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(this.player, "chat-handler"),
++                    chatHandler
++                );
+             } else {
+                 chatHandler.run();
+             }
+@@ -2597,8 +2666,8 @@ public class ServerGamePacketListenerImpl
+             // Do nothing, this is coming from a plugin
+             // Paper start
+         } else {
+-            if (!async && !org.bukkit.Bukkit.isPrimaryThread()) {
+-                org.spigotmc.AsyncCatcher.catchOp("Asynchronous player chat is not allowed here");
++            if (!async && !net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this.server)) {
++                org.spigotmc.AsyncCatcher.catchOp("Asynchronous player chat is not allowed here", this.player);
+             }
+             new io.papermc.paper.adventure.ChatProcessor(this.server, this.player, original, async).process();
+             // Paper end
+@@ -2617,7 +2686,11 @@ public class ServerGamePacketListenerImpl
+         This method should ONLY be used if you need to execute a command WITHOUT
+         an actual player's input.
+         */
+-        this.performUnsignedChatCommand(command);
++        final String commandString = command;
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this.server, "legacy-command-handler"),
++            () -> this.performUnsignedChatCommand(commandString)
++        );
+         // Paper end
+     }
+     // CraftBukkit end
+@@ -2634,7 +2707,10 @@ public class ServerGamePacketListenerImpl
+             LOGGER.warn("{} tried to send an empty message", this.player.getScoreboardName());
+         } else if (this.getCraftPlayer().isConversing()) {
+             final String conversationInput = rawMessage;
+-            this.server.processQueue.add(() -> ServerGamePacketListenerImpl.this.getCraftPlayer().acceptConversationInput(conversationInput));
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(this.player, "conversation-input"),
++                () -> ServerGamePacketListenerImpl.this.getCraftPlayer().acceptConversationInput(conversationInput)
++            );
+         } else if (this.player.getChatVisibility() == ChatVisiblity.SYSTEM) { // Re-add "Command Only" flag check
+             this.send(new ClientboundSystemChatPacket(Component.translatable("chat.cannotSend").withStyle(ChatFormatting.RED), false));
+         } else {
+@@ -3395,7 +3471,7 @@ public class ServerGamePacketListenerImpl
+     @Override
+     public void handlePlaceRecipe(final ServerboundPlaceRecipePacket packet) {
+         // Paper start - auto recipe limit
+-        if (!org.bukkit.Bukkit.isPrimaryThread()) {
++        if (!net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this.server)) {
+             if (!this.recipeSpamPackets.isIncrementAndUnderThreshold()) {
+                 this.disconnectAsync(net.minecraft.network.chat.Component.translatable("disconnect.spam"), org.bukkit.event.player.PlayerKickEvent.Cause.SPAM); // Paper - kick event cause // Paper - add proper async disconnect
+                 return;
+@@ -3642,7 +3718,7 @@ public class ServerGamePacketListenerImpl
+     @Override
+     public void handleChangeGameMode(final ServerboundChangeGameModePacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
+-        if (!GameModeCommand.PERMISSION_CHECK.check(this.player.permissions()) && !this.player.getBukkitEntity().hasPermission("minecraft.command.gamemode")) { // Paper - add permission check
++        if (!GameModeCommand.PERMISSION_CHECK.check(this.player.permissions())) {
+             LOGGER.warn(
+                 "Player {} tried to change game mode to {} without required permissions",
+                 this.player.getGameProfile().name(),
+@@ -3822,23 +3898,26 @@ public class ServerGamePacketListenerImpl
+ 
+     @Override
+     public void disconnectAsync(final net.minecraft.network.DisconnectionDetails disconnectionInfo) {
+-        if (this.cserver.isPrimaryThread()) {
++        if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this.server)) {
+             this.disconnect(disconnectionInfo);
+             return;
+         }
+ 
+         this.connection.setReadOnly();
+-        this.server.scheduleOnMain(() -> {
+-            this.disconnect(disconnectionInfo);
+-            if (this.player.quitReason == null) {
+-                // cancelled
+-                this.connection.enableAutoRead();
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(this.player, "game-disconnect"),
++            () -> {
++                this.disconnect(disconnectionInfo);
++                if (this.player.quitReason == null) {
++                    // cancelled
++                    this.connection.enableAutoRead();
++                }
+             }
+-        });
++        );
+     }
+ 
+     public final boolean isDisconnected() {
+-        return (!this.player.joining && !this.connection.isConnected());
++        return (!this.player.joining && !this.connection.isConnected()) || this.processedDisconnect; // Paper - Fix duplication bugs
+     }
+ 
+     @Override
+diff --git a/net/minecraft/server/network/ServerLoginPacketListenerImpl.java b/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
+index 3a0d47a716ce5c5345640ed67ac306101791892b..bc5aae6da8798b1543712ef37a05cbe247285bcb 100644
+--- a/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
+@@ -48,15 +48,17 @@ import org.slf4j.Logger;
+ 
+ // CraftBukkit start
+ import org.bukkit.craftbukkit.entity.CraftPlayer;
+-import org.bukkit.craftbukkit.util.Waitable;
+ import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
+ import org.bukkit.event.player.PlayerPreLoginEvent;
+ 
+ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener, TickablePacketListener {
+     private static final AtomicInteger UNIQUE_THREAD_ID = new AtomicInteger(0);
+     private static final Logger LOGGER = LogUtils.getLogger();
+-    private static final java.util.concurrent.ExecutorService authenticatorPool = java.util.concurrent.Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("User Authenticator #", 0).uncaughtExceptionHandler(new DefaultUncaughtExceptionHandler(LOGGER)).factory()); // Paper - Virtual authenticator threads
+-    private static final int MAX_TICKS_BEFORE_LOGIN = 600;
++    private static final java.util.concurrent.ExecutorService authenticatorPool = java.util.concurrent.Executors.newCachedThreadPool(new com.google.common.util.concurrent.ThreadFactoryBuilder().setNameFormat("User Authenticator #%d").setUncaughtExceptionHandler(new DefaultUncaughtExceptionHandler(LOGGER)).build()); // Paper - Cache authenticator threads
++    private static final int MAX_TICKS_BEFORE_LOGIN = Math.max(
++        600,
++        Integer.getInteger("paper.playerconnection.login-timeout", Integer.getInteger("paper.playerconnection.keepalive", 30)) * 20
++    );
+     private final byte[] challenge;
+     private final MinecraftServer server;
+     public final Connection connection;
+@@ -71,6 +73,7 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+     private int velocityLoginMessageId = -1; // Paper - Add Velocity IP Forwarding Support
+     public java.util.@Nullable UUID requestedUuid; // Paper
+     private final io.papermc.paper.connection.PaperPlayerLoginConnection paperLoginConnection; // Paper - Config API
++    private volatile boolean disconnecting = false; // Paper - Fix disconnect still ticking login
+ 
+     public ServerLoginPacketListenerImpl(final MinecraftServer minecraftserver, final Connection connection, final boolean transferred) {
+         this.server = minecraftserver;
+@@ -83,6 +86,7 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+ 
+     @Override
+     public void tick() {
++        if (this.disconnecting) return; // Paper - Fix disconnect being called multiple times due to not awaiting for disconnect
+         // Paper start - login cookie API
+         // Don't block the connection
+         if (this.paperLoginConnection.isAwaitingCookies()) {
+@@ -105,8 +109,8 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+     }
+     public void tickTimeout() {
+     // Paper end - login cookie API
+-        if (this.tick++ == 600) {
+-            this.disconnectAsync(Component.translatable("multiplayer.disconnect.slow_login")); // Paper
++        if (this.tick++ == MAX_TICKS_BEFORE_LOGIN) {
++            this.disconnect(Component.translatable("multiplayer.disconnect.slow_login"));
+         }
+     }
+ 
+@@ -122,22 +126,12 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+         return this.connection.isConnected();
+     }
+ 
+-    // Paper start
+-    public void disconnectAsync(Component reason) {
+-        try {
+-            LOGGER.info("Disconnecting {}: {}", this.getUserName(), reason.getString());
+-            this.connection.send(new ClientboundLoginDisconnectPacket(reason), PacketSendListener.thenRun(() -> this.connection.disconnect(reason)));
+-            this.connection.handleConnectionDisconnectOnNextTick = true;
+-        } catch (Exception var3) {
+-            LOGGER.error("Error whilst disconnecting player", (Throwable)var3);
+-        }
+-    }
+-    // Paper end
+     public void disconnect(final Component component) {
+         try {
+             LOGGER.info("Disconnecting {}: {}", this.getUserName(), component.getString());
+             this.connection.send(new ClientboundLoginDisconnectPacket(component));
+             this.connection.disconnect(component);
++            this.disconnecting = true; // Paper - Fix disconnect still ticking login
+         } catch (Exception var3) {
+             LOGGER.error("Error whilst disconnecting player", (Throwable)var3);
+         }
+@@ -187,20 +181,32 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+                     return;
+                 }
+                 // Paper end - Add Velocity IP Forwarding Support
+-                // Paper start - Virtual authenticator threads
++                // CraftBukkit start
++                // Paper start - Cache authenticator threads
+                 authenticatorPool.execute(() -> {
+                     try {
+                         GameProfile gameprofile = ServerLoginPacketListenerImpl.this.createOfflineProfile(ServerLoginPacketListenerImpl.this.requestedUsername); // Spigot
+ 
+-                        gameprofile = ServerLoginPacketListenerImpl.this.callPlayerPreLoginEvents(gameprofile); // Paper - Add more fields to AsyncPlayerPreLoginEvent
+-                        ServerLoginPacketListenerImpl.LOGGER.info("UUID of player {} is {}", gameprofile.name(), gameprofile.id());
+-                        ServerLoginPacketListenerImpl.this.startClientVerification(gameprofile);
++                        ServerLoginPacketListenerImpl.this.callPlayerPreLoginEvents(gameprofile) // Paper - Add more fields to AsyncPlayerPreLoginEvent
++                            .whenComplete((completedProfile, throwable) -> {
++                                if (throwable != null) {
++                                    ServerLoginPacketListenerImpl.this.disconnect("Failed to verify username!");
++                                    ServerLoginPacketListenerImpl.this.server.server.getLogger().log(java.util.logging.Level.WARNING, "Exception verifying " + ServerLoginPacketListenerImpl.this.requestedUsername, throwable);
++                                    return;
++                                }
++                                if (!ServerLoginPacketListenerImpl.this.connection.isConnected() || ServerLoginPacketListenerImpl.this.disconnecting) {
++                                    return;
++                                }
++                                ServerLoginPacketListenerImpl.LOGGER.info("UUID of player {} is {}", completedProfile.name(), completedProfile.id());
++                                ServerLoginPacketListenerImpl.this.startClientVerification(completedProfile);
++                            });
+                     } catch (Exception ex) {
+                         ServerLoginPacketListenerImpl.this.disconnect("Failed to verify username!");
+                         ServerLoginPacketListenerImpl.this.server.server.getLogger().log(java.util.logging.Level.WARNING, "Exception verifying " + ServerLoginPacketListenerImpl.this.requestedUsername, ex);
+                     }
+                 });
+-                // Paper end - Virtual authenticator threads
++                // Paper end - Cache authenticator threads
++                // CraftBukkit end
+             }
+         }
+     }
+@@ -214,7 +220,7 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+         PlayerList playerList = this.server.getPlayerList();
+         Component error = org.bukkit.craftbukkit.event.CraftEventFactory.handleLoginResult(playerList.canPlayerLogin(this.connection.getRemoteAddress(), new NameAndId(profile)), this.paperLoginConnection, this.connection, profile, this.server, true); // Paper
+         if (error != null) {
+-            this.disconnectAsync(error); // Paper
++            this.disconnect(error);
+         } else {
+             if (this.server.getCompressionThreshold() >= 0 && !this.connection.isMemoryConnection()) {
+                 this.connection
+@@ -258,7 +264,7 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+             throw new IllegalStateException("Protocol error", var7);
+         }
+ 
+-        // Paper start - Virtual authenticator threads
++        // Paper start - Cache authenticator threads
+         authenticatorPool.execute(new Runnable() {
+             {
+                 Objects.requireNonNull(ServerLoginPacketListenerImpl.this);
+@@ -279,11 +285,21 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+                         if (!ServerLoginPacketListenerImpl.this.connection.isConnected()) {
+                             return;
+                         }
+-                        profile = ServerLoginPacketListenerImpl.this.callPlayerPreLoginEvents(profile); // Paper - Add more fields to AsyncPlayerPreLoginEvent
+-                        // CraftBukkit end
+-                        ServerLoginPacketListenerImpl.LOGGER.info("UUID of player {} is {}", profile.name(), profile.id());
+-                        ServerLoginPacketListenerImpl.this.serverActivityMonitor.reportLoginActivity();
+-                        ServerLoginPacketListenerImpl.this.startClientVerification(profile);
++                        ServerLoginPacketListenerImpl.this.callPlayerPreLoginEvents(profile) // Paper - Add more fields to AsyncPlayerPreLoginEvent
++                            .whenComplete((completedProfile, throwable) -> {
++                                if (throwable != null) {
++                                    ServerLoginPacketListenerImpl.this.disconnect("Failed to verify username!");
++                                    ServerLoginPacketListenerImpl.LOGGER.warn("Exception verifying {}", name, throwable);
++                                    return;
++                                }
++                                if (!ServerLoginPacketListenerImpl.this.connection.isConnected() || ServerLoginPacketListenerImpl.this.disconnecting) {
++                                    return;
++                                }
++                                // CraftBukkit end
++                                ServerLoginPacketListenerImpl.LOGGER.info("UUID of player {} is {}", completedProfile.name(), completedProfile.id());
++                                ServerLoginPacketListenerImpl.this.serverActivityMonitor.reportLoginActivity();
++                                ServerLoginPacketListenerImpl.this.startClientVerification(completedProfile);
++                            });
+                     } else if (ServerLoginPacketListenerImpl.this.server.isSingleplayer()) {
+                         ServerLoginPacketListenerImpl.LOGGER.warn("Failed to verify username but will let them in anyway!");
+                         ServerLoginPacketListenerImpl.this.startClientVerification(ServerLoginPacketListenerImpl.this.createOfflineProfile(name)); // Spigot
+@@ -314,57 +330,66 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+                     : null;
+             }
+         });
+-        // Paper end - Virtual authenticator threads
++        // Paper end - Cache authenticator threads
+     }
+ 
+     // CraftBukkit start
+-    private GameProfile callPlayerPreLoginEvents(GameProfile gameprofile) throws Exception { // Paper - Add more fields to AsyncPlayerPreLoginEvent
+-        // Paper start - Add Velocity IP Forwarding Support
+-        if (ServerLoginPacketListenerImpl.this.velocityLoginMessageId == -1 && io.papermc.paper.configuration.GlobalConfiguration.get().proxies.velocity.enabled) {
+-            this.disconnect("This server requires you to connect with Velocity.");
+-            return gameprofile;
+-        }
+-        // Paper end - Add Velocity IP Forwarding Support
+-        String playerName = gameprofile.name();
+-        java.net.InetAddress address = ((java.net.InetSocketAddress) this.connection.getRemoteAddress()).getAddress();
+-        java.util.UUID uniqueId = gameprofile.id();
+-        final org.bukkit.craftbukkit.CraftServer server = ServerLoginPacketListenerImpl.this.server.server;
+-
+-        // Paper start - Add more fields to AsyncPlayerPreLoginEvent
+-        final InetAddress rawAddress = ((InetSocketAddress) this.connection.channel.remoteAddress()).getAddress();
+-        com.destroystokyo.paper.profile.PlayerProfile profile = com.destroystokyo.paper.profile.CraftPlayerProfile.asBukkitCopy(gameprofile); // Paper - setPlayerProfileAPI
+-        AsyncPlayerPreLoginEvent asyncEvent = new AsyncPlayerPreLoginEvent(playerName, address, rawAddress, uniqueId, this.transferred, profile, this.connection.hostname, this.paperLoginConnection); // Paper
+-        server.getPluginManager().callEvent(asyncEvent);
+-        profile = asyncEvent.getPlayerProfile();
+-        profile.complete(true); // Paper - setPlayerProfileAPI
+-        gameprofile = com.destroystokyo.paper.profile.CraftPlayerProfile.asAuthlibCopy(profile);
+-        playerName = gameprofile.name();
+-        uniqueId = gameprofile.id();
+-        // Paper end - Add more fields to AsyncPlayerPreLoginEvent
+-
+-        if (PlayerPreLoginEvent.getHandlerList().getRegisteredListeners().length != 0) {
+-            final PlayerPreLoginEvent event = new PlayerPreLoginEvent(playerName, address, uniqueId);
+-            if (asyncEvent.getResult() != PlayerPreLoginEvent.Result.ALLOWED) {
+-                event.disallow(asyncEvent.getResult(), asyncEvent.kickMessage()); // Paper - Adventure
++    private java.util.concurrent.CompletableFuture<GameProfile> callPlayerPreLoginEvents(GameProfile gameprofile) { // Paper - Add more fields to AsyncPlayerPreLoginEvent
++        try {
++            // Paper start - Add Velocity IP Forwarding Support
++            if (ServerLoginPacketListenerImpl.this.velocityLoginMessageId == -1 && io.papermc.paper.configuration.GlobalConfiguration.get().proxies.velocity.enabled) {
++                this.disconnect("This server requires you to connect with Velocity.");
++                return java.util.concurrent.CompletableFuture.completedFuture(gameprofile);
+             }
+-            Waitable<PlayerPreLoginEvent.Result> waitable = new Waitable<>() {
+-                @Override
+-                protected PlayerPreLoginEvent.Result evaluate() {
+-                    server.getPluginManager().callEvent(event);
+-                    return event.getResult();
++            // Paper end - Add Velocity IP Forwarding Support
++            String playerName = gameprofile.name();
++            java.net.InetAddress address = ((java.net.InetSocketAddress) this.connection.getRemoteAddress()).getAddress();
++            java.util.UUID uniqueId = gameprofile.id();
++            final org.bukkit.craftbukkit.CraftServer server = ServerLoginPacketListenerImpl.this.server.server;
++
++            // Paper start - Add more fields to AsyncPlayerPreLoginEvent
++            final InetAddress rawAddress = ((InetSocketAddress) this.connection.channel.remoteAddress()).getAddress();
++            com.destroystokyo.paper.profile.PlayerProfile profile = com.destroystokyo.paper.profile.CraftPlayerProfile.asBukkitCopy(gameprofile); // Paper - setPlayerProfileAPI
++            AsyncPlayerPreLoginEvent asyncEvent = new AsyncPlayerPreLoginEvent(playerName, address, rawAddress, uniqueId, this.transferred, profile, this.connection.hostname, this.paperLoginConnection); // Paper
++            server.getPluginManager().callEvent(asyncEvent);
++            profile = asyncEvent.getPlayerProfile();
++            profile.complete(true); // Paper - setPlayerProfileAPI
++            gameprofile = com.destroystokyo.paper.profile.CraftPlayerProfile.asAuthlibCopy(profile);
++            playerName = gameprofile.name();
++            uniqueId = gameprofile.id();
++            // Paper end - Add more fields to AsyncPlayerPreLoginEvent
++
++            if (PlayerPreLoginEvent.getHandlerList().getRegisteredListeners().length != 0) {
++                final PlayerPreLoginEvent event = new PlayerPreLoginEvent(playerName, address, uniqueId);
++                if (asyncEvent.getResult() != PlayerPreLoginEvent.Result.ALLOWED) {
++                    event.disallow(asyncEvent.getResult(), asyncEvent.kickMessage()); // Paper - Adventure
+                 }
+-            };
+-
+-            ServerLoginPacketListenerImpl.this.server.processQueue.add(waitable);
+-            if (waitable.get() != PlayerPreLoginEvent.Result.ALLOWED) {
+-                this.disconnect(io.papermc.paper.adventure.PaperAdventure.asVanilla(event.kickMessage())); // Paper - Adventure
++                final GameProfile completedProfile = gameprofile;
++                final java.util.concurrent.CompletableFuture<GameProfile> future = new java.util.concurrent.CompletableFuture<>();
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                    net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(ServerLoginPacketListenerImpl.this.server, "legacy-pre-login-event"),
++                    () -> {
++                        try {
++                            server.getPluginManager().callEvent(event);
++                            if (event.getResult() != PlayerPreLoginEvent.Result.ALLOWED) {
++                                ServerLoginPacketListenerImpl.this.disconnect(io.papermc.paper.adventure.PaperAdventure.asVanilla(event.kickMessage())); // Paper - Adventure
++                            }
++                            future.complete(completedProfile);
++                        } catch (final Throwable throwable) {
++                            future.completeExceptionally(throwable);
++                        }
++                    }
++                );
++                return future;
+             }
+-        } else {
++
+             if (asyncEvent.getLoginResult() != AsyncPlayerPreLoginEvent.Result.ALLOWED) {
+                 this.disconnect(io.papermc.paper.adventure.PaperAdventure.asVanilla(asyncEvent.kickMessage())); // Paper - Adventure
+             }
++            return java.util.concurrent.CompletableFuture.completedFuture(gameprofile); // Paper - Add more fields to AsyncPlayerPreLoginEvent
++        } catch (final Throwable throwable) {
++            return java.util.concurrent.CompletableFuture.failedFuture(throwable);
+         }
+-        return gameprofile; // Paper - Add more fields to AsyncPlayerPreLoginEvent
+     }
+     // CraftBukkit end
+ 
+@@ -413,9 +438,19 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+             // Proceed with login
+             authenticatorPool.execute(() -> {
+                 try {
+-                    final GameProfile gameprofile = this.callPlayerPreLoginEvents(this.authenticatedProfile);
+-                    ServerLoginPacketListenerImpl.LOGGER.info("UUID of player {} is {}", gameprofile.name(), gameprofile.id());
+-                    ServerLoginPacketListenerImpl.this.startClientVerification(gameprofile);
++                    this.callPlayerPreLoginEvents(this.authenticatedProfile)
++                        .whenComplete((gameprofile, throwable) -> {
++                            if (throwable != null) {
++                                disconnect("Failed to verify username!");
++                                server.server.getLogger().log(java.util.logging.Level.WARNING, "Exception verifying " + this.authenticatedProfile.name(), throwable);
++                                return;
++                            }
++                            if (!ServerLoginPacketListenerImpl.this.connection.isConnected() || ServerLoginPacketListenerImpl.this.disconnecting) {
++                                return;
++                            }
++                            ServerLoginPacketListenerImpl.LOGGER.info("UUID of player {} is {}", gameprofile.name(), gameprofile.id());
++                            ServerLoginPacketListenerImpl.this.startClientVerification(gameprofile);
++                        });
+                 } catch (Exception ex) {
+                     disconnect("Failed to verify username!");
+                     server.server.getLogger().log(java.util.logging.Level.WARNING, "Exception verifying " + this.authenticatedProfile.name(), ex);
+diff --git a/net/minecraft/server/network/TextFilter.java b/net/minecraft/server/network/TextFilter.java
+index b696220de3b74fbc277d7152b38b84c5a973ec40..6bdfc6fa06fe90da7bc556fdb203af7404440f7d 100644
+--- a/net/minecraft/server/network/TextFilter.java
++++ b/net/minecraft/server/network/TextFilter.java
+@@ -17,7 +17,12 @@ public interface TextFilter {
+         }
+     };
+ 
++    default void joinFilter() {
++    }
++
++    @Deprecated(forRemoval = true)
+     default void join() {
++        this.joinFilter();
+     }
+ 
+     default void leave() {
+diff --git a/net/minecraft/server/network/config/PrepareSpawnTask.java b/net/minecraft/server/network/config/PrepareSpawnTask.java
+index 8b318dd8aa918284c5fa89e990b13bec425102cb..cf0a9f1b983b6e964704fdfb095c84a69e953b2c 100644
+--- a/net/minecraft/server/network/config/PrepareSpawnTask.java
++++ b/net/minecraft/server/network/config/PrepareSpawnTask.java
+@@ -185,7 +185,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
+             if (!this.spawnPosition.isDone()) {
+                 return null;
+             } else {
+-                Vec3 spawnPosition = this.spawnPosition.join();
++                Vec3 spawnPosition = Objects.requireNonNull(this.spawnPosition.getNow(null), "spawn position");
+                 if (this.chunkLoadFuture == null) {
+                     // Paper start - PlayerSpawnLocationEvent
+                     if (this.eventFuture == null && org.spigotmc.event.player.PlayerSpawnLocationEvent.getHandlerList().getRegisteredListeners().length != 0) {
+@@ -228,7 +228,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
+                         if (!this.eventFuture.isDone()) {
+                             return null;
+                         }
+-                        org.bukkit.Location location = this.eventFuture.join();
++                        org.bukkit.Location location = Objects.requireNonNull(this.eventFuture.getNow(null), "spawn location");
+                         spawnPosition = io.papermc.paper.util.MCUtil.toVec3(location);
+                         this.spawnLevel = ((org.bukkit.craftbukkit.CraftWorld) location.getWorld()).getHandle();
+                         this.spawnPosition = CompletableFuture.completedFuture(spawnPosition);
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 82748af2479b0f8f15e39d1ad1ccd2a0e583bcdd..6a358dea5ab373775a541192be246087afc94b5b 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -72,6 +72,7 @@ import net.minecraft.server.network.CommonListenerCookie;
+ import net.minecraft.server.network.ServerGamePacketListenerImpl;
+ import net.minecraft.server.notifications.NotificationService;
+ import net.minecraft.server.permissions.LevelBasedPermissionSet;
++import net.minecraft.server.threading.runtime.DomainClock;
+ import net.minecraft.sounds.SoundEvents;
+ import net.minecraft.sounds.SoundSource;
+ import net.minecraft.stats.ServerStatsCounter;
+@@ -156,6 +157,44 @@ public abstract class PlayerList {
+ 
+     abstract public void loadAndSaveFiles(); // Paper - fix converting txt to json file; moved from DedicatedPlayerList constructor
+ 
++    private static void runWithPlayerRegionContext(final ServerLevel level, final ServerPlayer player, final Runnable action) {
++        final net.minecraft.world.level.ChunkPos chunkPos = player.chunkPosition();
++        final int radius = Math.max(io.papermc.paper.FeatureHooks.getViewDistance(level), io.papermc.paper.FeatureHooks.getSimulationDistance(level)) + 1;
++        final int minChunkX = chunkPos.x() - radius;
++        final int minChunkZ = chunkPos.z() - radius;
++        final int maxChunkX = chunkPos.x() + radius;
++        final int maxChunkZ = chunkPos.z() + radius;
++        if (net.minecraft.server.threading.TickRegions.currentContext() != null
++            && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++            action.run();
++            return;
++        }
++
++        final net.minecraft.server.threading.TickRegions.RegionContext context =
++            net.minecraft.server.threading.TickRegions.pushRegionContext(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
++        try {
++            action.run();
++        } finally {
++            net.minecraft.server.threading.TickRegions.popContext(context);
++        }
++    }
++
++    private static void runWithLevelContext(final ServerLevel level, final Runnable action) {
++        if (net.minecraft.server.threading.TickRegions.currentContext() != null
++            && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
++            action.run();
++            return;
++        }
++
++        final net.minecraft.server.threading.TickRegions.RegionContext context =
++            net.minecraft.server.threading.TickRegions.pushLevelContext(level);
++        try {
++            action.run();
++        } finally {
++            net.minecraft.server.threading.TickRegions.popContext(context);
++        }
++    }
++
+     public void placeNewPlayer(final Connection connection, final ServerPlayer player, final CommonListenerCookie cookie) {
+         player.isRealPlayer = true; // Paper
+         player.loginTime = System.currentTimeMillis(); // Paper - Replace OfflinePlayer#getLastPlayed
+@@ -215,7 +254,8 @@ public abstract class PlayerList {
+         // CraftBukkit start
+         component.withStyle(ChatFormatting.YELLOW);
+         Component joinMessage = component; // Paper - Adventure
+-        playerConnection.teleport(player.getX(), player.getY(), player.getZ(), player.getYRot(), player.getXRot());
++        final ServerLevel placementLevel = level;
++        runWithPlayerRegionContext(placementLevel, player, () -> playerConnection.teleport(player.getX(), player.getY(), player.getZ(), player.getYRot(), player.getXRot()));
+         ServerStatus status = this.server.getStatus();
+         if (status != null && !cookie.transferred()) {
+             player.sendServerStatus(status);
+@@ -228,8 +268,8 @@ public abstract class PlayerList {
+         // this.broadcastAll(ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(player))); // CraftBukkit - replaced with loop below
+         // Paper start - Fire PlayerJoinEvent when Player is actually ready; correctly register player BEFORE PlayerJoinEvent, so the entity is valid and doesn't require tick delay hacks
+         player.suppressTrackerForLogin = true;
+-        this.sendLevelInfo(player, level);
+-        level.addNewPlayer(player);
++        this.sendLevelInfo(player, placementLevel);
++        runWithLevelContext(placementLevel, () -> placementLevel.addNewPlayer(player));
+         this.server.getCustomBossEvents().onPlayerConnect(player); // see commented out section below serverLevel.addPlayerJoin(player);
+         // Paper end - Fire PlayerJoinEvent when Player is actually ready
+         player.initInventoryMenu();
+@@ -286,7 +326,7 @@ public abstract class PlayerList {
+         // Paper end - Use single player info update packet on join
+         player.sentListPacket = true;
+         player.suppressTrackerForLogin = false; // Paper - Fire PlayerJoinEvent when Player is actually ready
+-        ((ServerLevel)player.level()).getChunkSource().chunkMap.addEntity(player); // Paper - Fire PlayerJoinEvent when Player is actually ready; track entity now
++        runWithLevelContext(player.level(), () -> player.level().getChunkSource().chunkMap.addEntity(player)); // Paper - Fire PlayerJoinEvent when Player is actually ready; track entity now
+         // CraftBukkit end
+ 
+         //player.refreshEntityData(player); // CraftBukkit - BungeeCord#2321, send complete data to self on spawn // Paper - THIS IS NOT NEEDED ANYMORE
+@@ -295,7 +335,8 @@ public abstract class PlayerList {
+ 
+         // CraftBukkit start - Only add if the player wasn't moved in the event
+         if (player.level() == level && !level.players().contains(player)) {
+-            level.addNewPlayer(player);
++            final ServerLevel eventLevel = level;
++            runWithLevelContext(eventLevel, () -> eventLevel.addNewPlayer(player));
+             this.server.getCustomBossEvents().onPlayerConnect(player);
+         }
+ 
+@@ -418,7 +459,7 @@ public abstract class PlayerList {
+ 
+     protected void save(final ServerPlayer player) {
+         if (!player.getBukkitEntity().isPersistent()) return; // CraftBukkit
+-        player.lastSave = MinecraftServer.currentTick; // Paper - Incremental chunk and player saving
++        player.lastSave = DomainClock.currentServerTick(this.server); // Paper - Incremental chunk and player saving
+         this.playerIo.save(player);
+         ServerStatsCounter stats = player.getStats(); // CraftBukkit
+         if (stats != null) {
+@@ -449,6 +490,20 @@ public abstract class PlayerList {
+         this.cserver.getPluginManager().callEvent(playerQuitEvent);
+         player.getBukkitEntity().disconnect();
+ 
++        if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.canRunSynchronousCallbacks()) { // SPIGOT-924 // Paper - Improved watchdog support; don't tick during emergency shutdowns
++            final net.minecraft.world.level.ChunkPos chunkPos = player.chunkPosition();
++            if (net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, chunkPos.x(), chunkPos.z())) {
++                player.doTick();
++            } else {
++                final net.minecraft.server.threading.TickRegions.RegionContext disconnectTickContext =
++                    net.minecraft.server.threading.TickRegions.pushRegionContext(level, chunkPos.x(), chunkPos.z(), chunkPos.x(), chunkPos.z());
++                try {
++                    player.doTick();
++                } finally {
++                    net.minecraft.server.threading.TickRegions.popContext(disconnectTickContext);
++                }
++            }
++        }
+         // CraftBukkit end
+ 
+         // Paper start - Configurable player collision; Remove from collideRule team if needed
+@@ -498,7 +553,7 @@ public abstract class PlayerList {
+             // Paper end - Allow using old ender pearl behavior
+         }
+ 
+-        level.removePlayerImmediately(player, Entity.RemovalReason.UNLOADED_WITH_PLAYER);
++        runWithLevelContext(level, () -> level.removePlayerImmediately(player, Entity.RemovalReason.UNLOADED_WITH_PLAYER));
+         player.retireScheduler(); // Paper - Folia schedulers
+         player.getAdvancements().stopListening();
+         this.players.remove(player);
+@@ -605,7 +660,7 @@ public abstract class PlayerList {
+         // Paper end - respawn event
+         this.players.remove(serverPlayer);
+         this.playersByName.remove(serverPlayer.getScoreboardName().toLowerCase(java.util.Locale.ROOT)); // Paper
+-        serverPlayer.level().removePlayerImmediately(serverPlayer, removalReason);
++        runWithLevelContext(serverPlayer.level(), () -> serverPlayer.level().removePlayerImmediately(serverPlayer, removalReason));
+         ServerLevel level = respawnInfo.newLevel();
+         ServerPlayer player = serverPlayer; // Paper - TODO - recreate instance
+         player.connection = serverPlayer.connection;
+@@ -639,14 +694,14 @@ public abstract class PlayerList {
+         ServerLevel playerLevel = player.level();
+         LevelData levelData = playerLevel.getLevelData();
+         player.connection.send(new ClientboundRespawnPacket(player.createCommonSpawnInfo(playerLevel), dataToKeep));
+-        player.connection.internalTeleport(player.getX(), player.getY(), player.getZ(), player.getYRot(), player.getXRot()); // Paper
++        runWithPlayerRegionContext(level, player, () -> player.connection.internalTeleport(player.getX(), player.getY(), player.getZ(), player.getYRot(), player.getXRot())); // Paper
+         player.connection.send(new ClientboundSetDefaultSpawnPositionPacket(level.getRespawnData()));
+         player.connection.send(new ClientboundChangeDifficultyPacket(levelData.getDifficulty(), levelData.isDifficultyLocked()));
+         player.connection.send(new ClientboundSetExperiencePacket(player.experienceProgress, player.totalExperience, player.experienceLevel));
+         this.sendActivePlayerEffects(player);
+         this.sendLevelInfo(player, level);
+         this.sendPlayerPermissionLevel(player);
+-        level.addRespawnedPlayer(player);
++        runWithLevelContext(level, () -> level.addRespawnedPlayer(player));
+         this.players.add(player);
+         this.playersByName.put(player.getScoreboardName().toLowerCase(java.util.Locale.ROOT), player); // Paper
+         this.playersByUUID.put(player.getUUID(), player);
+@@ -959,7 +1014,7 @@ public abstract class PlayerList {
+         io.papermc.paper.util.MCUtil.ensureMain("Save Players" , () -> { // Paper - Ensure main
+         // Paper start - Incremental chunk and player saving
+             int numSaved = 0;
+-            final long now = MinecraftServer.currentTick;
++            final long now = DomainClock.currentServerTick(this.server);
+             for (final ServerPlayer player : this.players) {
+             if (interval == -1 || now - player.lastSave >= interval) {
+                 this.save(player);
+@@ -994,7 +1049,7 @@ public abstract class PlayerList {
+     public void sendLevelInfo(final ServerPlayer player, final ServerLevel level) {
+         WorldBorder worldBorder = level.getWorldBorder();
+         player.connection.send(new ClientboundInitializeBorderPacket(worldBorder));
+-        player.connection.send(level.clockManager().createFullSyncPacket(player)); // Paper - per-world time; per-player time
++        player.connection.send(this.server.clockManager().createFullSyncPacket());
+         player.connection.send(new ClientboundSetDefaultSpawnPositionPacket(level.getRespawnData()));
+         // Paper start - view distances
+         //player.connection.send(new ClientboundSetChunkCacheRadiusPacket(io.papermc.paper.FeatureHooks.getViewDistance(level))); // Paper - rewrite chunk system

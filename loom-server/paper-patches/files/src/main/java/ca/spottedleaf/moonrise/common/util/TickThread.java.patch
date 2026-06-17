@@ -1,0 +1,29 @@
+--- a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
++++ b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+@@ -39,6 +_,15 @@
+         }
+     }
+ 
++    public static void ensureTickThread(final Level world, final String reason) {
++        if (!isTickThreadFor(world)) {
++            final String ex = "Thread failed main thread check: " +
++                reason + ", context=" + getThreadContext() + ", world=" + WorldUtil.getWorldName(world);
++            LOGGER.error(ex, new Throwable());
++            throw new IllegalStateException(ex);
++        }
++    }
++
+     public static void ensureTickThread(final Level world, final BlockPos pos, final int blockRadius, final String reason) {
+         if (!isTickThreadFor(world, pos, blockRadius)) {
+             final String ex = "Thread failed main thread check: " +
+@@ -127,6 +_,10 @@
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final BlockPos pos) {
++        return isTickThread();
++    }
++
++    public static boolean isTickThreadFor(final Level world) {
+         return isTickThread();
+     }
+ 

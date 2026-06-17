@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 9 Jun 2026 23:17:07 +0000
+Subject: [PATCH] Add tick-start chunk task drain controls
+
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
+index fe6353566092a4248426a351c2392cc3eb9ae016..c58fcf4998454f8c4d4c1f480b57dd551132dbe0 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
+@@ -65,6 +65,17 @@ import java.util.function.Consumer;
+ public final class ChunkTaskScheduler {
+ 
+     private static final Logger LOGGER = LogUtils.getClassLogger();
++    private static final int LOOM_TICK_START_CHUNK_TASK_MAX_TASKS = Math.max(
++        1,
++        Integer.getInteger("Loom.TickStartChunkTaskMaxTasks", Integer.MAX_VALUE)
++    );
++    private static final int LOOM_TICK_START_CHUNK_TASK_MIN_PROGRESS = Math.min(
++        LOOM_TICK_START_CHUNK_TASK_MAX_TASKS,
++        Math.max(1, Integer.getInteger("Loom.TickStartChunkTaskMinProgress", 1))
++    );
++    private static final long LOOM_TICK_START_CHUNK_TASK_BUDGET_NANOS = Long.getLong(
++        "Loom.TickStartChunkTaskBudgetNanos", Long.MAX_VALUE
++    );
+ 
+     public static final TicketType CHUNK_LOAD = ChunkSystemTicketType.create("chunk_system:chunk_load", Long::compareTo);
+     private static final AtomicLong CHUNK_LOAD_IDS = new AtomicLong();
+@@ -350,10 +361,16 @@ public final class ChunkTaskScheduler {
+         final long scheduled = this.mainThreadExecutor.getTotalTasksScheduled();
+ 
+         final long left = scheduled - executed;
++        final long maxTasks = Math.min(left, LOOM_TICK_START_CHUNK_TASK_MAX_TASKS);
++        final boolean useBudget = LOOM_TICK_START_CHUNK_TASK_BUDGET_NANOS != Long.MAX_VALUE;
++        final long deadline = useBudget ? System.nanoTime() + Math.max(1L, LOOM_TICK_START_CHUNK_TASK_BUDGET_NANOS) : Long.MAX_VALUE;
+         // may execute more tasks than expected due to recursion
+         long ran = 0L;
+-        for (long i = 0; i < left && this.mainThreadExecutor.executeTask(); ++i) {
++        for (long i = 0; i < maxTasks && this.mainThreadExecutor.executeTask(); ++i) {
+             ++ran;
++            if (useBudget && ran >= LOOM_TICK_START_CHUNK_TASK_MIN_PROGRESS && System.nanoTime() - deadline >= 0L) {
++                break;
++            }
+         }
+         return ran;
+     }

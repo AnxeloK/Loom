@@ -1,0 +1,113 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
+@@ -1,0 +_,110 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import java.util.Objects;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import org.bukkit.plugin.Plugin;
++import org.jspecify.annotations.Nullable;
++
++public final class CompatibilityApartment {
++
++    public enum EnterResult {
++        ACQUIRED,
++        REENTRANT,
++        BUSY
++    }
++
++    public record LeaseState(String plugin, long transactionId, String thread, int depth) {
++    }
++
++    private static final class Lease {
++        private final Plugin plugin;
++        private final long transactionId;
++        private final Thread ownerThread;
++        private final AtomicInteger depth = new AtomicInteger(1);
++
++        private Lease(final Plugin plugin, final long transactionId, final Thread ownerThread) {
++            this.plugin = plugin;
++            this.transactionId = transactionId;
++            this.ownerThread = ownerThread;
++        }
++    }
++
++    private final Plugin plugin;
++    private final AtomicReference<@Nullable Lease> activeLease = new AtomicReference<>();
++
++    public CompatibilityApartment(final Plugin plugin) {
++        this.plugin = Objects.requireNonNull(plugin, "plugin");
++    }
++
++    public Plugin plugin() {
++        return this.plugin;
++    }
++
++    public Scope enter(final CompatibilityTransaction transaction, final boolean strictFallback) {
++        Objects.requireNonNull(transaction, "transaction");
++
++        final Thread currentThread = Thread.currentThread();
++        final long transactionId = transaction.id();
++
++        while (true) {
++            final Lease current = this.activeLease.get();
++            if (current == null) {
++                final Lease created = new Lease(this.plugin, transactionId, currentThread);
++                if (this.activeLease.compareAndSet(null, created)) {
++                    final CompatibilityRuntimeContext.Scope context = CompatibilityRuntimeContext.enter(this.plugin, transactionId, strictFallback);
++                    return new Scope(EnterResult.ACQUIRED, this, created, context, null);
++                }
++                continue;
++            }
++
++            if (current.ownerThread == currentThread && current.transactionId == transactionId) {
++                current.depth.incrementAndGet();
++                final CompatibilityRuntimeContext.Scope context = CompatibilityRuntimeContext.enter(this.plugin, transactionId, strictFallback);
++                return new Scope(EnterResult.REENTRANT, this, current, context, null);
++            }
++
++            return new Scope(
++                EnterResult.BUSY,
++                this,
++                null,
++                null,
++                new LeaseState(this.plugin.getPluginMeta().getName(), current.transactionId, current.ownerThread.getName(), current.depth.get())
++            );
++        }
++    }
++
++    private void release(final Lease lease) {
++        final int depth = lease.depth.decrementAndGet();
++        if (depth > 0) {
++            return;
++        }
++        this.activeLease.compareAndSet(lease, null);
++    }
++
++    public record Scope(
++        EnterResult result,
++        CompatibilityApartment apartment,
++        @Nullable Lease lease,
++        CompatibilityRuntimeContext.Scope contextScope,
++        @Nullable LeaseState busyLease
++    ) implements AutoCloseable {
++
++        public boolean acquired() {
++            return this.result == EnterResult.ACQUIRED || this.result == EnterResult.REENTRANT;
++        }
++
++        @Override
++        public void close() {
++            if (!this.acquired()) {
++                return;
++            }
++            if (this.contextScope != null) {
++                this.contextScope.close();
++            }
++            if (this.lease != null) {
++                this.apartment.release(this.lease);
++            }
++        }
++    }
++}

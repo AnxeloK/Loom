@@ -1,0 +1,106 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/BukkitFacadeRegistry.java
+@@ -1,0 +_,103 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import java.lang.ref.WeakReference;
++import java.util.Objects;
++import java.util.UUID;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ConcurrentMap;
++import org.bukkit.Chunk;
++import org.bukkit.Location;
++import org.bukkit.World;
++import org.bukkit.block.Block;
++import org.bukkit.entity.Entity;
++import org.bukkit.entity.Player;
++import org.bukkit.inventory.Inventory;
++import org.jspecify.annotations.Nullable;
++
++/**
++ * Weakly interns facade identities so repeated lookups in a compatibility scope can reuse
++ * a stable object reference while keeping GC ownership with Bukkit/CraftBukkit.
++ */
++public final class BukkitFacadeRegistry {
++
++    private final ConcurrentMap<Object, WeakReference<Object>> facades = new ConcurrentHashMap<>();
++
++    @SuppressWarnings("unchecked")
++    public <T> T intern(final T candidate) {
++        if (candidate == null) {
++            return null;
++        }
++
++        final Object key = keyFor(candidate);
++        if (key == null) {
++            return candidate;
++        }
++
++        final WeakReference<Object> existingRef = this.facades.get(key);
++        final Object existing = existingRef == null ? null : existingRef.get();
++        if (existing != null) {
++            return (T)existing;
++        }
++
++        this.facades.put(key, new WeakReference<>(candidate));
++        return candidate;
++    }
++
++    public Location normalizeLocation(final @Nullable Location location) {
++        if (location == null) {
++            return null;
++        }
++        final World world = this.intern(location.getWorld());
++        if (world == null || world == location.getWorld()) {
++            return location;
++        }
++        return new Location(world, location.x(), location.y(), location.z(), location.getYaw(), location.getPitch());
++    }
++
++    private static @Nullable Object keyFor(final Object candidate) {
++        if (candidate instanceof Player player) {
++            return new PlayerKey(player.getUniqueId(), player.getName(), player.isOnline());
++        }
++        if (candidate instanceof Entity entity) {
++            final World world = entity.getWorld();
++            return world == null ? null : new EntityKey(entity.getUniqueId(), world.getUID());
++        }
++        if (candidate instanceof World world) {
++            return new WorldKey(world.getUID(), world.getName());
++        }
++        if (candidate instanceof Block block) {
++            final World world = block.getWorld();
++            return new BlockKey(world.getUID(), block.getX(), block.getY(), block.getZ());
++        }
++        if (candidate instanceof Chunk chunk) {
++            final World world = chunk.getWorld();
++            return new ChunkKey(world.getUID(), chunk.getX(), chunk.getZ());
++        }
++        if (candidate instanceof Inventory inventory) {
++            final Object holder = inventory.getHolder();
++            return new InventoryKey(System.identityHashCode(inventory), holder == null ? 0 : System.identityHashCode(holder));
++        }
++        return null;
++    }
++
++    private record PlayerKey(UUID uuid, String name, boolean online) {
++        private PlayerKey {
++            Objects.requireNonNull(uuid, "uuid");
++        }
++    }
++
++    private record EntityKey(UUID uuid, UUID world) {
++    }
++
++    private record WorldKey(UUID uuid, String name) {
++    }
++
++    private record BlockKey(UUID world, int x, int y, int z) {
++    }
++
++    private record ChunkKey(UUID world, int x, int z) {
++    }
++
++    private record InventoryKey(int identity, int holderIdentity) {
++    }
++}

@@ -1,0 +1,72 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
+@@ -1,0 +_,69 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import org.bukkit.event.Event;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.RegisteredListener;
++
++public final class CompatibilityKernel {
++
++    public enum InvocationPolicy {
++        NATIVE,
++        APARTMENT,
++        STRICT_FALLBACK,
++        REFUSE
++    }
++
++    private final EventSemanticIndex eventSemanticIndex = new EventSemanticIndex();
++    private final BukkitFacadeRegistry facadeRegistry = new BukkitFacadeRegistry();
++    private final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
++
++    private final Map<String, CompatibilityApartment> apartments = new ConcurrentHashMap<>();
++
++    public EventSemanticIndex eventSemanticIndex() {
++        return this.eventSemanticIndex;
++    }
++
++    public BukkitFacadeRegistry facadeRegistry() {
++        return this.facadeRegistry;
++    }
++
++    public CompatibilityDiagnostics diagnostics() {
++        return this.diagnostics;
++    }
++
++    public PluginCompatibilityProfile profileFor(final Plugin plugin) {
++        return this.diagnostics.profileFor(plugin);
++    }
++
++    public CompatibilityApartment apartmentFor(final Plugin plugin) {
++        return this.apartments.computeIfAbsent(plugin.getPluginMeta().getName(), ignored -> new CompatibilityApartment(plugin));
++    }
++
++    public CompatibilityTransaction beginTransaction(final Event event, final RegisteredListener[] listeners) {
++        final EventSemanticIndex.EventSemantics semantics = this.eventSemanticIndex.resolve(event, listeners);
++        return new CompatibilityTransaction(event, semantics);
++    }
++
++    public InvocationPolicy policyFor(final PluginCompatibilityProfile profile) {
++        return switch (profile.mode()) {
++            case NATIVE_LOOM_AWARE -> InvocationPolicy.NATIVE;
++            case LEGACY_NORMAL, LEGACY_ORDERED, LEGACY_INTERNAL -> InvocationPolicy.APARTMENT;
++            case LEGACY_STRICT -> InvocationPolicy.STRICT_FALLBACK;
++            case REFUSED -> InvocationPolicy.REFUSE;
++        };
++    }
++
++    public void finishTransaction(final CompatibilityTransaction transaction) {
++        transaction.finish();
++        this.diagnostics.recordTransaction(transaction);
++    }
++
++    public void noteMonitorMutation(
++        final PluginCompatibilityProfile profile,
++        final CompatibilityTransaction.MonitorMutation mutation
++    ) {
++        profile.noteMonitorMutation("MONITOR lane mutated " + mutation.event() + " in tx=" + mutation.transactionId());
++    }
++}

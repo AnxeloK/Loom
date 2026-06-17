@@ -1,0 +1,11 @@
+--- a/src/main/java/org/spigotmc/AsyncCatcher.java
++++ b/src/main/java/org/spigotmc/AsyncCatcher.java
+@@ -10,4 +_,8 @@
+             throw new IllegalStateException("Asynchronous " + reason + "!");
+         }
+     }
++
++    public static void catchOp(final String reason, final Object... context) {
++        catchOp(reason);
++    }
+ }

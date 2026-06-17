@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 2 Jun 2026 16:20:53 +0000
+Subject: [PATCH] Tag keepalive test for normal suite
+
+
+diff --git a/src/test/java/io/papermc/paper/util/KeepAliveTest.java b/src/test/java/io/papermc/paper/util/KeepAliveTest.java
+index 04ac627b71de7a165b637ef3a81feb61e9df1c85..99c26c98ff286572bf00855aff401e5e256ee696 100644
+--- a/src/test/java/io/papermc/paper/util/KeepAliveTest.java
++++ b/src/test/java/io/papermc/paper/util/KeepAliveTest.java
+@@ -9,8 +9,10 @@ import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.Executors;
+ import java.util.concurrent.Future;
+ import java.util.concurrent.TimeUnit;
++import org.junit.jupiter.api.Tag;
+ import org.junit.jupiter.api.Test;
+ 
++@Tag("Normal")
+ class KeepAliveTest {
+ 
+     @Test

@@ -1,0 +1,72 @@
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
+@@ -1,0 +_,69 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.List;
++import java.util.logging.Logger;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class PluginCompatibilityProfileTest {
++
++    @Test
++    void profileEscalatesToStrictAfterRepeatedMonitorMutation() {
++        final Plugin plugin = mockPlugin("OldClaims", "com.example.OldClaims", List.of(), List.of());
++        final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
++
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_NORMAL, profile.mode());
++
++        profile.noteMonitorMutation("first");
++        profile.noteMonitorMutation("second");
++        profile.noteMonitorMutation("third");
++
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_STRICT, profile.mode());
++        Assertions.assertTrue(profile.snapshot().monitorMutationAttempts() >= 3L);
++    }
++
++    @Test
++    void internalPluginStartsInInternalMode() {
++        final Plugin plugin = mockPlugin("ProtocolBridge", "com.example.protocol.Bridge", List.of("ProtocolLib"), List.of());
++        final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
++
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_INTERNAL, profile.mode());
++    }
++
++    @Test
++    void refusalIsTerminalMode() {
++        final Plugin plugin = mockPlugin("UnsafePlugin", "com.example.Unsafe", List.of(), List.of());
++        final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
++
++        profile.noteRefusal("unsafe raw handles");
++        profile.noteStrictFallback("should not downgrade");
++
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.REFUSED, profile.mode());
++        Assertions.assertEquals(1L, profile.snapshot().refusals());
++    }
++
++    private static Plugin mockPlugin(
++        final String name,
++        final String mainClass,
++        final List<String> dependencies,
++        final List<String> softDependencies
++    ) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn(mainClass);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(dependencies);
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(softDependencies);
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
++}

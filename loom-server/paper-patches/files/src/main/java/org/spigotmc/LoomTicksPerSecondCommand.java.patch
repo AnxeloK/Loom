@@ -1,0 +1,235 @@
+--- /dev/null
++++ b/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
+@@ -1,0 +_,232 @@
++package org.spigotmc;
++
++import net.kyori.adventure.text.Component;
++import net.kyori.adventure.text.JoinConfiguration;
++import net.kyori.adventure.text.TextComponent;
++import net.kyori.adventure.text.format.NamedTextColor;
++import net.kyori.adventure.text.format.TextColor;
++import net.minecraft.server.threading.TickRegions;
++import org.bukkit.Bukkit;
++import org.bukkit.command.Command;
++import org.bukkit.command.CommandSender;
++
++import java.text.DecimalFormat;
++
++import static net.kyori.adventure.text.Component.text;
++
++public class LoomTicksPerSecondCommand extends Command {
++
++    private static final TextColor ACCENT = TextColor.fromHexString("#c5ff05");
++    private static final TextColor SOFT = TextColor.fromHexString("#c3ccd8");
++    private static final TextColor SUBTLE = TextColor.fromHexString("#94a3b8");
++    private volatile TickRegions.RuntimeDiagnostics lastThreadedSnapshot;
++    private volatile long lastThreadedSnapshotNanos = -1L;
++    private static final ThreadLocal<DecimalFormat> ONE_DECIMAL_PLACES = ThreadLocal.withInitial(() -> {
++        return new DecimalFormat("########0.0");
++    });
++
++    public LoomTicksPerSecondCommand(final String name) {
++        super(name);
++        this.description = "Gets threaded runtime diagnostics";
++        this.usageMessage = "/loom:tps";
++        this.setPermission("bukkit.command.tps");
++    }
++
++    @Override
++    public boolean execute(final CommandSender sender, final String currentAlias, final String[] args) {
++        if (!this.testPermission(sender)) {
++            return true;
++        }
++
++        final double[] tps = Bukkit.getTPS();
++        final Component[] tpsAvg = new Component[tps.length];
++        for (int i = 0; i < tps.length; ++i) {
++            tpsAvg[i] = this.format(tps[i]);
++        }
++
++        sender.sendMessage(text("Speed TPS from last 1m, 5m, 15m:", SOFT));
++        final TextComponent.Builder tpsValues = text();
++        tpsValues.append(text("  ", SUBTLE));
++        tpsValues.append(Component.join(JoinConfiguration.commas(true), tpsAvg));
++        sender.sendMessage(tpsValues.asComponent());
++        sender.sendMessage(Component.empty());
++        this.sendThreadedRuntimeSummary(sender);
++        return true;
++    }
++
++    private void sendThreadedRuntimeSummary(final CommandSender sender) {
++        final TickRegions.RuntimeDiagnostics snapshot = TickRegions.snapshotDiagnostics();
++        final TickRegions.RuntimeDiagnostics previous = this.lastThreadedSnapshot;
++        final long now = System.nanoTime();
++
++        long queuedScheduledTasks = 0L;
++        long queuedMailboxMessages = 0L;
++        for (final TickRegions.WorldSchedulerDiagnostics world : snapshot.schedulerWorlds()) {
++            queuedScheduledTasks += world.queuedTasks();
++            queuedMailboxMessages += world.queuedMailboxMessages();
++        }
++
++        final long createdRegions = snapshot.regionRuntime().createdRegions();
++        final long createdRegionsDelta;
++        final long ownershipFailures = snapshot.ownershipFailures();
++        final long leaseFailures = snapshot.leaseClaimFailures();
++        final long mailboxDropped = snapshot.mailboxMessagesDropped();
++        final long totalAlerts = ownershipFailures + leaseFailures + mailboxDropped;
++        if (previous != null) {
++            createdRegionsDelta = Math.max(0L, createdRegions - previous.regionRuntime().createdRegions());
++        } else {
++            createdRegionsDelta = 0L;
++        }
++
++        final long totalQueue = queuedScheduledTasks + queuedMailboxMessages;
++        final long previousNanos = this.lastThreadedSnapshotNanos;
++        final double elapsedSeconds;
++        final double regionCreateRate;
++        final double mailboxRate;
++        final double schedulerRate;
++        final double simulationOpsRate;
++        if (previous != null && previousNanos > 0L && now > previousNanos) {
++            elapsedSeconds = (double)(now - previousNanos) / 1_000_000_000.0D;
++            if (elapsedSeconds > 0.0D) {
++                schedulerRate = this.perSecond(snapshot.schedulerTasksExecuted(), previous.schedulerTasksExecuted(), elapsedSeconds);
++                mailboxRate = this.perSecond(snapshot.mailboxMessagesDelivered(), previous.mailboxMessagesDelivered(), elapsedSeconds);
++                simulationOpsRate = this.perSecond(snapshot.simulationBatchOperations(), previous.simulationBatchOperations(), elapsedSeconds);
++                regionCreateRate = this.perSecond(snapshot.regionRuntime().createdRegions(), previous.regionRuntime().createdRegions(), elapsedSeconds);
++            } else {
++                schedulerRate = 0.0D;
++                mailboxRate = 0.0D;
++                simulationOpsRate = 0.0D;
++                regionCreateRate = 0.0D;
++            }
++        } else {
++            elapsedSeconds = 0.0D;
++            schedulerRate = 0.0D;
++            mailboxRate = 0.0D;
++            simulationOpsRate = 0.0D;
++            regionCreateRate = 0.0D;
++        }
++
++        sender.sendMessage(text("Runtime overview:", SOFT));
++        sender.sendMessage(text()
++            .append(text("  State: ", SOFT))
++            .append(text(this.runtimeState(totalAlerts, totalQueue, regionCreateRate), this.stateColor(totalAlerts, totalQueue, regionCreateRate)))
++            .append(text("  |  Alerts: ", SOFT))
++            .append(text(totalAlerts, this.failureColor(totalAlerts)))
++            .build());
++
++        final TextComponent.Builder safety = text();
++        safety.append(text("  Alert details: ", SOFT));
++        if (totalAlerts > 0L) {
++            safety.append(text("thread ", SUBTLE));
++            safety.append(text(ownershipFailures, this.failureColor(ownershipFailures)));
++            safety.append(text(", lease ", SUBTLE));
++            safety.append(text(leaseFailures, this.failureColor(leaseFailures)));
++            safety.append(text(", mail ", SUBTLE));
++            safety.append(text(mailboxDropped, this.failureColor(mailboxDropped)));
++        } else {
++            safety.append(text("none", NamedTextColor.GREEN));
++        }
++        sender.sendMessage(safety.asComponent());
++
++        sender.sendMessage(text()
++            .append(text("  Queue load: ", SOFT))
++            .append(text(totalQueue, this.pressureColor(totalQueue)))
++            .append(text(" total", SOFT))
++            .append(text("  (scheduled ", SOFT))
++            .append(text(queuedScheduledTasks, NamedTextColor.WHITE))
++            .append(text(", mailbox ", SOFT))
++            .append(text(queuedMailboxMessages, NamedTextColor.WHITE))
++            .append(text(")", SOFT))
++            .build());
++
++        sender.sendMessage(text()
++            .append(text("  Regions: ", SOFT))
++            .append(text("active ", SOFT))
++            .append(text(snapshot.regionRuntime().activeRegions(), NamedTextColor.WHITE))
++            .append(text("  |  known ", SOFT))
++            .append(text(snapshot.regionRuntime().createdRegions(), NamedTextColor.WHITE))
++            .append(text("  |  new ", SOFT))
++            .append(text("+" + createdRegionsDelta, createdRegionsDelta > 0L ? ACCENT : NamedTextColor.WHITE))
++            .append(text("  |  worlds ", SOFT))
++            .append(text(snapshot.regionRuntime().worldsTracked(), NamedTextColor.WHITE))
++            .build());
++
++        if (elapsedSeconds > 0.0D) {
++            sender.sendMessage(Component.empty());
++            sender.sendMessage(text("Work rate since last /loom:tps (" + ONE_DECIMAL_PLACES.get().format(elapsedSeconds) + "s):", SOFT));
++            sender.sendMessage(text()
++                .append(text("  regions ", SOFT))
++                .append(text(ONE_DECIMAL_PLACES.get().format(regionCreateRate) + "/s", ACCENT))
++                .append(text(", mailbox ", SOFT))
++                .append(text(ONE_DECIMAL_PLACES.get().format(mailboxRate) + "/s", this.rateColor(mailboxRate)))
++                .append(text(", scheduler ", SOFT))
++                .append(text(ONE_DECIMAL_PLACES.get().format(schedulerRate) + "/s", this.rateColor(schedulerRate)))
++                .append(text(", simulation ", SOFT))
++                .append(text(ONE_DECIMAL_PLACES.get().format(simulationOpsRate) + "/s", this.rateColor(simulationOpsRate)))
++                .build());
++        }
++
++        this.lastThreadedSnapshot = snapshot;
++        this.lastThreadedSnapshotNanos = now;
++    }
++
++    private String runtimeState(final long alerts, final long queueSize, final double regionCreateRate) {
++        if (alerts > 0L) {
++            return "Attention";
++        }
++        if (queueSize >= 4096L || regionCreateRate >= 1200.0D) {
++            return "Heavy";
++        }
++        if (queueSize >= 512L || regionCreateRate >= 250.0D) {
++            return "Active";
++        }
++        return "Smooth";
++    }
++
++    private TextColor stateColor(final long alerts, final long queueSize, final double regionCreateRate) {
++        if (alerts > 0L) {
++            return NamedTextColor.RED;
++        }
++        if (queueSize >= 4096L || regionCreateRate >= 1200.0D) {
++            return NamedTextColor.YELLOW;
++        }
++        if (queueSize >= 512L || regionCreateRate >= 250.0D) {
++            return ACCENT;
++        }
++        return NamedTextColor.GREEN;
++    }
++
++    private TextColor rateColor(final double rate) {
++        if (rate >= 250.0D) {
++            return ACCENT;
++        }
++        if (rate > 0.0D) {
++            return NamedTextColor.GREEN;
++        }
++        return NamedTextColor.WHITE;
++    }
++
++    private double perSecond(final long current, final long previous, final double elapsedSeconds) {
++        return Math.max(0.0D, (double)(current - previous) / elapsedSeconds);
++    }
++
++    private TextColor pressureColor(final long queueSize) {
++        if (queueSize >= 4096L) {
++            return NamedTextColor.RED;
++        }
++        if (queueSize >= 512L) {
++            return NamedTextColor.YELLOW;
++        }
++        return NamedTextColor.GREEN;
++    }
++
++    private TextColor failureColor(final long value) {
++        return value > 0L ? NamedTextColor.RED : NamedTextColor.GREEN;
++    }
++
++    private Component format(final double tps) {
++        final TextColor color = tps > 18.0 ? NamedTextColor.GREEN : (tps > 16.0 ? NamedTextColor.YELLOW : NamedTextColor.RED);
++        final String amount = ONE_DECIMAL_PLACES.get().format(tps);
++        return text(amount, color);
++    }
++}

@@ -1,0 +1,56 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityContinuationBridge.java
+@@ -1,0 +_,53 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import java.util.Objects;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionException;
++import java.util.function.Supplier;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++
++public final class CompatibilityContinuationBridge {
++
++    private CompatibilityContinuationBridge() {
++    }
++
++    public static <T> T awaitOffOwner(
++        final PluginCompatibilityProfile profile,
++        final CompatibilityDiagnostics diagnostics,
++        final String operation,
++        final Supplier<CompletableFuture<T>> supplier
++    ) throws Throwable {
++        Objects.requireNonNull(profile, "profile");
++        Objects.requireNonNull(diagnostics, "diagnostics");
++        Objects.requireNonNull(operation, "operation");
++        Objects.requireNonNull(supplier, "supplier");
++
++        if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
++            diagnostics.recordOwnerDomainWaitViolation(profile, CompatibilityRuntimeContext.currentPath(), operation + " (owner domain wait blocked)");
++            throw new IllegalStateException("Owner-domain violation: " + operation + " cannot synchronously wait");
++        }
++
++        final CompletableFuture<T> delegated = Objects.requireNonNull(supplier.get(), "supplier returned null future");
++        final long started = System.nanoTime();
++        try {
++            if (Thread.currentThread().isVirtual()) {
++                return delegated.join();
++            }
++
++            final CompletableFuture<T> resumed = new CompletableFuture<>();
++            Thread.ofVirtual().name("loom-compat-continuation").start(() -> {
++                try {
++                    resumed.complete(delegated.join());
++                } catch (final Throwable throwable) {
++                    resumed.completeExceptionally(throwable);
++                }
++            });
++            return resumed.join();
++        } catch (final CompletionException completionException) {
++            final Throwable cause = completionException.getCause();
++            throw cause == null ? completionException : cause;
++        } finally {
++            diagnostics.recordContinuationResume(profile, operation, System.nanoTime() - started);
++        }
++    }
++}

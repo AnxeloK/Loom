@@ -1,0 +1,254 @@
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
+@@ -1,0 +_,251 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.Deque;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.atomic.LongAdder;
++import org.bukkit.plugin.Plugin;
++
++public final class PluginCompatibilityProfile {
++
++    public enum Mode {
++        NATIVE_LOOM_AWARE,
++        LEGACY_NORMAL,
++        LEGACY_ORDERED,
++        LEGACY_INTERNAL,
++        LEGACY_STRICT,
++        REFUSED;
++
++        public boolean atLeast(final Mode mode) {
++            return this.ordinal() >= mode.ordinal();
++        }
++    }
++
++    public enum EscalationReason {
++        STATIC_INTERNAL_HINT,
++        ORDERED_EVENT_LANE,
++        MONITOR_MUTATION,
++        ASYNC_BUKKIT_ACCESS,
++        OWNER_BLOCKING_WAIT,
++        APARTMENT_CONTENTION,
++        UNSAFE_INTERNAL_ACCESS,
++        STRICT_FALLBACK,
++        REFUSAL
++    }
++
++    public record Escalation(
++        long epochMillis,
++        EscalationReason reason,
++        Mode from,
++        Mode to,
++        String detail
++    ) {
++    }
++
++    public record Snapshot(
++        String plugin,
++        Mode mode,
++        long callbackTimeNanos,
++        long ownerRpcWaitNanos,
++        long barrierTimeNanos,
++        long orderedTransactions,
++        long monitorMutationAttempts,
++        long asyncBukkitViolations,
++        long strictFallbacks,
++        long refusals,
++        long ownerDomainWaitViolations,
++        List<Escalation> escalations,
++        List<EventCost> hotEvents
++    ) {
++    }
++
++    public record EventCost(String eventName, long callbackTimeNanos) {
++    }
++
++    private static final int MAX_ESCALATIONS = 64;
++
++    private final Plugin plugin;
++    private final String pluginName;
++    private volatile Mode mode;
++    private final Deque<Escalation> escalations = new ArrayDeque<>();
++    private final Object escalationLock = new Object();
++
++    private final LongAdder callbackTimeNanos = new LongAdder();
++    private final LongAdder ownerRpcWaitNanos = new LongAdder();
++    private final LongAdder barrierTimeNanos = new LongAdder();
++    private final LongAdder orderedTransactions = new LongAdder();
++    private final LongAdder monitorMutationAttempts = new LongAdder();
++    private final LongAdder asyncBukkitViolations = new LongAdder();
++    private final LongAdder strictFallbacks = new LongAdder();
++    private final LongAdder refusals = new LongAdder();
++    private final LongAdder ownerDomainWaitViolations = new LongAdder();
++
++    private final Map<String, LongAdder> callbackNanosByEvent = new ConcurrentHashMap<>();
++
++    public PluginCompatibilityProfile(final Plugin plugin) {
++        this.plugin = plugin;
++        this.pluginName = plugin.getPluginMeta().getName();
++        this.mode = initialMode(plugin.getPluginMeta());
++    }
++
++    public Plugin plugin() {
++        return this.plugin;
++    }
++
++    public String pluginName() {
++        return this.pluginName;
++    }
++
++    public Mode mode() {
++        return this.mode;
++    }
++
++    public void noteOrderedTransaction() {
++        this.orderedTransactions.increment();
++        this.escalate(Mode.LEGACY_ORDERED, EscalationReason.ORDERED_EVENT_LANE, "ordered event transaction");
++    }
++
++    public void noteUnsafeInternalAccess(final String detail) {
++        this.escalate(Mode.LEGACY_INTERNAL, EscalationReason.UNSAFE_INTERNAL_ACCESS, detail);
++    }
++
++    public void noteMonitorMutation(final String detail) {
++        this.monitorMutationAttempts.increment();
++        this.escalate(Mode.LEGACY_ORDERED, EscalationReason.MONITOR_MUTATION, detail);
++        if (this.monitorMutationAttempts.longValue() >= 3L) {
++            this.escalate(Mode.LEGACY_STRICT, EscalationReason.STRICT_FALLBACK, "repeated MONITOR mutation");
++        }
++    }
++
++    public void noteAsyncBukkitAccess(final String detail) {
++        this.asyncBukkitViolations.increment();
++        this.escalate(Mode.LEGACY_INTERNAL, EscalationReason.ASYNC_BUKKIT_ACCESS, detail);
++        if (this.asyncBukkitViolations.longValue() >= 2L) {
++            this.escalate(Mode.LEGACY_STRICT, EscalationReason.STRICT_FALLBACK, "repeated async Bukkit access");
++        }
++    }
++
++    public void noteOwnerDomainWaitViolation(final String detail) {
++        this.ownerDomainWaitViolations.increment();
++        this.escalate(Mode.LEGACY_STRICT, EscalationReason.OWNER_BLOCKING_WAIT, detail);
++    }
++
++    public void noteApartmentContention(final String detail) {
++        this.escalate(Mode.LEGACY_STRICT, EscalationReason.APARTMENT_CONTENTION, detail);
++    }
++
++    public void noteStrictFallback(final String detail) {
++        this.strictFallbacks.increment();
++        this.escalate(Mode.LEGACY_STRICT, EscalationReason.STRICT_FALLBACK, detail);
++    }
++
++    public void noteRefusal(final String detail) {
++        this.refusals.increment();
++        this.escalate(Mode.REFUSED, EscalationReason.REFUSAL, detail);
++    }
++
++    public void noteCallbackCost(final String eventName, final long nanos) {
++        this.callbackTimeNanos.add(Math.max(0L, nanos));
++        this.callbackNanosByEvent.computeIfAbsent(eventName, ignored -> new LongAdder()).add(Math.max(0L, nanos));
++    }
++
++    public void noteOwnerRpcWaitNanos(final long nanos) {
++        this.ownerRpcWaitNanos.add(Math.max(0L, nanos));
++    }
++
++    public void noteBarrierTimeNanos(final long nanos) {
++        this.barrierTimeNanos.add(Math.max(0L, nanos));
++    }
++
++    public Snapshot snapshot() {
++        final List<Escalation> history;
++        synchronized (this.escalationLock) {
++            history = List.copyOf(this.escalations);
++        }
++        return new Snapshot(
++            this.pluginName,
++            this.mode,
++            this.callbackTimeNanos.longValue(),
++            this.ownerRpcWaitNanos.longValue(),
++            this.barrierTimeNanos.longValue(),
++            this.orderedTransactions.longValue(),
++            this.monitorMutationAttempts.longValue(),
++            this.asyncBukkitViolations.longValue(),
++            this.strictFallbacks.longValue(),
++            this.refusals.longValue(),
++            this.ownerDomainWaitViolations.longValue(),
++            history,
++            this.hotEvents(5)
++        );
++    }
++
++    private List<EventCost> hotEvents(final int limit) {
++        final List<EventCost> eventCosts = new ArrayList<>(this.callbackNanosByEvent.size());
++        for (final Map.Entry<String, LongAdder> entry : this.callbackNanosByEvent.entrySet()) {
++            eventCosts.add(new EventCost(entry.getKey(), entry.getValue().longValue()));
++        }
++        eventCosts.sort(Comparator.comparingLong(EventCost::callbackTimeNanos).reversed());
++        if (eventCosts.size() <= limit) {
++            return eventCosts;
++        }
++        return eventCosts.subList(0, limit);
++    }
++
++    private void escalate(final Mode requiredMode, final EscalationReason reason, final String detail) {
++        final Mode from = this.mode;
++        final Mode to = from.atLeast(requiredMode) ? from : requiredMode;
++        if (to != from) {
++            this.mode = to;
++        }
++        final Escalation escalation = new Escalation(System.currentTimeMillis(), reason, from, to, detail);
++        synchronized (this.escalationLock) {
++            this.escalations.addLast(escalation);
++            while (this.escalations.size() > MAX_ESCALATIONS) {
++                this.escalations.removeFirst();
++            }
++        }
++    }
++
++    private static Mode initialMode(final PluginMeta meta) {
++        final String name = meta.getName().toLowerCase(java.util.Locale.ROOT);
++        final String mainClass = meta.getMainClass().toLowerCase(java.util.Locale.ROOT);
++
++        if (name.contains("loom") || mainClass.contains("loom")) {
++            return Mode.NATIVE_LOOM_AWARE;
++        }
++
++        if (containsInternalHint(name)
++            || containsInternalHint(mainClass)
++            || containsInternalDependency(meta.getPluginDependencies())
++            || containsInternalDependency(meta.getPluginSoftDependencies())) {
++            return Mode.LEGACY_INTERNAL;
++        }
++
++        return Mode.LEGACY_NORMAL;
++    }
++
++    private static boolean containsInternalDependency(final List<String> dependencies) {
++        for (final String dependency : dependencies) {
++            if (containsInternalHint(dependency.toLowerCase(java.util.Locale.ROOT))) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private static boolean containsInternalHint(final String text) {
++        return text.contains("protocol")
++            || text.contains("packet")
++            || text.contains("nms")
++            || text.contains("reflection")
++            || text.contains("unsafe")
++            || text.contains("citizens")
++            || text.contains("anticheat")
++            || text.contains("npc");
++    }
++}

@@ -1,0 +1,1154 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sun, 31 May 2026 18:35:41 +0000
+Subject: [PATCH] Implement compatibility service proxies and bytecode shim
+ bridges
+
+
+diff --git a/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java b/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java
+index f9a2c55a354c877749db3f92956de802ae575788..10da4667a66266525a63282912b7510692df7172 100644
+--- a/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java
++++ b/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java
+@@ -1,12 +1,196 @@
+ package io.papermc.paper.plugin.entrypoint.classloader;
+ 
+ import io.papermc.paper.plugin.configuration.PluginMeta;
++import io.papermc.paper.plugin.manager.compat.CompatibilityBytecodeBridge;
++import java.util.LinkedHashSet;
++import java.util.Set;
++import org.objectweb.asm.ClassReader;
++import org.objectweb.asm.ClassVisitor;
++import org.objectweb.asm.ClassWriter;
++import org.objectweb.asm.MethodVisitor;
++import org.objectweb.asm.Opcodes;
+ 
+-// Stub, implement in future.
+ public class PaperClassloaderBytecodeModifier implements ClassloaderBytecodeModifier {
+ 
++    private static final String BYTECODE_BRIDGE = "io/papermc/paper/plugin/manager/compat/CompatibilityBytecodeBridge";
++    private static final String SCHEDULER_BRIDGE = "io/papermc/paper/plugin/manager/compat/CompatibilitySchedulerBridge";
++
+     @Override
+-    public byte[] modify(PluginMeta configuration, byte[] bytecode) {
+-        return bytecode;
++    public byte[] modify(final PluginMeta configuration, final byte[] bytecode) {
++        final String pluginName = configuration.getName() == null ? "<unknown>" : configuration.getName();
++        final Set<String> staticHints = new LinkedHashSet<>();
++
++        final ClassReader reader = new ClassReader(bytecode);
++        final ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
++
++        final ClassVisitor visitor = new ClassVisitor(Opcodes.ASM9, writer) {
++            private String className = "<unknown>";
++
++            @Override
++            public void visit(
++                final int version,
++                final int access,
++                final String name,
++                final String signature,
++                final String superName,
++                final String[] interfaces
++            ) {
++                this.className = name;
++                super.visit(version, access, name, signature, superName, interfaces);
++            }
++
++            @Override
++            public MethodVisitor visitMethod(
++                final int access,
++                final String name,
++                final String descriptor,
++                final String signature,
++                final String[] exceptions
++            ) {
++                final MethodVisitor parent = super.visitMethod(access, name, descriptor, signature, exceptions);
++                return new MethodVisitor(Opcodes.ASM9, parent) {
++                    @Override
++                    public void visitLdcInsn(final Object value) {
++                        if (value instanceof String stringValue) {
++                            collectStringHint(staticHints, stringValue);
++                        }
++                        super.visitLdcInsn(value);
++                    }
++
++                    @Override
++                    public void visitMethodInsn(
++                        final int opcode,
++                        final String owner,
++                        final String targetName,
++                        final String targetDescriptor,
++                        final boolean isInterface
++                    ) {
++                        collectOwnerHint(staticHints, owner, targetName);
++
++                        if (isBlockingWait(owner, targetName, targetDescriptor)) {
++                            this.visitLdcInsn(className);
++                            this.visitLdcInsn(name);
++                            this.visitLdcInsn(owner);
++                            this.visitLdcInsn(targetName);
++                            this.visitLdcInsn(targetDescriptor);
++                            super.visitMethodInsn(
++                                Opcodes.INVOKESTATIC,
++                                BYTECODE_BRIDGE,
++                                "beforeBlockingWait",
++                                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
++                                false
++                            );
++                        }
++
++                        if (isUnsafeInvocation(owner, targetName)) {
++                            this.visitLdcInsn(className);
++                            this.visitLdcInsn(name);
++                            this.visitLdcInsn(owner);
++                            this.visitLdcInsn(targetName);
++                            this.visitLdcInsn(targetDescriptor);
++                            super.visitMethodInsn(
++                                Opcodes.INVOKESTATIC,
++                                BYTECODE_BRIDGE,
++                                "beforeUnsafeInvoke",
++                                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
++                                false
++                            );
++                        }
++
++                        final SchedulerRewrite rewrite = rewriteSchedulerCall(opcode, owner, targetName, targetDescriptor);
++                        if (rewrite != null) {
++                            super.visitMethodInsn(Opcodes.INVOKESTATIC, SCHEDULER_BRIDGE, rewrite.method(), rewrite.descriptor(), false);
++                            return;
++                        }
++
++                        super.visitMethodInsn(opcode, owner, targetName, targetDescriptor, isInterface);
++                    }
++                };
++            }
++        };
++
++        reader.accept(visitor, 0);
++
++        for (final String hint : staticHints) {
++            CompatibilityBytecodeBridge.noteStaticInternalHint(pluginName, reader.getClassName(), hint);
++        }
++
++        return writer.toByteArray();
++    }
++
++    private static void collectStringHint(final Set<String> hints, final String literal) {
++        final String lowered = literal.toLowerCase(java.util.Locale.ROOT);
++        if (lowered.contains("net.minecraft")) {
++            hints.add("literal:nms");
++        } else if (lowered.contains("org.bukkit.craftbukkit")) {
++            hints.add("literal:craftbukkit");
++        } else if (lowered.contains("gethandle")) {
++            hints.add("literal:getHandle");
++        } else if (lowered.contains("java.lang.reflect")) {
++            hints.add("literal:reflection");
++        }
++    }
++
++    private static void collectOwnerHint(final Set<String> hints, final String owner, final String methodName) {
++        if (owner.startsWith("net/minecraft/")) {
++            hints.add("owner:nms");
++        } else if (owner.startsWith("org/bukkit/craftbukkit/")) {
++            hints.add("owner:craftbukkit");
++        } else if (owner.startsWith("java/lang/reflect/") || owner.startsWith("java/lang/invoke/")) {
++            hints.add("owner:reflection");
++        }
++        if ("getHandle".equals(methodName)) {
++            hints.add("method:getHandle");
++        }
++    }
++
++    private static boolean isUnsafeInvocation(final String owner, final String methodName) {
++        return owner.startsWith("net/minecraft/")
++            || owner.startsWith("org/bukkit/craftbukkit/")
++            || owner.startsWith("java/lang/reflect/")
++            || owner.startsWith("java/lang/invoke/")
++            || "getHandle".equals(methodName);
++    }
++
++    private static boolean isBlockingWait(final String owner, final String methodName, final String descriptor) {
++        return (owner.equals("java/util/concurrent/CompletableFuture") && (methodName.equals("join") || methodName.equals("get")))
++            || (owner.equals("java/util/concurrent/Future") && methodName.equals("get"))
++            || (owner.equals("java/lang/Thread") && (methodName.equals("join") || methodName.equals("sleep")))
++            || (owner.equals("java/lang/Object") && methodName.equals("wait"))
++            || (owner.equals("java/util/concurrent/CountDownLatch") && methodName.equals("await"))
++            || (owner.equals("java/util/concurrent/locks/LockSupport") && methodName.equals("park"))
++            || (owner.equals("java/util/concurrent/locks/LockSupport") && methodName.equals("parkNanos"))
++            || (owner.equals("java/util/concurrent/locks/LockSupport") && methodName.equals("parkUntil"))
++            || (owner.equals("java/util/concurrent/CompletableFuture") && methodName.equals("get") && descriptor.startsWith("("));
++    }
++
++    private static SchedulerRewrite rewriteSchedulerCall(
++        final int opcode,
++        final String owner,
++        final String methodName,
++        final String descriptor
++    ) {
++        if (opcode != Opcodes.INVOKEINTERFACE || !"org/bukkit/scheduler/BukkitScheduler".equals(owner)) {
++            return null;
++        }
++
++        return switch (methodName + descriptor) {
++            case "runTask(Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;)Lorg/bukkit/scheduler/BukkitTask;" ->
++                new SchedulerRewrite("runTask", "(Lorg/bukkit/scheduler/BukkitScheduler;Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;)Lorg/bukkit/scheduler/BukkitTask;");
++            case "runTaskLater(Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;J)Lorg/bukkit/scheduler/BukkitTask;" ->
++                new SchedulerRewrite("runTaskLater", "(Lorg/bukkit/scheduler/BukkitScheduler;Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;J)Lorg/bukkit/scheduler/BukkitTask;");
++            case "runTaskTimer(Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;JJ)Lorg/bukkit/scheduler/BukkitTask;" ->
++                new SchedulerRewrite("runTaskTimer", "(Lorg/bukkit/scheduler/BukkitScheduler;Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;JJ)Lorg/bukkit/scheduler/BukkitTask;");
++            case "runTaskAsynchronously(Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;)Lorg/bukkit/scheduler/BukkitTask;" ->
++                new SchedulerRewrite("runTaskAsynchronously", "(Lorg/bukkit/scheduler/BukkitScheduler;Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;)Lorg/bukkit/scheduler/BukkitTask;");
++            case "runTaskLaterAsynchronously(Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;J)Lorg/bukkit/scheduler/BukkitTask;" ->
++                new SchedulerRewrite("runTaskLaterAsynchronously", "(Lorg/bukkit/scheduler/BukkitScheduler;Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;J)Lorg/bukkit/scheduler/BukkitTask;");
++            case "runTaskTimerAsynchronously(Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;JJ)Lorg/bukkit/scheduler/BukkitTask;" ->
++                new SchedulerRewrite("runTaskTimerAsynchronously", "(Lorg/bukkit/scheduler/BukkitScheduler;Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;JJ)Lorg/bukkit/scheduler/BukkitTask;");
++            default -> null;
++        };
++    }
++
++    private record SchedulerRewrite(String method, String descriptor) {
+     }
+ }
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperPluginManagerImpl.java b/src/main/java/io/papermc/paper/plugin/manager/PaperPluginManagerImpl.java
+index 097500a59336db1bbfffcd1aa4cff7a8586e46ec..3a3b1fb1f363e217393813a81a9d411bee2a4381 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperPluginManagerImpl.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperPluginManagerImpl.java
+@@ -3,6 +3,7 @@ package io.papermc.paper.plugin.manager;
+ import com.google.common.graph.MutableGraph;
+ import io.papermc.paper.plugin.PermissionManager;
+ import io.papermc.paper.plugin.configuration.PluginMeta;
++import io.papermc.paper.plugin.manager.compat.CompatibilityKernel;
+ import io.papermc.paper.plugin.provider.entrypoint.DependencyContext;
+ import org.bukkit.Bukkit;
+ import org.bukkit.Server;
+@@ -51,6 +52,10 @@ public class PaperPluginManagerImpl implements PluginManager, DependencyContext
+         return ((CraftServer) (Bukkit.getServer())).paperPluginManager;
+     }
+ 
++    public CompatibilityKernel compatibilityKernel() {
++        return this.paperEventManager.compatibilityKernel();
++    }
++
+     // Plugin Manipulation
+ 
+     @Override
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
+index 715d64a16ff69fccf4445c8fc36e233eec73a072..371716687874d62e35d8c29abcd0768223ae76ed 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
+@@ -65,16 +65,24 @@ public final class CompatibilityApartment {
+ 
+     public Scope enter(final CompatibilityTransaction transaction, final boolean strictFallback) {
+         Objects.requireNonNull(transaction, "transaction");
++        return this.enter(transaction.id(), transaction, strictFallback);
++    }
++
++    public Scope enter(final long transactionId, final boolean strictFallback) {
++        return this.enter(transactionId, null, strictFallback);
++    }
+ 
++    private Scope enter(final long transactionId, final @Nullable CompatibilityTransaction transaction, final boolean strictFallback) {
+         final Thread currentThread = Thread.currentThread();
+-        final long transactionId = transaction.id();
+ 
+         while (true) {
+             final Lease current = this.activeLease.get();
+             if (current == null) {
+                 final Lease created = new Lease(this.plugin, transactionId, currentThread);
+                 if (this.activeLease.compareAndSet(null, created)) {
+-                    final CompatibilityRuntimeContext.Scope context = CompatibilityRuntimeContext.enter(this.plugin, transaction, strictFallback);
++                    final CompatibilityRuntimeContext.Scope context = transaction == null
++                        ? CompatibilityRuntimeContext.enter(this.plugin, transactionId, strictFallback)
++                        : CompatibilityRuntimeContext.enter(this.plugin, transaction, strictFallback);
+                     return new Scope(EnterResult.ACQUIRED, this, created, context, null);
+                 }
+                 continue;
+@@ -82,7 +90,9 @@ public final class CompatibilityApartment {
+ 
+             if (current.ownerThread == currentThread && current.transactionId == transactionId) {
+                 current.depth.incrementAndGet();
+-                final CompatibilityRuntimeContext.Scope context = CompatibilityRuntimeContext.enter(this.plugin, transaction, strictFallback);
++                final CompatibilityRuntimeContext.Scope context = transaction == null
++                    ? CompatibilityRuntimeContext.enter(this.plugin, transactionId, strictFallback)
++                    : CompatibilityRuntimeContext.enter(this.plugin, transaction, strictFallback);
+                 return new Scope(EnterResult.REENTRANT, this, current, context, null);
+             }
+ 
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityBytecodeBridge.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityBytecodeBridge.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9e43219b2559dd37d968cc4803bb309ab33ff59
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityBytecodeBridge.java
+@@ -0,0 +1,72 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import com.mojang.logging.LogUtils;
++import io.papermc.paper.util.StackWalkerUtil;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import org.bukkit.plugin.Plugin;
++import org.slf4j.Logger;
++
++public final class CompatibilityBytecodeBridge {
++
++    private static final Logger LOGGER = LogUtils.getLogger();
++
++    private CompatibilityBytecodeBridge() {
++    }
++
++    public static void noteStaticInternalHint(final String pluginName, final String className, final String hint) {
++        PluginCompatibilityProfile.recordStaticInternalHint(pluginName, hint + " @" + className);
++    }
++
++    public static void beforeUnsafeInvoke(
++        final String className,
++        final String methodName,
++        final String owner,
++        final String targetName,
++        final String descriptor
++    ) {
++        final Plugin plugin = currentPlugin();
++        if (plugin == null) {
++            LOGGER.debug("[loom.compat] unsafe bytecode call {}#{} -> {}#{}{}", className, methodName, owner, targetName, descriptor);
++            return;
++        }
++
++        final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
++        final PluginCompatibilityProfile profile = diagnostics.profileFor(plugin);
++        diagnostics.recordUnsafeInternalAccess(
++            profile,
++            "bytecode-call " + className + "#" + methodName + " -> " + owner + "#" + targetName + descriptor
++        );
++    }
++
++    public static void beforeBlockingWait(
++        final String className,
++        final String methodName,
++        final String owner,
++        final String targetName,
++        final String descriptor
++    ) {
++        final Plugin plugin = currentPlugin();
++        if (plugin != null) {
++            final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
++            final PluginCompatibilityProfile profile = diagnostics.profileFor(plugin);
++            diagnostics.recordOwnerDomainWaitViolation(
++                profile,
++                "bytecode-wait " + className + "#" + methodName + " -> " + owner + "#" + targetName + descriptor
++            );
++        }
++
++        if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
++            throw new IllegalStateException(
++                "Blocking wait detected in owner domain from " + className + "#" + methodName + " -> " + owner + "#" + targetName + descriptor
++            );
++        }
++    }
++
++    private static Plugin currentPlugin() {
++        final Plugin contextPlugin = CompatibilityRuntimeContext.currentPlugin();
++        if (contextPlugin != null) {
++            return contextPlugin;
++        }
++        return StackWalkerUtil.getFirstPluginCaller();
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
+index 4efd4f11ce9593fb0d5b04dceb25d3a052d73069..15f63ec84af25184b139faa5bd3c5d265998873b 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
+@@ -22,6 +22,7 @@ public final class CompatibilityRuntimeContext {
+ 
+     private static final ThreadLocal<Deque<ScopeState>> STACK = ThreadLocal.withInitial(ArrayDeque::new);
+     private static final AtomicLong NEXT_SCOPE_ID = new AtomicLong(1L);
++    private static final AtomicLong NEXT_SYNTHETIC_TRANSACTION_ID = new AtomicLong(-1L);
+ 
+     private CompatibilityRuntimeContext() {
+     }
+@@ -72,6 +73,10 @@ public final class CompatibilityRuntimeContext {
+         return stack.isEmpty() ? -1L : stack.getLast().scopeId();
+     }
+ 
++    public static long syntheticTransactionId() {
++        return NEXT_SYNTHETIC_TRANSACTION_ID.decrementAndGet();
++    }
++
+     public static @Nullable Object scopeLookup(final Object key) {
+         final Deque<ScopeState> stack = STACK.get();
+         return stack.isEmpty() ? null : stack.getLast().facadeScopeCache().get(key);
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySchedulerBridge.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySchedulerBridge.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..fed694d6b07ef509ca56c58b90dae821f373c21b
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySchedulerBridge.java
+@@ -0,0 +1,72 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import org.bukkit.plugin.Plugin;
++import org.bukkit.scheduler.BukkitScheduler;
++import org.bukkit.scheduler.BukkitTask;
++
++public final class CompatibilitySchedulerBridge {
++
++    private CompatibilitySchedulerBridge() {
++    }
++
++    public static BukkitTask runTask(final BukkitScheduler scheduler, final Plugin plugin, final Runnable task) {
++        return scheduler.runTask(plugin, task);
++    }
++
++    public static BukkitTask runTaskLater(final BukkitScheduler scheduler, final Plugin plugin, final Runnable task, final long delay) {
++        return scheduler.runTaskLater(plugin, task, delay);
++    }
++
++    public static BukkitTask runTaskTimer(
++        final BukkitScheduler scheduler,
++        final Plugin plugin,
++        final Runnable task,
++        final long delay,
++        final long period
++    ) {
++        return scheduler.runTaskTimer(plugin, task, delay, period);
++    }
++
++    public static BukkitTask runTaskAsynchronously(final BukkitScheduler scheduler, final Plugin plugin, final Runnable task) {
++        return scheduler.runTaskAsynchronously(plugin, wrapAsyncRunnable(plugin, task));
++    }
++
++    public static BukkitTask runTaskLaterAsynchronously(
++        final BukkitScheduler scheduler,
++        final Plugin plugin,
++        final Runnable task,
++        final long delay
++    ) {
++        return scheduler.runTaskLaterAsynchronously(plugin, wrapAsyncRunnable(plugin, task), delay);
++    }
++
++    public static BukkitTask runTaskTimerAsynchronously(
++        final BukkitScheduler scheduler,
++        final Plugin plugin,
++        final Runnable task,
++        final long delay,
++        final long period
++    ) {
++        return scheduler.runTaskTimerAsynchronously(plugin, wrapAsyncRunnable(plugin, task), delay, period);
++    }
++
++    private static Runnable wrapAsyncRunnable(final Plugin plugin, final Runnable task) {
++        if (task == null) {
++            return null;
++        }
++        if (task instanceof ScopedRunnable) {
++            return task;
++        }
++        return new ScopedRunnable(plugin, task);
++    }
++
++    private record ScopedRunnable(Plugin plugin, Runnable delegate) implements Runnable {
++        @Override
++        public void run() {
++            final long transactionId = CompatibilityRuntimeContext.syntheticTransactionId();
++            try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(this.plugin, transactionId, false)) {
++                this.delegate.run();
++            }
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..36019b6f6bf403f8877734404875730aff79310b
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
+@@ -0,0 +1,261 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.util.StackWalkerUtil;
++import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.lang.reflect.Proxy;
++import java.util.Collection;
++import java.util.Collections;
++import java.util.IdentityHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.CompletionException;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.RegisteredServiceProvider;
++import org.bukkit.plugin.ServicePriority;
++import org.bukkit.plugin.ServicesManager;
++import org.bukkit.plugin.SimpleServicesManager;
++import org.jetbrains.annotations.NotNull;
++import org.jetbrains.annotations.Nullable;
++
++public final class CompatibilityServicesManager implements ServicesManager {
++
++    private final SimpleServicesManager delegate = new SimpleServicesManager();
++    private final CompatibilityKernel compatibilityKernel;
++    private final CompatibilityServiceCallGraph callGraph = new CompatibilityServiceCallGraph();
++
++    private final Map<Object, Object> wrappedProviders = Collections.synchronizedMap(new IdentityHashMap<>());
++
++    public CompatibilityServicesManager(final CompatibilityKernel compatibilityKernel) {
++        this.compatibilityKernel = compatibilityKernel;
++    }
++
++    @Override
++    public <T> void register(
++        final @NotNull Class<T> service,
++        final @NotNull T provider,
++        final @NotNull Plugin plugin,
++        final @NotNull ServicePriority priority
++    ) {
++        final T wrapped = this.wrapProvider(service, provider, plugin);
++        if (wrapped != provider) {
++            this.wrappedProviders.put(provider, wrapped);
++        }
++        this.delegate.register(service, wrapped, plugin, priority);
++    }
++
++    @Override
++    public void unregisterAll(final @NotNull Plugin plugin) {
++        this.delegate.unregisterAll(plugin);
++        synchronized (this.wrappedProviders) {
++            this.wrappedProviders.entrySet().removeIf(entry -> {
++                final Object wrapped = entry.getValue();
++                if (wrapped == null || !Proxy.isProxyClass(wrapped.getClass())) {
++                    return false;
++                }
++                final InvocationHandler invocationHandler = Proxy.getInvocationHandler(wrapped);
++                return invocationHandler instanceof ServiceProxyHandler proxyHandler && proxyHandler.providerPlugin.equals(plugin);
++            });
++        }
++    }
++
++    @Override
++    public void unregister(final @NotNull Class<?> service, final @NotNull Object provider) {
++        final Object registeredProvider = this.resolveRegisteredProvider(provider);
++        this.delegate.unregister(service, registeredProvider);
++        this.wrappedProviders.remove(provider);
++    }
++
++    @Override
++    public void unregister(final @NotNull Object provider) {
++        final Object registeredProvider = this.resolveRegisteredProvider(provider);
++        this.delegate.unregister(registeredProvider);
++        this.wrappedProviders.remove(provider);
++    }
++
++    @Override
++    public <T> @Nullable T load(final @NotNull Class<T> service) {
++        return this.delegate.load(service);
++    }
++
++    @Override
++    public <T> @Nullable RegisteredServiceProvider<T> getRegistration(final @NotNull Class<T> service) {
++        return this.delegate.getRegistration(service);
++    }
++
++    @Override
++    public @NotNull List<RegisteredServiceProvider<?>> getRegistrations(final @NotNull Plugin plugin) {
++        return this.delegate.getRegistrations(plugin);
++    }
++
++    @Override
++    public <T> @NotNull Collection<RegisteredServiceProvider<T>> getRegistrations(final @NotNull Class<T> service) {
++        return this.delegate.getRegistrations(service);
++    }
++
++    @Override
++    public @NotNull Collection<Class<?>> getKnownServices() {
++        return this.delegate.getKnownServices();
++    }
++
++    @Override
++    public <T> boolean isProvidedFor(final @NotNull Class<T> service) {
++        return this.delegate.isProvidedFor(service);
++    }
++
++    private Object resolveRegisteredProvider(final Object provider) {
++        final Object wrapped = this.wrappedProviders.get(provider);
++        if (wrapped != null) {
++            return wrapped;
++        }
++        return provider;
++    }
++
++    @SuppressWarnings("unchecked")
++    private <T> T wrapProvider(final Class<T> service, final T provider, final Plugin providerPlugin) {
++        if (!service.isInterface()) {
++            return provider;
++        }
++        if (Proxy.isProxyClass(provider.getClass()) && Proxy.getInvocationHandler(provider) instanceof ServiceProxyHandler) {
++            return provider;
++        }
++
++        final InvocationHandler invocationHandler = new ServiceProxyHandler(service, provider, providerPlugin);
++        final ClassLoader classLoader = provider.getClass().getClassLoader() == null ? service.getClassLoader() : provider.getClass().getClassLoader();
++        return (T)Proxy.newProxyInstance(classLoader, new Class<?>[] {service}, invocationHandler);
++    }
++
++    private final class ServiceProxyHandler implements InvocationHandler {
++
++        private final Class<?> service;
++        private final Object provider;
++        private final Plugin providerPlugin;
++
++        private ServiceProxyHandler(final Class<?> service, final Object provider, final Plugin providerPlugin) {
++            this.service = service;
++            this.provider = provider;
++            this.providerPlugin = providerPlugin;
++        }
++
++        @Override
++        public Object invoke(final Object proxy, final Method method, final Object[] args) throws Throwable {
++            if (method.getDeclaringClass() == Object.class) {
++                return method.invoke(this.provider, args);
++            }
++
++            final Plugin callerPlugin = resolveCallerPlugin();
++            final String callerName = callerPlugin == null ? "<unknown>" : callerPlugin.getPluginMeta().getName();
++            final String providerName = this.providerPlugin.getPluginMeta().getName();
++
++            final CompatibilityServiceCallGraph.EnterResult graphEntry = callGraph.enter(
++                callerName,
++                providerName,
++                this.service.getName(),
++                method.getName()
++            );
++
++            final PluginCompatibilityProfile profile = compatibilityKernel.profileFor(this.providerPlugin);
++            if (graphEntry.cycleDetected()) {
++                compatibilityKernel.diagnostics().recordRefusal(profile, "service cycle " + graphEntry.cyclePath());
++                callGraph.exit();
++                throw new IllegalStateException("Compatibility service cycle detected: " + graphEntry.cyclePath());
++            }
++
++            try {
++                final long transactionId = currentTransactionId();
++                try (CompatibilityApartment.Scope scope = compatibilityKernel.apartmentFor(this.providerPlugin).enter(transactionId, false)) {
++                    if (scope.acquired()) {
++                        return invokeProvider(method, args);
++                    }
++
++                    profile.noteApartmentContention(
++                        "service contention " + this.service.getSimpleName() + "#" + method.getName()
++                    );
++                    compatibilityKernel.diagnostics().recordStrictFallback(
++                        profile,
++                        "service apartment busy " + this.service.getSimpleName() + "#" + method.getName() + " owner=" + scope.busyLease()
++                    );
++
++                    if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
++                        compatibilityKernel.diagnostics().recordOwnerDomainWaitViolation(
++                            profile,
++                            "service:" + this.service.getSimpleName() + "#" + method.getName()
++                        );
++                        throw new IllegalStateException(
++                            "Service call cannot block in owner domain: " + this.service.getSimpleName() + "#" + method.getName()
++                        );
++                    }
++
++                    final long start = System.nanoTime();
++                    try {
++                        return compatibilityKernel.apartmentFor(this.providerPlugin)
++                            .submitStrictFallback(() -> {
++                                try (CompatibilityApartment.Scope fallbackScope = compatibilityKernel.apartmentFor(this.providerPlugin)
++                                    .enter(transactionId, true)) {
++                                    if (!fallbackScope.acquired()) {
++                                        throw new IllegalStateException(
++                                            "Strict fallback apartment handoff failed for service "
++                                                + this.service.getSimpleName()
++                                                + "#"
++                                                + method.getName()
++                                        );
++                                    }
++                                    try {
++                                        return invokeProvider(method, args);
++                                    } catch (final Throwable throwable) {
++                                        if (throwable instanceof Exception exception) {
++                                            throw exception;
++                                        }
++                                        throw new RuntimeException(throwable);
++                                    }
++                                }
++                            })
++                            .join();
++                    } catch (final CompletionException completionException) {
++                        throw unwrapCompletionException(completionException);
++                    } finally {
++                        compatibilityKernel.diagnostics().recordOwnerRpcWait(
++                            profile,
++                            "service-handoff:" + this.service.getSimpleName() + "#" + method.getName(),
++                            System.nanoTime() - start
++                        );
++                    }
++                }
++            } finally {
++                callGraph.exit();
++            }
++        }
++
++        private long currentTransactionId() {
++            final long contextTransactionId = CompatibilityRuntimeContext.currentTransactionId();
++            if (contextTransactionId >= 0L) {
++                return contextTransactionId;
++            }
++            return CompatibilityRuntimeContext.syntheticTransactionId();
++        }
++
++        private Object invokeProvider(final Method method, final Object[] args) throws Throwable {
++            try {
++                return method.invoke(this.provider, args);
++            } catch (final InvocationTargetException invocationTargetException) {
++                final Throwable cause = invocationTargetException.getCause();
++                throw cause == null ? invocationTargetException : cause;
++            }
++        }
++
++        private static Plugin resolveCallerPlugin() {
++            final Plugin current = CompatibilityRuntimeContext.currentPlugin();
++            if (current != null) {
++                return current;
++            }
++            return StackWalkerUtil.getFirstPluginCaller();
++        }
++
++        private static Throwable unwrapCompletionException(final CompletionException completionException) {
++            final Throwable cause = completionException.getCause();
++            return cause == null ? completionException : cause;
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
+index 02e1752485da860631baecde3159075f5db6405f..346d7939779abf3fde5cd1e63947797b5d281e7d 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
+@@ -6,7 +6,9 @@ import java.util.ArrayList;
+ import java.util.Comparator;
+ import java.util.Deque;
+ import java.util.List;
++import java.util.Locale;
+ import java.util.Map;
++import java.util.Set;
+ import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.atomic.LongAdder;
+ import org.bukkit.plugin.Plugin;
+@@ -70,6 +72,7 @@ public final class PluginCompatibilityProfile {
+     }
+ 
+     private static final int MAX_ESCALATIONS = 64;
++    private static final ConcurrentHashMap<String, Set<String>> STATIC_INTERNAL_HINTS = new ConcurrentHashMap<>();
+ 
+     private final Plugin plugin;
+     private final String pluginName;
+@@ -95,6 +98,22 @@ public final class PluginCompatibilityProfile {
+         this.plugin = plugin;
+         this.pluginName = plugin.getPluginMeta().getName();
+         this.mode = initialMode(plugin.getPluginMeta());
++
++        final List<String> staticHints = staticInternalHints(this.pluginName);
++        if (!staticHints.isEmpty()) {
++            this.escalate(
++                Mode.LEGACY_INTERNAL,
++                EscalationReason.STATIC_INTERNAL_HINT,
++                "static hint: " + staticHints.getFirst()
++            );
++            for (int i = 1; i < Math.min(staticHints.size(), 4); ++i) {
++                this.escalate(
++                    Mode.LEGACY_INTERNAL,
++                    EscalationReason.STATIC_INTERNAL_HINT,
++                    "static hint: " + staticHints.get(i)
++                );
++            }
++        }
+     }
+ 
+     public Plugin plugin() {
+@@ -242,8 +261,8 @@ public final class PluginCompatibilityProfile {
+     }
+ 
+     private static Mode initialMode(final PluginMeta meta) {
+-        final String name = meta.getName().toLowerCase(java.util.Locale.ROOT);
+-        final String mainClass = meta.getMainClass().toLowerCase(java.util.Locale.ROOT);
++        final String name = meta.getName().toLowerCase(Locale.ROOT);
++        final String mainClass = meta.getMainClass().toLowerCase(Locale.ROOT);
+ 
+         if (name.contains("loom") || mainClass.contains("loom")) {
+             return Mode.NATIVE_LOOM_AWARE;
+@@ -261,13 +280,28 @@ public final class PluginCompatibilityProfile {
+ 
+     private static boolean containsInternalDependency(final List<String> dependencies) {
+         for (final String dependency : dependencies) {
+-            if (containsInternalHint(dependency.toLowerCase(java.util.Locale.ROOT))) {
++            if (containsInternalHint(dependency.toLowerCase(Locale.ROOT))) {
+                 return true;
+             }
+         }
+         return false;
+     }
+ 
++    public static void recordStaticInternalHint(final String pluginName, final String hint) {
++        if (pluginName == null || pluginName.isBlank() || hint == null || hint.isBlank()) {
++            return;
++        }
++        STATIC_INTERNAL_HINTS.computeIfAbsent(pluginName.toLowerCase(Locale.ROOT), ignored -> ConcurrentHashMap.newKeySet()).add(hint);
++    }
++
++    private static List<String> staticInternalHints(final String pluginName) {
++        final Set<String> hints = STATIC_INTERNAL_HINTS.get(pluginName.toLowerCase(Locale.ROOT));
++        if (hints == null || hints.isEmpty()) {
++            return List.of();
++        }
++        return hints.stream().sorted().toList();
++    }
++
+     private static boolean containsInternalHint(final String text) {
+         return text.contains("protocol")
+             || text.contains("packet")
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index e0cd28970dcd610313504d726dd2b7522a1c7f6d..5815523c21ae1a0b204a7766a5bb6872cc9a1985 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -245,7 +245,6 @@ import org.bukkit.plugin.PluginLoadOrder;
+ import org.bukkit.plugin.PluginManager;
+ import org.bukkit.plugin.ServicesManager;
+ import org.bukkit.plugin.SimplePluginManager;
+-import org.bukkit.plugin.SimpleServicesManager;
+ import org.bukkit.plugin.messaging.Messenger;
+ import org.bukkit.plugin.messaging.StandardMessenger;
+ import org.bukkit.profile.PlayerProfile;
+@@ -265,7 +264,7 @@ public final class CraftServer implements Server {
+     private final String serverVersion;
+     private final String bukkitVersion = Versioning.getBukkitVersion();
+     private final Logger logger = Logger.getLogger("Minecraft");
+-    private final ServicesManager servicesManager = new SimpleServicesManager();
++    private final ServicesManager servicesManager;
+     private final CraftScheduler scheduler = new CraftScheduler();
+     private final CraftCommandMap commandMap; // Paper - Move down
+     private final SimpleHelpMap helpMap = new SimpleHelpMap(this);
+@@ -413,6 +412,7 @@ public final class CraftServer implements Server {
+         this.commandMap = new CraftCommandMap(this);
+         this.pluginManager = new SimplePluginManager(this, commandMap);
+         this.paperPluginManager = new io.papermc.paper.plugin.manager.PaperPluginManagerImpl(this, this.commandMap, pluginManager);
++        this.servicesManager = new io.papermc.paper.plugin.manager.compat.CompatibilityServicesManager(this.paperPluginManager.compatibilityKernel());
+         this.pluginManager.paperPluginManager = this.paperPluginManager;
+          // Paper end
+ 
+diff --git a/src/test/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifierTest.java b/src/test/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifierTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb5d5e45fab930e31bab10cf91144c06ae2e39c2
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifierTest.java
+@@ -0,0 +1,132 @@
++package io.papermc.paper.plugin.entrypoint.classloader;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import io.papermc.paper.plugin.manager.compat.PluginCompatibilityProfile;
++import java.util.List;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++import org.objectweb.asm.ClassReader;
++import org.objectweb.asm.ClassWriter;
++import org.objectweb.asm.MethodVisitor;
++import org.objectweb.asm.Opcodes;
++import org.objectweb.asm.tree.AbstractInsnNode;
++import org.objectweb.asm.tree.ClassNode;
++import org.objectweb.asm.tree.MethodInsnNode;
++import org.objectweb.asm.tree.MethodNode;
++
++@Normal
++class PaperClassloaderBytecodeModifierTest {
++
++    @Test
++    void modifierRewritesSchedulerCallsAndInjectsBlockingWaitGuard() {
++        final byte[] original = samplePluginClass();
++        final PluginMeta meta = mockMeta("BytecodePlugin", "com.example.BytecodePlugin");
++
++        final byte[] modified = new PaperClassloaderBytecodeModifier().modify(meta, original);
++
++        final ClassNode node = new ClassNode();
++        new ClassReader(modified).accept(node, 0);
++
++        boolean sawSchedulerBridge = false;
++        boolean sawBlockingGuard = false;
++        boolean sawOriginalSchedulerInvoke = false;
++
++        for (final MethodNode method : node.methods) {
++            for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null; instruction = instruction.getNext()) {
++                if (instruction instanceof MethodInsnNode call) {
++                    if (call.owner.equals("io/papermc/paper/plugin/manager/compat/CompatibilitySchedulerBridge")
++                        && call.name.equals("runTaskAsynchronously")) {
++                        sawSchedulerBridge = true;
++                    }
++                    if (call.owner.equals("io/papermc/paper/plugin/manager/compat/CompatibilityBytecodeBridge")
++                        && call.name.equals("beforeBlockingWait")) {
++                        sawBlockingGuard = true;
++                    }
++                    if (call.owner.equals("org/bukkit/scheduler/BukkitScheduler")
++                        && call.name.equals("runTaskAsynchronously")) {
++                        sawOriginalSchedulerInvoke = true;
++                    }
++                }
++            }
++        }
++
++        Assertions.assertTrue(sawSchedulerBridge, "Expected scheduler bridge rewrite");
++        Assertions.assertTrue(sawBlockingGuard, "Expected blocking wait guard injection");
++        Assertions.assertFalse(sawOriginalSchedulerInvoke, "Expected original scheduler call to be replaced");
++    }
++
++    @Test
++    void staticHintsEscalateProfileToInternalMode() {
++        PluginCompatibilityProfile.recordStaticInternalHint("HintedPlugin", "owner:nms");
++
++        final PluginMeta meta = mockMeta("HintedPlugin", "com.example.HintedPlugin");
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++
++        final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_INTERNAL, profile.mode());
++        Assertions.assertFalse(profile.snapshot().escalations().isEmpty());
++    }
++
++    private static byte[] samplePluginClass() {
++        final ClassWriter writer = new ClassWriter(0);
++        writer.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, "com/example/TestPluginClass", null, "java/lang/Object", null);
++
++        MethodVisitor method = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
++        method.visitCode();
++        method.visitVarInsn(Opcodes.ALOAD, 0);
++        method.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
++        method.visitInsn(Opcodes.RETURN);
++        method.visitMaxs(1, 1);
++        method.visitEnd();
++
++        method = writer.visitMethod(
++            Opcodes.ACC_PUBLIC,
++            "run",
++            "(Lorg/bukkit/scheduler/BukkitScheduler;Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;Ljava/util/concurrent/CompletableFuture;)V",
++            null,
++            null
++        );
++        method.visitCode();
++        method.visitVarInsn(Opcodes.ALOAD, 1);
++        method.visitVarInsn(Opcodes.ALOAD, 2);
++        method.visitVarInsn(Opcodes.ALOAD, 3);
++        method.visitMethodInsn(
++            Opcodes.INVOKEINTERFACE,
++            "org/bukkit/scheduler/BukkitScheduler",
++            "runTaskAsynchronously",
++            "(Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;)Lorg/bukkit/scheduler/BukkitTask;",
++            true
++        );
++        method.visitInsn(Opcodes.POP);
++
++        method.visitVarInsn(Opcodes.ALOAD, 4);
++        method.visitMethodInsn(
++            Opcodes.INVOKEVIRTUAL,
++            "java/util/concurrent/CompletableFuture",
++            "join",
++            "()Ljava/lang/Object;",
++            false
++        );
++        method.visitInsn(Opcodes.POP);
++        method.visitInsn(Opcodes.RETURN);
++        method.visitMaxs(3, 5);
++        method.visitEnd();
++
++        writer.visitEnd();
++        return writer.toByteArray();
++    }
++
++    private static PluginMeta mockMeta(final String name, final String mainClass) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn(mainClass);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++        return meta;
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..0521fd22f4dd6b434634f313ed54d3f3181a2815
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java
+@@ -0,0 +1,82 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.List;
++import java.util.logging.Logger;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class CompatibilityPluginMatrixTest {
++
++    enum ExpectedOutcome {
++        SHOULD_WORK,
++        SHOULD_DEGRADE,
++        SHOULD_NOT_WORK
++    }
++
++    record MatrixEntry(String pluginName, String mainClass, List<String> dependencies, ExpectedOutcome expectedOutcome) {
++    }
++
++    @Test
++    void matrixContainsAllCompatibilityOutcomes() {
++        final List<MatrixEntry> matrix = List.of(
++            new MatrixEntry("LoomNativeTools", "com.example.loom.NativeTools", List.of(), ExpectedOutcome.SHOULD_WORK),
++            new MatrixEntry("OldClaims", "com.example.claims.OldClaims", List.of("Vault"), ExpectedOutcome.SHOULD_DEGRADE),
++            new MatrixEntry("PacketBridge", "com.example.packet.PacketBridge", List.of("ProtocolLib"), ExpectedOutcome.SHOULD_DEGRADE),
++            new MatrixEntry("UnsafeNativeMutator", "com.example.native.UnsafeNativeMutator", List.of(), ExpectedOutcome.SHOULD_NOT_WORK)
++        );
++
++        boolean sawWork = false;
++        boolean sawDegrade = false;
++        boolean sawNotWork = false;
++
++        for (final MatrixEntry entry : matrix) {
++            final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(
++                mockPlugin(entry.pluginName(), entry.mainClass(), entry.dependencies())
++            );
++
++            if (entry.expectedOutcome() == ExpectedOutcome.SHOULD_NOT_WORK) {
++                profile.noteRefusal("unsafe native mutation");
++                Assertions.assertEquals(PluginCompatibilityProfile.Mode.REFUSED, profile.mode());
++                sawNotWork = true;
++                continue;
++            }
++
++            if (entry.expectedOutcome() == ExpectedOutcome.SHOULD_WORK) {
++                Assertions.assertEquals(PluginCompatibilityProfile.Mode.NATIVE_LOOM_AWARE, profile.mode());
++                sawWork = true;
++                continue;
++            }
++
++            Assertions.assertTrue(
++                profile.mode() == PluginCompatibilityProfile.Mode.LEGACY_NORMAL
++                    || profile.mode() == PluginCompatibilityProfile.Mode.LEGACY_INTERNAL,
++                "Expected degradable legacy profile for " + entry.pluginName()
++            );
++            sawDegrade = true;
++        }
++
++        Assertions.assertTrue(sawWork, "Matrix should include should-work plugin");
++        Assertions.assertTrue(sawDegrade, "Matrix should include should-degrade plugin");
++        Assertions.assertTrue(sawNotWork, "Matrix should include should-NOT-work plugin");
++    }
++
++    private static Plugin mockPlugin(final String name, final String mainClass, final List<String> dependencies) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn(mainClass);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(dependencies);
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManagerTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManagerTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce3b9405cee5829c593e7c15f113c6e9aa50468e
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManagerTest.java
+@@ -0,0 +1,85 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.lang.reflect.Proxy;
++import java.util.List;
++import java.util.logging.Logger;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.ServicePriority;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class CompatibilityServicesManagerTest {
++
++    @Test
++    void serviceProviderIsWrappedAndInvokedThroughCompatibilityProxy() {
++        final CompatibilityKernel kernel = new CompatibilityKernel();
++        final CompatibilityServicesManager manager = new CompatibilityServicesManager(kernel);
++
++        final Plugin providerPlugin = mockPlugin("ServiceProvider");
++        final EchoService provider = value -> "echo:" + value;
++
++        manager.register(EchoService.class, provider, providerPlugin, ServicePriority.Normal);
++
++        final EchoService resolved = manager.load(EchoService.class);
++        Assertions.assertNotNull(resolved);
++        Assertions.assertNotSame(provider, resolved);
++        Assertions.assertTrue(Proxy.isProxyClass(resolved.getClass()));
++        Assertions.assertEquals("echo:ok", resolved.echo("ok"));
++    }
++
++    @Test
++    void crossApartmentServiceCycleFailsFast() {
++        final CompatibilityKernel kernel = new CompatibilityKernel();
++        final CompatibilityServicesManager manager = new CompatibilityServicesManager(kernel);
++
++        final Plugin pluginA = mockPlugin("PluginA");
++        final Plugin pluginB = mockPlugin("PluginB");
++
++        final FirstService firstService = () -> manager.load(SecondService.class).second();
++        final SecondService secondService = () -> manager.load(FirstService.class).first();
++
++        manager.register(FirstService.class, firstService, pluginA, ServicePriority.Normal);
++        manager.register(SecondService.class, secondService, pluginB, ServicePriority.Normal);
++
++        final IllegalStateException exception = Assertions.assertThrows(
++            IllegalStateException.class,
++            () -> manager.load(FirstService.class).first()
++        );
++
++        Assertions.assertTrue(exception.getMessage().contains("cycle"));
++    }
++
++    private static Plugin mockPlugin(final String name) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn("com.example." + name);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
++
++    @FunctionalInterface
++    interface EchoService {
++        String echo(String value);
++    }
++
++    @FunctionalInterface
++    interface FirstService {
++        String first();
++    }
++
++    @FunctionalInterface
++    interface SecondService {
++        String second();
++    }
++}

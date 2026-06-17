@@ -1,0 +1,71 @@
+--- /dev/null
++++ b/src/test/java/org/bukkit/AsyncCatcherOwnerDomainTest.java
+@@ -1,0 +_,68 @@
++package org.bukkit;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++public class AsyncCatcherOwnerDomainTest {
++
++    @Test
++    public void contextOwnerAllowsOperation() throws InterruptedException {
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++
++        final Throwable failure = runOnTickThread(() -> {
++            try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enterRegion(level, 4, 8, 4, 8, "test-owner-match")) {
++                org.spigotmc.AsyncCatcher.catchOp("test owner match", level, 4, 8);
++            }
++        });
++
++        if (failure != null) {
++            Assertions.fail(failure);
++        }
++    }
++
++    @Test
++    public void contextOwnerMismatchFails() throws InterruptedException {
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++
++        final Throwable failure = runOnTickThread(() -> {
++            try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enterRegion(level, 4, 8, 4, 8, "test-owner-mismatch")) {
++                org.spigotmc.AsyncCatcher.catchOp("test owner mismatch", level, 5, 9);
++            }
++        });
++
++        Assertions.assertNotNull(failure, "Expected owner-mismatch failure");
++        Assertions.assertInstanceOf(IllegalStateException.class, failure);
++        Assertions.assertTrue(failure.getMessage().contains("owner mismatch"));
++    }
++
++    @Test
++    public void plainAsyncCatcherFailsOffTickThread() {
++        Assertions.assertThrows(IllegalStateException.class, () -> org.spigotmc.AsyncCatcher.catchOp("off tick thread"));
++    }
++
++    private static Throwable runOnTickThread(final Runnable action) throws InterruptedException {
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread thread = new TickThread(() -> {
++            try {
++                action.run();
++            } catch (final Throwable throwable) {
++                failure.set(throwable);
++            }
++        }, "async-catcher-owner-domain-test");
++        thread.start();
++        thread.join();
++        return failure.get();
++    }
++}

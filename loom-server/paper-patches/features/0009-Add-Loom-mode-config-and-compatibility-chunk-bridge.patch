@@ -1,0 +1,418 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 1 Jun 2026 11:50:13 +0000
+Subject: [PATCH] Add Loom mode config and compatibility chunk bridge
+
+
+diff --git a/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java b/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..176e4487bbb45ce48a079f1308a262bd21045bff
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java
+@@ -0,0 +1,106 @@
++package io.papermc.paper.configuration;
++
++import com.mojang.logging.LogUtils;
++import io.papermc.paper.plugin.manager.compat.CompatibilityMode;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.Locale;
++import org.slf4j.Logger;
++import org.spongepowered.configurate.ConfigurateException;
++import org.spongepowered.configurate.ConfigurationNode;
++import org.spongepowered.configurate.yaml.YamlConfigurationLoader;
++import org.jetbrains.annotations.VisibleForTesting;
++
++public final class LoomConfiguration {
++
++    private static final Logger LOGGER = LogUtils.getLogger();
++    private static final String LOOM_CONFIG_FILE = "loom.yml";
++
++    private static volatile Mode mode = Mode.COMPATIBILITY;
++    private static volatile Path sourcePath;
++
++    private LoomConfiguration() {
++    }
++
++    public static synchronized void initialize(final Path configDirectory) {
++        final Path directory = configDirectory == null ? Path.of(PaperConfigurations.CONFIG_DIR) : configDirectory;
++        final Path configFile = directory.resolve(LOOM_CONFIG_FILE);
++
++        try {
++            Files.createDirectories(directory);
++            final YamlConfigurationLoader loader = ConfigurationLoaders.naturallySortedWithoutHeader(configFile);
++            final ConfigurationNode node = Files.exists(configFile) ? loader.load() : loader.createNode();
++
++            final String configured = node.node("mode").getString();
++            final Mode resolved = Mode.fromConfig(configured);
++            node.node("mode").set(resolved.configValue());
++            loader.save(node);
++
++            mode = resolved;
++            sourcePath = configFile.toAbsolutePath();
++            LOGGER.info("Loaded Loom compatibility mode '{}' from {}", resolved.configValue(), sourcePath);
++        } catch (final ConfigurateException | IOException ex) {
++            mode = Mode.COMPATIBILITY;
++            sourcePath = configFile.toAbsolutePath();
++            LOGGER.error("Failed to load {}, defaulting Loom mode to '{}'", sourcePath, mode.configValue(), ex);
++        }
++    }
++
++    public static Mode mode() {
++        return mode;
++    }
++
++    public static CompatibilityMode compatibilityMode() {
++        return mode.compatibilityMode();
++    }
++
++    public static Path sourcePath() {
++        return sourcePath;
++    }
++
++    @VisibleForTesting
++    public static void setModeForTesting(final Mode testMode) {
++        mode = testMode == null ? Mode.COMPATIBILITY : testMode;
++    }
++
++    @VisibleForTesting
++    public static void resetForTesting() {
++        mode = Mode.COMPATIBILITY;
++        sourcePath = null;
++    }
++
++    public enum Mode {
++        COMPATIBILITY("compatibility", CompatibilityMode.MAX_COMPAT),
++        BALANCED("balanced", CompatibilityMode.HYBRID),
++        PERFORMANCE("performance", CompatibilityMode.STRICT);
++
++        private final String configValue;
++        private final CompatibilityMode compatibilityMode;
++
++        Mode(final String configValue, final CompatibilityMode compatibilityMode) {
++            this.configValue = configValue;
++            this.compatibilityMode = compatibilityMode;
++        }
++
++        public String configValue() {
++            return this.configValue;
++        }
++
++        public CompatibilityMode compatibilityMode() {
++            return this.compatibilityMode;
++        }
++
++        public static Mode fromConfig(final String value) {
++            if (value == null || value.isBlank()) {
++                return COMPATIBILITY;
++            }
++            return switch (value.trim().toLowerCase(Locale.ROOT)) {
++                case "compatibility", "max-compat", "max_compat", "maxcompat" -> COMPATIBILITY;
++                case "performance", "strict" -> PERFORMANCE;
++                case "balanced", "hybrid" -> BALANCED;
++                default -> COMPATIBILITY;
++            };
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridge.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridge.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..35868a20aa5b5bd84c91d2310a906fea4c062a21
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridge.java
+@@ -0,0 +1,38 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.configuration.LoomConfiguration;
++import java.util.concurrent.CompletableFuture;
++import org.bukkit.plugin.Plugin;
++
++public final class CompatibilityChunkBridge {
++
++    private static final String BARRIER_LANE = "LEGACY_SYNC_BRIDGE";
++
++    private CompatibilityChunkBridge() {
++    }
++
++    public static boolean isEnabledForCurrentContext() {
++        return LoomConfiguration.mode() == LoomConfiguration.Mode.COMPATIBILITY
++            && CompatibilityRuntimeContext.currentPlugin() != null;
++    }
++
++    public static <T> T awaitChunkFuture(final CompletableFuture<T> future, final String operation) {
++        final Plugin plugin = CompatibilityRuntimeContext.currentPlugin();
++        if (plugin == null) {
++            throw new IllegalStateException("Compatibility chunk bridge requires plugin runtime context");
++        }
++
++        final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
++        final PluginCompatibilityProfile profile = diagnostics.profileFor(plugin);
++        final long started = System.nanoTime();
++        try {
++            return CompatibilityContinuationBridge.awaitOffOwner(profile, diagnostics, operation, () -> future);
++        } catch (final RuntimeException | Error throwable) {
++            throw throwable;
++        } catch (final Throwable throwable) {
++            throw new RuntimeException(throwable);
++        } finally {
++            diagnostics.recordBarrierWait(profile, BARRIER_LANE, operation, System.nanoTime() - started);
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
+index c7438c10b7442aa226fd53453651fd46c7a0fe20..7e2271895b52d454465de32512bc2fd6c76a0144 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
+@@ -1,6 +1,6 @@
+ package io.papermc.paper.plugin.manager.compat;
+ 
+-import io.papermc.paper.configuration.GlobalConfiguration;
++import io.papermc.paper.configuration.LoomConfiguration;
+ import java.util.Map;
+ import java.util.concurrent.ConcurrentHashMap;
+ import org.bukkit.event.Event;
+@@ -201,10 +201,6 @@ public final class CompatibilityKernel {
+     }
+ 
+     private static CompatibilityMode configuredMode() {
+-        final GlobalConfiguration globalConfiguration = GlobalConfiguration.get();
+-        if (globalConfiguration == null || globalConfiguration.compatibility == null) {
+-            return CompatibilityMode.HYBRID;
+-        }
+-        return CompatibilityMode.fromConfig(globalConfiguration.compatibility.mode);
++        return LoomConfiguration.compatibilityMode();
+     }
+ }
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridgeTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridgeTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b39b3f209c40bdf03a9d0d09555af835b7d6067d
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridgeTest.java
+@@ -0,0 +1,77 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.configuration.LoomConfiguration;
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.logging.Logger;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class CompatibilityChunkBridgeTest {
++
++    @AfterEach
++    void resetMode() {
++        LoomConfiguration.resetForTesting();
++    }
++
++    @Test
++    void compatibilityModeEnablesBridgeForPluginContext() {
++        LoomConfiguration.setModeForTesting(LoomConfiguration.Mode.COMPATIBILITY);
++        final Plugin plugin = mockPlugin("LegacyBridgePlugin");
++
++        try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false)) {
++            Assertions.assertTrue(CompatibilityChunkBridge.isEnabledForCurrentContext());
++        }
++    }
++
++    @Test
++    void balancedModeDisablesBridgeEvenWithPluginContext() {
++        LoomConfiguration.setModeForTesting(LoomConfiguration.Mode.BALANCED);
++        final Plugin plugin = mockPlugin("LegacyBridgePlugin");
++
++        try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false)) {
++            Assertions.assertFalse(CompatibilityChunkBridge.isEnabledForCurrentContext());
++        }
++    }
++
++    @Test
++    void bridgeCanAwaitDelayedChunkFuture() {
++        LoomConfiguration.setModeForTesting(LoomConfiguration.Mode.COMPATIBILITY);
++        final Plugin plugin = mockPlugin("LegacyBridgePlugin");
++        final CompletableFuture<String> delayed = CompletableFuture.supplyAsync(() -> {
++            try {
++                Thread.sleep(25L);
++            } catch (final InterruptedException ex) {
++                Thread.currentThread().interrupt();
++                throw new RuntimeException(ex);
++            }
++            return "loaded";
++        });
++
++        try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false)) {
++            final String result = CompatibilityChunkBridge.awaitChunkFuture(delayed, "test chunk wait");
++            Assertions.assertEquals("loaded", result);
++        }
++    }
++
++    private static Plugin mockPlugin(final String name) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn("com.example." + name);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
+index b7243a07463eebff557d34a4691672f54884f955..9c102025089ca76716a0eac28f9c8d7bfd38274b 100644
+--- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
+@@ -1,8 +1,7 @@
+ package io.papermc.paper.plugin.manager.compat;
+ 
+-import io.papermc.paper.configuration.GlobalConfiguration;
++import io.papermc.paper.configuration.LoomConfiguration;
+ import io.papermc.paper.plugin.configuration.PluginMeta;
+-import java.lang.reflect.Field;
+ import java.util.List;
+ import java.util.logging.Logger;
+ import org.bukkit.event.Event;
+@@ -13,6 +12,7 @@ import org.bukkit.plugin.EventExecutor;
+ import org.bukkit.plugin.Plugin;
+ import org.bukkit.plugin.RegisteredListener;
+ import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.AfterEach;
+ import org.junit.jupiter.api.Assertions;
+ import org.junit.jupiter.api.Test;
+ import org.mockito.Mockito;
+@@ -20,13 +20,20 @@ import org.mockito.Mockito;
+ @Normal
+ class CompatibilityKernelRoutingTest {
+ 
++    @AfterEach
++    void resetMode() {
++        LoomConfiguration.resetForTesting();
++    }
++
+     @Test
+     void compatibilityModeParsingSupportsAliases() {
+-        Assertions.assertEquals(CompatibilityMode.HYBRID, CompatibilityMode.fromConfig(null));
+-        Assertions.assertEquals(CompatibilityMode.STRICT, CompatibilityMode.fromConfig("strict"));
+-        Assertions.assertEquals(CompatibilityMode.MAX_COMPAT, CompatibilityMode.fromConfig("max-compat"));
+-        Assertions.assertEquals(CompatibilityMode.MAX_COMPAT, CompatibilityMode.fromConfig("max_compat"));
+-        Assertions.assertEquals(CompatibilityMode.MAX_COMPAT, CompatibilityMode.fromConfig("maxcompat"));
++        Assertions.assertEquals(LoomConfiguration.Mode.COMPATIBILITY, LoomConfiguration.Mode.fromConfig(null));
++        Assertions.assertEquals(LoomConfiguration.Mode.COMPATIBILITY, LoomConfiguration.Mode.fromConfig("compatibility"));
++        Assertions.assertEquals(LoomConfiguration.Mode.COMPATIBILITY, LoomConfiguration.Mode.fromConfig("max-compat"));
++        Assertions.assertEquals(LoomConfiguration.Mode.BALANCED, LoomConfiguration.Mode.fromConfig("balanced"));
++        Assertions.assertEquals(LoomConfiguration.Mode.BALANCED, LoomConfiguration.Mode.fromConfig("hybrid"));
++        Assertions.assertEquals(LoomConfiguration.Mode.PERFORMANCE, LoomConfiguration.Mode.fromConfig("performance"));
++        Assertions.assertEquals(LoomConfiguration.Mode.PERFORMANCE, LoomConfiguration.Mode.fromConfig("strict"));
+     }
+ 
+     @Test
+@@ -44,40 +51,34 @@ class CompatibilityKernelRoutingTest {
+     }
+ 
+     @Test
+-    void maxCompatRoutesLegacyPathsToEmergencyLane() throws Exception {
+-        final GlobalConfiguration previous = setGlobalMode("max-compat");
+-        try {
+-            final CompatibilityKernel kernel = new CompatibilityKernel();
+-            final RegisteredListener listener = listenerFor(mockPlugin("LegacyNormal", "com.example.LegacyNormal", List.of(), List.of()));
+-            final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
+-            final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
+-            final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
+-
+-            Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.EMERGENCY_COMPATIBILITY, plan.policy());
+-            Assertions.assertEquals(CompatibilityKernel.ExecutionLane.EMERGENCY_COMPATIBILITY_LANE, plan.lane());
+-        } finally {
+-            setGlobal(previous);
+-        }
++    void compatibilityModeRoutesLegacyPathsToEmergencyLane() {
++        LoomConfiguration.setModeForTesting(LoomConfiguration.Mode.COMPATIBILITY);
++
++        final CompatibilityKernel kernel = new CompatibilityKernel();
++        final RegisteredListener listener = listenerFor(mockPlugin("LegacyNormal", "com.example.LegacyNormal", List.of(), List.of()));
++        final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
++        final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
++        final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
++
++        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.EMERGENCY_COMPATIBILITY, plan.policy());
++        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.EMERGENCY_COMPATIBILITY_LANE, plan.lane());
+     }
+ 
+     @Test
+-    void strictModeRefusesForcedMaxCompatProfiles() throws Exception {
+-        final GlobalConfiguration previous = setGlobalMode("strict");
+-        try {
+-            final CompatibilityKernel kernel = new CompatibilityKernel();
+-            final Plugin plugin = mockPlugin("LegacyNormal", "com.example.LegacyNormal", List.of(), List.of());
+-            final RegisteredListener listener = listenerFor(plugin);
+-            final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
+-            final String path = CompatibilityKernel.pathFor(transaction, listener);
+-            kernel.profileFor(plugin).noteForcedMaxCompat(path, "test escalation");
+-
+-            final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
+-            final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
+-
+-            Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.REFUSE, plan.policy());
+-        } finally {
+-            setGlobal(previous);
+-        }
++    void performanceModeRefusesForcedMaxCompatProfiles() {
++        LoomConfiguration.setModeForTesting(LoomConfiguration.Mode.PERFORMANCE);
++
++        final CompatibilityKernel kernel = new CompatibilityKernel();
++        final Plugin plugin = mockPlugin("LegacyNormal", "com.example.LegacyNormal", List.of(), List.of());
++        final RegisteredListener listener = listenerFor(plugin);
++        final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
++        final String path = CompatibilityKernel.pathFor(transaction, listener);
++        kernel.profileFor(plugin).noteForcedMaxCompat(path, "test escalation");
++
++        final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
++        final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
++
++        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.REFUSE, plan.policy());
+     }
+ 
+     private static RegisteredListener listenerFor(final Plugin plugin) {
+@@ -108,27 +109,6 @@ class CompatibilityKernelRoutingTest {
+         return plugin;
+     }
+ 
+-    private static GlobalConfiguration setGlobalMode(final String mode) throws Exception {
+-        final GlobalConfiguration previous = global();
+-        final GlobalConfiguration config = new GlobalConfiguration();
+-        config.compatibility = config.new Compatibility();
+-        config.compatibility.mode = mode;
+-        setGlobal(config);
+-        return previous;
+-    }
+-
+-    private static GlobalConfiguration global() throws Exception {
+-        final Field field = GlobalConfiguration.class.getDeclaredField("instance");
+-        field.setAccessible(true);
+-        return (GlobalConfiguration)field.get(null);
+-    }
+-
+-    private static void setGlobal(final GlobalConfiguration config) throws Exception {
+-        final Field field = GlobalConfiguration.class.getDeclaredField("instance");
+-        field.setAccessible(true);
+-        field.set(null, config);
+-    }
+-
+     private static final class DummyEvent extends Event {
+         private static final HandlerList HANDLERS = new HandlerList();
+ 
+@@ -141,4 +121,4 @@ class CompatibilityKernelRoutingTest {
+             return HANDLERS;
+         }
+     }
+-}
+\ No newline at end of file
++}

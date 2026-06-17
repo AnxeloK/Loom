@@ -1,0 +1,372 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 1 Jun 2026 14:17:48 +0000
+Subject: [PATCH] Expand compatibility sync bridging and async task reroute
+
+
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridge.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridge.java
+index 35868a20aa5b5bd84c91d2310a906fea4c062a21..d8ab93e57bf8522388c177529678397495b4a8b0 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridge.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridge.java
+@@ -1,8 +1,6 @@
+ package io.papermc.paper.plugin.manager.compat;
+ 
+-import io.papermc.paper.configuration.LoomConfiguration;
+ import java.util.concurrent.CompletableFuture;
+-import org.bukkit.plugin.Plugin;
+ 
+ public final class CompatibilityChunkBridge {
+ 
+@@ -12,27 +10,10 @@ public final class CompatibilityChunkBridge {
+     }
+ 
+     public static boolean isEnabledForCurrentContext() {
+-        return LoomConfiguration.mode() == LoomConfiguration.Mode.COMPATIBILITY
+-            && CompatibilityRuntimeContext.currentPlugin() != null;
++        return CompatibilitySyncBridge.isEnabledForCurrentContext();
+     }
+ 
+     public static <T> T awaitChunkFuture(final CompletableFuture<T> future, final String operation) {
+-        final Plugin plugin = CompatibilityRuntimeContext.currentPlugin();
+-        if (plugin == null) {
+-            throw new IllegalStateException("Compatibility chunk bridge requires plugin runtime context");
+-        }
+-
+-        final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
+-        final PluginCompatibilityProfile profile = diagnostics.profileFor(plugin);
+-        final long started = System.nanoTime();
+-        try {
+-            return CompatibilityContinuationBridge.awaitOffOwner(profile, diagnostics, operation, () -> future);
+-        } catch (final RuntimeException | Error throwable) {
+-            throw throwable;
+-        } catch (final Throwable throwable) {
+-            throw new RuntimeException(throwable);
+-        } finally {
+-            diagnostics.recordBarrierWait(profile, BARRIER_LANE, operation, System.nanoTime() - started);
+-        }
++        return CompatibilitySyncBridge.awaitFuture(future, operation, BARRIER_LANE);
+     }
+ }
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityContinuationBridge.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityContinuationBridge.java
+index 57ed04fa7c9010e168fec461653c7a7f436c9869..6c099d631ef9b1e6c80024b1a2759b6412f10824 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityContinuationBridge.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityContinuationBridge.java
+@@ -8,6 +8,11 @@ import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
+ 
+ public final class CompatibilityContinuationBridge {
+ 
++    @FunctionalInterface
++    public interface ThrowingSupplier<T> {
++        T get() throws Throwable;
++    }
++
+     private CompatibilityContinuationBridge() {
+     }
+ 
+@@ -16,6 +21,19 @@ public final class CompatibilityContinuationBridge {
+         final CompatibilityDiagnostics diagnostics,
+         final String operation,
+         final Supplier<CompletableFuture<T>> supplier
++    ) throws Throwable {
++        Objects.requireNonNull(supplier, "supplier");
++        return callOffOwner(profile, diagnostics, operation, () -> {
++            final CompletableFuture<T> delegated = Objects.requireNonNull(supplier.get(), "supplier returned null future");
++            return delegated.join();
++        });
++    }
++
++    public static <T> T callOffOwner(
++        final PluginCompatibilityProfile profile,
++        final CompatibilityDiagnostics diagnostics,
++        final String operation,
++        final ThrowingSupplier<T> supplier
+     ) throws Throwable {
+         Objects.requireNonNull(profile, "profile");
+         Objects.requireNonNull(diagnostics, "diagnostics");
+@@ -27,17 +45,16 @@ public final class CompatibilityContinuationBridge {
+             throw new IllegalStateException("Owner-domain violation: " + operation + " cannot synchronously wait");
+         }
+ 
+-        final CompletableFuture<T> delegated = Objects.requireNonNull(supplier.get(), "supplier returned null future");
+         final long started = System.nanoTime();
+         try {
+             if (Thread.currentThread().isVirtual()) {
+-                return delegated.join();
++                return supplier.get();
+             }
+ 
+             final CompletableFuture<T> resumed = new CompletableFuture<>();
+             Thread.ofVirtual().name("loom-compat-continuation").start(() -> {
+                 try {
+-                    resumed.complete(delegated.join());
++                    resumed.complete(supplier.get());
+                 } catch (final Throwable throwable) {
+                     resumed.completeExceptionally(throwable);
+                 }
+@@ -50,4 +67,4 @@ public final class CompatibilityContinuationBridge {
+             diagnostics.recordContinuationResume(profile, operation, System.nanoTime() - started);
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridge.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridge.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b62b75c78c3b1994fc7392871d4c74fbee3cfe9d
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridge.java
+@@ -0,0 +1,45 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.configuration.LoomConfiguration;
++import java.util.Objects;
++import java.util.concurrent.CompletableFuture;
++import org.bukkit.plugin.Plugin;
++
++public final class CompatibilitySyncBridge {
++
++    private CompatibilitySyncBridge() {
++    }
++
++    public static boolean isEnabledForCurrentContext() {
++        return LoomConfiguration.mode() == LoomConfiguration.Mode.COMPATIBILITY
++            && CompatibilityRuntimeContext.currentPlugin() != null;
++    }
++
++    public static <T> T awaitFuture(
++        final CompletableFuture<T> future,
++        final String operation,
++        final String lane
++    ) {
++        Objects.requireNonNull(future, "future");
++        Objects.requireNonNull(operation, "operation");
++        Objects.requireNonNull(lane, "lane");
++
++        final Plugin plugin = CompatibilityRuntimeContext.currentPlugin();
++        if (plugin == null) {
++            throw new IllegalStateException("Compatibility sync bridge requires plugin runtime context");
++        }
++
++        final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
++        final PluginCompatibilityProfile profile = diagnostics.profileFor(plugin);
++        final long started = System.nanoTime();
++        try {
++            return CompatibilityContinuationBridge.callOffOwner(profile, diagnostics, operation, future::join);
++        } catch (final RuntimeException | Error throwable) {
++            throw throwable;
++        } catch (final Throwable throwable) {
++            throw new RuntimeException(throwable);
++        } finally {
++            diagnostics.recordBarrierWait(profile, lane, operation, System.nanoTime() - started);
++        }
++    }
++}
+diff --git a/src/main/java/org/bukkit/craftbukkit/scheduler/CraftAsyncTask.java b/src/main/java/org/bukkit/craftbukkit/scheduler/CraftAsyncTask.java
+index 79d8f93b00918d578e9451b9b03731d1df9b982d..b58c3b3d24d18f5d3675086282b5d742be57af04 100644
+--- a/src/main/java/org/bukkit/craftbukkit/scheduler/CraftAsyncTask.java
++++ b/src/main/java/org/bukkit/craftbukkit/scheduler/CraftAsyncTask.java
+@@ -1,10 +1,16 @@
+ package org.bukkit.craftbukkit.scheduler;
+ 
++import io.papermc.paper.configuration.LoomConfiguration;
++import io.papermc.paper.plugin.manager.compat.CompatibilityDiagnostics;
+ import io.papermc.paper.plugin.manager.compat.CompatibilityRuntimeContext;
+ import java.util.Iterator;
+ import java.util.LinkedList;
+ import java.util.Map;
++import java.util.concurrent.CompletableFuture;
+ import java.util.logging.Level;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.server.threading.runtime.ThreadedRegionsBlockingBarrier;
+ import org.bukkit.plugin.Plugin;
+ import org.bukkit.scheduler.BukkitWorker;
+ 
+@@ -55,19 +61,18 @@ class CraftAsyncTask extends CraftTask {
+         }
+         Throwable thrown = null;
+         try {
+-            final long transactionId = CompatibilityRuntimeContext.syntheticTransactionId();
+-            try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(this.getOwner(), transactionId, false)) {
+-                super.run();
++            this.runTaskWithContext(false, "scheduler:async-task");
++        } catch (final Throwable initialFailure) {
++            if (!this.tryCompatibilitySyncReroute(initialFailure)) {
++                thrown = initialFailure;
++                this.getOwner().getLogger().log(
++                        Level.WARNING,
++                        String.format(
++                            "Plugin %s generated an exception while executing task %s",
++                            this.getOwner().getDescription().getFullName(),
++                            this.getTaskId()),
++                        thrown);
+             }
+-        } catch (final Throwable t) {
+-            thrown = t;
+-            this.getOwner().getLogger().log(
+-                    Level.WARNING,
+-                    String.format(
+-                        "Plugin %s generated an exception while executing task %s",
+-                        this.getOwner().getDescription().getFullName(),
+-                        this.getTaskId()),
+-                    thrown);
+         } finally {
+             // Cleanup is important for any async task, otherwise ghost tasks are everywhere
+             synchronized (this.workers) {
+@@ -102,6 +107,54 @@ class CraftAsyncTask extends CraftTask {
+         } finally { thread.setName(nameBefore); } // Paper - name threads according to running plugin
+     }
+ 
++    private void runTaskWithContext(final boolean strictFallback, final String path) {
++        final long transactionId = CompatibilityRuntimeContext.syntheticTransactionId();
++        try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(this.getOwner(), transactionId, strictFallback, path)) {
++            super.run();
++        }
++    }
++
++    private boolean tryCompatibilitySyncReroute(final Throwable initialFailure) {
++        if (!isCompatibilityAsyncViolation(initialFailure)) {
++            return false;
++        }
++        if (LoomConfiguration.mode() != LoomConfiguration.Mode.COMPATIBILITY) {
++            return false;
++        }
++
++        final MinecraftServer server = MinecraftServer.getServer();
++        if (server == null || server.hasStopped()) {
++            return false;
++        }
++
++        final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
++        diagnostics.recordStrictFallback(
++            diagnostics.profileFor(this.getOwner()),
++            "async scheduler reroute after " + initialFailure.getMessage()
++        );
++
++        final CompletableFuture<Void> rerouted = OwnerDomainExecutor.submit(
++            OwnerDomainExecutor.global(server, "compat-async-task-reroute"),
++            () -> this.runTaskWithContext(true, "scheduler:async-reroute")
++        );
++
++        try {
++            ThreadedRegionsBlockingBarrier.awaitNonOwnerFuture(rerouted, "compatibility async scheduler reroute");
++            return true;
++        } catch (final RuntimeException | Error rerouteFailure) {
++            initialFailure.addSuppressed(rerouteFailure);
++            return false;
++        }
++    }
++
++    private static boolean isCompatibilityAsyncViolation(final Throwable throwable) {
++        if (!(throwable instanceof IllegalStateException illegalStateException)) {
++            return false;
++        }
++        final String message = illegalStateException.getMessage();
++        return message != null && message.startsWith("Asynchronous ");
++    }
++
+     LinkedList<BukkitWorker> getWorkers() {
+         return this.workers;
+     }
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..012c89069997acb5bb058114138ef51c213420a7
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java
+@@ -0,0 +1,96 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.configuration.LoomConfiguration;
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.logging.Logger;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class CompatibilitySyncBridgeTest {
++
++    @AfterEach
++    void resetMode() {
++        LoomConfiguration.resetForTesting();
++    }
++
++    @Test
++    void compatibilityModeEnablesBridgeForPluginContext() {
++        LoomConfiguration.setModeForTesting(LoomConfiguration.Mode.COMPATIBILITY);
++        final Plugin plugin = mockPlugin("LegacyBridgePlugin");
++
++        try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false)) {
++            Assertions.assertTrue(CompatibilitySyncBridge.isEnabledForCurrentContext());
++        }
++    }
++
++    @Test
++    void balancedModeDisablesBridgeEvenWithPluginContext() {
++        LoomConfiguration.setModeForTesting(LoomConfiguration.Mode.BALANCED);
++        final Plugin plugin = mockPlugin("LegacyBridgePlugin");
++
++        try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false)) {
++            Assertions.assertFalse(CompatibilitySyncBridge.isEnabledForCurrentContext());
++        }
++    }
++
++    @Test
++    void bridgeCanAwaitDelayedFuture() {
++        LoomConfiguration.setModeForTesting(LoomConfiguration.Mode.COMPATIBILITY);
++        final Plugin plugin = mockPlugin("LegacyBridgePlugin");
++        final CompletableFuture<String> delayed = CompletableFuture.supplyAsync(() -> {
++            try {
++                Thread.sleep(25L);
++            } catch (final InterruptedException ex) {
++                Thread.currentThread().interrupt();
++                throw new RuntimeException(ex);
++            }
++            return "loaded";
++        });
++
++        try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false)) {
++            final String result = CompatibilitySyncBridge.awaitFuture(delayed, "test generic wait", "TEST_LANE");
++            Assertions.assertEquals("loaded", result);
++        }
++    }
++
++    @Test
++    void bridgeNeverAllowsOwnerDomainBlocking() {
++        LoomConfiguration.setModeForTesting(LoomConfiguration.Mode.COMPATIBILITY);
++        final Plugin plugin = mockPlugin("LegacyBridgePlugin");
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++
++        try (
++            CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false);
++            OwnerDomainExecutor.Scope owner = OwnerDomainExecutor.enter(OwnerDomainExecutor.global(server, "test-owner"))
++        ) {
++            Assertions.assertThrows(
++                IllegalStateException.class,
++                () -> CompatibilitySyncBridge.awaitFuture(new CompletableFuture<>(), "owner domain wait", "TEST_LANE")
++            );
++        }
++    }
++
++    private static Plugin mockPlugin(final String name) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn("com.example." + name);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
++}

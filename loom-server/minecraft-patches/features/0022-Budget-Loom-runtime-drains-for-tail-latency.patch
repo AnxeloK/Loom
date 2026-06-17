@@ -1,0 +1,1095 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 9 Jun 2026 13:16:05 +0000
+Subject: [PATCH] Budget Loom runtime drains for tail latency
+
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
+index bed702a5df280d0b76b7d967d7616c64630b0100..15c2d98a1cd6d56dabb4186cbe5e6fdc853774e6 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
+@@ -52,6 +52,48 @@ public final class RegionizedPlayerChunkLoader {
+     private static final long LOOM_PLAYER_CHUNK_LOADER_DIAGNOSTIC_INTERVAL_NANOS = Math.max(
+         1_000_000_000L, Long.getLong("Loom.PlayerChunkLoaderDiagnosticIntervalNanos", 5_000_000_000L)
+     );
++    private static final long LOOM_PLAYER_CHUNK_LOAD_SCHEDULE_BUDGET_NANOS = getNonNegativeMillisPropertyNanos(
++        "Loom.PlayerChunkLoadScheduleBudgetMillis", 2L
++    );
++    private static final long LOOM_PLAYER_CHUNK_GENERATION_ADMISSION_BUDGET_NANOS = getNonNegativeMillisPropertyNanos(
++        "Loom.PlayerChunkGenerationAdmissionBudgetMillis", 2L
++    );
++    private static final long LOOM_PLAYER_CHUNK_POST_PROCESS_BUDGET_NANOS = getNonNegativeMillisPropertyNanos(
++        "Loom.PlayerChunkPostProcessBudgetMillis", 2L
++    );
++    private static final long LOOM_PLAYER_CHUNK_SEND_BUDGET_NANOS = getNonNegativeMillisPropertyNanos(
++        "Loom.PlayerChunkSendBudgetMillis", 3L
++    );
++    private static final int LOOM_PLAYER_CHUNK_LOAD_SCHEDULE_MIN_PER_PLAYER = getNonNegativeIntProperty(
++        "Loom.PlayerChunkLoadScheduleMinPerPlayer", 1
++    );
++    private static final int LOOM_PLAYER_CHUNK_LOAD_SCHEDULE_MIN_PER_TICK = getNonNegativeIntProperty(
++        "Loom.PlayerChunkLoadScheduleMinPerTick", 4
++    );
++    private static final int LOOM_PLAYER_CHUNK_GENERATION_ADMISSION_MIN_PER_PLAYER = getNonNegativeIntProperty(
++        "Loom.PlayerChunkGenerationAdmissionMinPerPlayer", 1
++    );
++    private static final int LOOM_PLAYER_CHUNK_GENERATION_ADMISSION_MIN_PER_TICK = getNonNegativeIntProperty(
++        "Loom.PlayerChunkGenerationAdmissionMinPerTick", 4
++    );
++    private static final int LOOM_PLAYER_CHUNK_POST_PROCESS_MIN_PER_PLAYER = getNonNegativeIntProperty(
++        "Loom.PlayerChunkPostProcessMinPerPlayer", 1
++    );
++    private static final int LOOM_PLAYER_CHUNK_POST_PROCESS_MIN_PER_TICK = getNonNegativeIntProperty(
++        "Loom.PlayerChunkPostProcessMinPerTick", 2
++    );
++    private static final int LOOM_PLAYER_CHUNK_SEND_MIN_PER_PLAYER = getNonNegativeIntProperty(
++        "Loom.PlayerChunkSendMinPerPlayer", 1
++    );
++    private static final int LOOM_PLAYER_CHUNK_SEND_MIN_PER_TICK = getNonNegativeIntProperty(
++        "Loom.PlayerChunkSendMinPerTick", 2
++    );
++    private static final int LOOM_PLAYER_CHUNK_LOAD_SCHEDULE_MAX_PER_PLAYER = getPositiveIntProperty(
++        "Loom.PlayerChunkLoadScheduleMaxPerPlayer", 16
++    );
++    private static final int LOOM_PLAYER_CHUNK_GENERATION_ADMISSION_MAX_PER_PLAYER = getPositiveIntProperty(
++        "Loom.PlayerChunkGenerationAdmissionMaxPerPlayer", 16
++    );
+ 
+     public static final TicketType PLAYER_TICKET         = ChunkSystemTicketType.create("chunk_system:player_ticket", Long::compareTo, 0L, TicketType.FLAG_LOADING | TicketType.FLAG_SIMULATION | TicketType.FLAG_KEEP_DIMENSION_ACTIVE);
+     public static final TicketType PLAYER_TICKET_DELAYED = ChunkSystemTicketType.create("chunk_system:player_ticket_delayed", Long::compareTo, 1L, TicketType.FLAG_LOADING | TicketType.FLAG_SIMULATION | TicketType.FLAG_KEEP_DIMENSION_ACTIVE);
+@@ -187,6 +229,7 @@ public final class RegionizedPlayerChunkLoader {
+ 
+     private final ServerLevel world;
+     private long loomLastPlayerChunkLoaderDiagnosticNanos;
++    private int loomPlayerChunkLoaderRoundRobinOffset;
+ 
+     public RegionizedPlayerChunkLoader(final ServerLevel world) {
+         this.world = world;
+@@ -316,12 +359,18 @@ public final class RegionizedPlayerChunkLoader {
+         final long currTime = System.nanoTime();
+         final TickDiagnostics diagnostics = LOOM_PLAYER_CHUNK_LOADER_DIAGNOSTICS ? new TickDiagnostics() : null;
+         final LongOpenHashSet scheduledLoadChunks = new LongOpenHashSet();
+-        for (final ServerPlayer player : new java.util.ArrayList<>(this.world.players())) {
++        final TickPhaseBudget phaseBudget = new TickPhaseBudget();
++        final java.util.ArrayList<ServerPlayer> players = new java.util.ArrayList<>(this.world.players());
++        final int size = players.size();
++        final int start = size == 0 ? 0 : Math.floorMod(this.loomPlayerChunkLoaderRoundRobinOffset++, size);
++        for (int i = 0; i < size; ++i) {
++            final ServerPlayer player = players.get((start + i) % size);
+             final PlayerChunkLoaderData loader = ((ChunkSystemServerPlayer)player).moonrise$getChunkLoader();
+             if (loader == null || loader.removed || loader.world != this.world) {
+                 // not our problem anymore
+                 continue;
+             }
++            phaseBudget.beginPlayer();
+             if (diagnostics != null) {
+                 ++diagnostics.players;
+             }
+@@ -331,13 +380,14 @@ public final class RegionizedPlayerChunkLoader {
+                 diagnostics.updateNanos += System.nanoTime() - updateStart;
+             }
+             final long queueStart = diagnostics == null ? 0L : System.nanoTime();
+-            loader.updateQueues(currTime, diagnostics, scheduledLoadChunks);
++            loader.updateQueues(currTime, diagnostics, scheduledLoadChunks, phaseBudget);
+             if (diagnostics != null) {
+                 diagnostics.queueNanos += System.nanoTime() - queueStart;
+             }
+         }
+         if (diagnostics != null) {
+             diagnostics.tickNanos = System.nanoTime() - currTime;
++            phaseBudget.copyTo(diagnostics);
+             this.logDiagnostics(currTime, diagnostics);
+         }
+     }
+@@ -351,6 +401,7 @@ public final class RegionizedPlayerChunkLoader {
+             "[loom.player-chunk-loader] world={} players={} tick_ms={} update_ms={} queue_ms={} ticket_ms={} load_schedule_ms={} " +
+                 "loads_done={} loads_start={} loads_schedule={} gens_done={} gens_start={} ticking_start={} sent={} " +
+                 "send_age_samples={} send_age_avg_ms={} send_age_max_ms={} post={} post_ms={} send_ms={} " +
++                "budget_skips(load/gen/post/send)={}/{}/{}/{} " +
+                 "network(bp/not_writable/pending_writes/max_pending_writes/pending_bytes/max_pending_bytes)={}/{}/{}/{}/{}/{} " +
+                 "queues(load/loading/gen/generating/send/ticking)={}/{}/{}/{}/{}/{}",
+             this.world.dimension(),
+@@ -373,6 +424,10 @@ public final class RegionizedPlayerChunkLoader {
+             diagnostics.postProcessedChunks,
+             formatMillis(diagnostics.postProcessNanos),
+             formatMillis(diagnostics.sendChunkNanos),
++            diagnostics.loadScheduleBudgetSkips,
++            diagnostics.generationAdmissionBudgetSkips,
++            diagnostics.postProcessBudgetSkips,
++            diagnostics.sendBudgetSkips,
+             diagnostics.networkBackpressuredPlayers,
+             diagnostics.networkNotWritablePlayers,
+             diagnostics.networkPendingWrites,
+@@ -392,6 +447,42 @@ public final class RegionizedPlayerChunkLoader {
+         return String.format(java.util.Locale.ROOT, "%.3f", (double)nanos / 1_000_000.0D);
+     }
+ 
++    private static int getNonNegativeIntProperty(final String property, final int fallback) {
++        final String configured = System.getProperty(property);
++        if (configured == null) {
++            return fallback;
++        }
++        try {
++            return Math.max(0, Integer.parseInt(configured));
++        } catch (final NumberFormatException ignored) {
++            return fallback;
++        }
++    }
++
++    private static int getPositiveIntProperty(final String property, final int fallback) {
++        final String configured = System.getProperty(property);
++        if (configured == null) {
++            return fallback;
++        }
++        try {
++            return Math.max(1, Integer.parseInt(configured));
++        } catch (final NumberFormatException ignored) {
++            return fallback;
++        }
++    }
++
++    private static long getNonNegativeMillisPropertyNanos(final String property, final long fallback) {
++        final String configured = System.getProperty(property);
++        if (configured == null) {
++            return TimeUnit.MILLISECONDS.toNanos(fallback);
++        }
++        try {
++            return TimeUnit.MILLISECONDS.toNanos(Math.max(0L, Long.parseLong(configured)));
++        } catch (final NumberFormatException ignored) {
++            return TimeUnit.MILLISECONDS.toNanos(fallback);
++        }
++    }
++
+     private static final class TickDiagnostics {
+         private int players;
+         private long tickNanos;
+@@ -424,6 +515,10 @@ public final class RegionizedPlayerChunkLoader {
+         private int sentChunks;
+         private int sendQueueAgeSamples;
+         private int postProcessedChunks;
++        private int loadScheduleBudgetSkips;
++        private int generationAdmissionBudgetSkips;
++        private int postProcessBudgetSkips;
++        private int sendBudgetSkips;
+ 
+         private void sampleQueues(final PlayerChunkLoaderData loader) {
+             this.loadQueueSize += loader.loadQueue.size();
+@@ -445,6 +540,187 @@ public final class RegionizedPlayerChunkLoader {
+         }
+     }
+ 
++    private static final class TickPhaseBudget {
++
++        private long loadScheduleNanos;
++        private long generationAdmissionNanos;
++        private long postProcessNanos;
++        private long sendNanos;
++        private int loadSchedulesThisTick;
++        private int generationAdmissionsThisTick;
++        private int postProcessesThisTick;
++        private int sendsThisTick;
++        private int loadSchedulesThisPlayer;
++        private int generationAdmissionsThisPlayer;
++        private int postProcessesThisPlayer;
++        private int sendsThisPlayer;
++        private int loadScheduleBudgetSkips;
++        private int generationAdmissionBudgetSkips;
++        private int postProcessBudgetSkips;
++        private int sendBudgetSkips;
++
++        private void beginPlayer() {
++            this.loadSchedulesThisPlayer = 0;
++            this.generationAdmissionsThisPlayer = 0;
++            this.postProcessesThisPlayer = 0;
++            this.sendsThisPlayer = 0;
++        }
++
++        private int limitLoadSchedules(final int requested) {
++            return this.limitCount(
++                requested,
++                this.loadScheduleNanos,
++                LOOM_PLAYER_CHUNK_LOAD_SCHEDULE_BUDGET_NANOS,
++                LOOM_PLAYER_CHUNK_LOAD_SCHEDULE_MIN_PER_PLAYER,
++                this.loadSchedulesThisPlayer,
++                LOOM_PLAYER_CHUNK_LOAD_SCHEDULE_MIN_PER_TICK,
++                this.loadSchedulesThisTick,
++                LOOM_PLAYER_CHUNK_LOAD_SCHEDULE_MAX_PER_PLAYER,
++                BudgetPhase.LOAD_SCHEDULE
++            );
++        }
++
++        private int limitGenerationAdmissions(final int requested) {
++            return this.limitCount(
++                requested,
++                this.generationAdmissionNanos,
++                LOOM_PLAYER_CHUNK_GENERATION_ADMISSION_BUDGET_NANOS,
++                LOOM_PLAYER_CHUNK_GENERATION_ADMISSION_MIN_PER_PLAYER,
++                this.generationAdmissionsThisPlayer,
++                LOOM_PLAYER_CHUNK_GENERATION_ADMISSION_MIN_PER_TICK,
++                this.generationAdmissionsThisTick,
++                LOOM_PLAYER_CHUNK_GENERATION_ADMISSION_MAX_PER_PLAYER,
++                BudgetPhase.GENERATION_ADMISSION
++            );
++        }
++
++        private boolean canAdmitGeneration() {
++            return this.canContinue(
++                this.generationAdmissionNanos,
++                LOOM_PLAYER_CHUNK_GENERATION_ADMISSION_BUDGET_NANOS,
++                LOOM_PLAYER_CHUNK_GENERATION_ADMISSION_MIN_PER_PLAYER,
++                this.generationAdmissionsThisPlayer,
++                LOOM_PLAYER_CHUNK_GENERATION_ADMISSION_MIN_PER_TICK,
++                this.generationAdmissionsThisTick,
++                BudgetPhase.GENERATION_ADMISSION
++            );
++        }
++
++        private boolean canPostProcess() {
++            return this.canContinue(
++                this.postProcessNanos,
++                LOOM_PLAYER_CHUNK_POST_PROCESS_BUDGET_NANOS,
++                LOOM_PLAYER_CHUNK_POST_PROCESS_MIN_PER_PLAYER,
++                this.postProcessesThisPlayer,
++                LOOM_PLAYER_CHUNK_POST_PROCESS_MIN_PER_TICK,
++                this.postProcessesThisTick,
++                BudgetPhase.POST_PROCESS
++            );
++        }
++
++        private boolean canSend() {
++            return this.canContinue(
++                this.sendNanos,
++                LOOM_PLAYER_CHUNK_SEND_BUDGET_NANOS,
++                LOOM_PLAYER_CHUNK_SEND_MIN_PER_PLAYER,
++                this.sendsThisPlayer,
++                LOOM_PLAYER_CHUNK_SEND_MIN_PER_TICK,
++                this.sendsThisTick,
++                BudgetPhase.SEND
++            );
++        }
++
++        private void recordLoadSchedule(final long nanos) {
++            ++this.loadSchedulesThisTick;
++            ++this.loadSchedulesThisPlayer;
++            this.loadScheduleNanos += Math.max(0L, nanos);
++        }
++
++        private void recordGenerationAdmission(final long nanos) {
++            ++this.generationAdmissionsThisTick;
++            ++this.generationAdmissionsThisPlayer;
++            this.generationAdmissionNanos += Math.max(0L, nanos);
++        }
++
++        private void recordPostProcess(final long nanos) {
++            ++this.postProcessesThisTick;
++            ++this.postProcessesThisPlayer;
++            this.postProcessNanos += Math.max(0L, nanos);
++        }
++
++        private void recordSend(final long nanos) {
++            ++this.sendsThisTick;
++            ++this.sendsThisPlayer;
++            this.sendNanos += Math.max(0L, nanos);
++        }
++
++        private void copyTo(final TickDiagnostics diagnostics) {
++            diagnostics.loadScheduleBudgetSkips = this.loadScheduleBudgetSkips;
++            diagnostics.generationAdmissionBudgetSkips = this.generationAdmissionBudgetSkips;
++            diagnostics.postProcessBudgetSkips = this.postProcessBudgetSkips;
++            diagnostics.sendBudgetSkips = this.sendBudgetSkips;
++        }
++
++        private int limitCount(
++            final int requested,
++            final long elapsedNanos,
++            final long budgetNanos,
++            final int minPerPlayer,
++            final int completedThisPlayer,
++            final int minPerTick,
++            final int completedThisTick,
++            final int maxPerPlayer,
++            final BudgetPhase phase
++        ) {
++            if (requested <= 0) {
++                return 0;
++            }
++
++            final int perPlayerFloorRemaining = Math.max(0, minPerPlayer - completedThisPlayer);
++            final int perTickFloorRemaining = Math.max(0, minPerTick - completedThisTick);
++            final int floorRemaining = Math.min(perPlayerFloorRemaining, perTickFloorRemaining);
++            final int limit = elapsedNanos >= budgetNanos ? floorRemaining : Math.max(floorRemaining, maxPerPlayer);
++            final int allowed = Math.min(requested, limit);
++            if (allowed < requested) {
++                this.recordBudgetSkip(phase);
++            }
++            return allowed;
++        }
++
++        private boolean canContinue(
++            final long elapsedNanos,
++            final long budgetNanos,
++            final int minPerPlayer,
++            final int completedThisPlayer,
++            final int minPerTick,
++            final int completedThisTick,
++            final BudgetPhase phase
++        ) {
++            if (elapsedNanos < budgetNanos
++                || (completedThisPlayer < minPerPlayer && completedThisTick < minPerTick)) {
++                return true;
++            }
++            this.recordBudgetSkip(phase);
++            return false;
++        }
++
++        private void recordBudgetSkip(final BudgetPhase phase) {
++            switch (phase) {
++                case LOAD_SCHEDULE -> ++this.loadScheduleBudgetSkips;
++                case GENERATION_ADMISSION -> ++this.generationAdmissionBudgetSkips;
++                case POST_PROCESS -> ++this.postProcessBudgetSkips;
++                case SEND -> ++this.sendBudgetSkips;
++            }
++        }
++    }
++
++    private enum BudgetPhase {
++        LOAD_SCHEDULE,
++        GENERATION_ADMISSION,
++        POST_PROCESS,
++        SEND
++    }
++
+     public static final class PlayerChunkLoaderData {
+ 
+         private static final AtomicLong ID_GENERATOR = new AtomicLong();
+@@ -946,6 +1222,10 @@ public final class RegionizedPlayerChunkLoader {
+         }
+ 
+         void updateQueues(final long time, final TickDiagnostics diagnostics, final LongOpenHashSet scheduledLoadChunks) {
++            this.updateQueues(time, diagnostics, scheduledLoadChunks, null);
++        }
++
++        void updateQueues(final long time, final TickDiagnostics diagnostics, final LongOpenHashSet scheduledLoadChunks, final TickPhaseBudget phaseBudget) {
+             TickThread.ensureTickThread(this.player, "Cannot tick player chunk loader async");
+             if (this.removed) {
+                 throw new IllegalStateException("Ticking removed player chunk loader");
+@@ -993,7 +1273,8 @@ public final class RegionizedPlayerChunkLoader {
+ 
+             // try to push more chunk loads
+             final long maxLoads = Math.max(0L, Math.min(MAX_RATE, Math.min(this.loadQueue.size(), this.getMaxChunkLoads())));
+-            final int maxLoadsThisTick = (int)this.chunkLoadTicketLimiter.takeAllocation(maxLoads);
++            final int loadScheduleLimit = phaseBudget == null ? Integer.MAX_VALUE : phaseBudget.limitLoadSchedules((int)Math.min(Integer.MAX_VALUE, maxLoads));
++            final int maxLoadsThisTick = (int)this.chunkLoadTicketLimiter.takeAllocation(Math.min(maxLoads, loadScheduleLimit));
+             if (maxLoadsThisTick > 0) {
+                 if (diagnostics != null) {
+                     diagnostics.loadTickets += maxLoadsThisTick;
+@@ -1040,9 +1321,13 @@ public final class RegionizedPlayerChunkLoader {
+                     }
+                     final int queuedChunkX = CoordinateUtils.getChunkX(queuedLoadChunk);
+                     final int queuedChunkZ = CoordinateUtils.getChunkZ(queuedLoadChunk);
++                    final long scheduleSingleStart = phaseBudget == null ? 0L : System.nanoTime();
+                     ((ChunkSystemServerLevel)this.world).moonrise$getChunkTaskScheduler().scheduleChunkLoad(
+                         queuedChunkX, queuedChunkZ, ChunkStatus.EMPTY, false, Priority.NORMAL, null
+                     );
++                    if (phaseBudget != null) {
++                        phaseBudget.recordLoadSchedule(System.nanoTime() - scheduleSingleStart);
++                    }
+                     ++loadSchedules;
+                     if (this.removed) {
+                         return;
+@@ -1090,10 +1375,15 @@ public final class RegionizedPlayerChunkLoader {
+ 
+             // try to push more chunk generations
+             final long maxGens = Math.max(0L, Math.min(MAX_RATE, Math.min(this.genQueue.size(), this.getMaxChunkGenerates())));
+-            final long maxGensThisTick = this.chunkGenerateTicketLimiter.takeAllocation(maxGens);
++            final int generationAdmissionLimit = phaseBudget == null ? Integer.MAX_VALUE : phaseBudget.limitGenerationAdmissions((int)Math.min(Integer.MAX_VALUE, maxGens));
++            final long maxGensThisTick = this.chunkGenerateTicketLimiter.takeAllocation(Math.min(maxGens, generationAdmissionLimit));
+             long ratedGensThisTick = 0L;
+             int generationTickets = 0;
+             while (!this.genQueue.isEmpty()) {
++                if (phaseBudget != null && !phaseBudget.canAdmitGeneration()) {
++                    break;
++                }
++                final long generationAdmissionStart = phaseBudget == null ? 0L : System.nanoTime();
+                 final long chunkKey = this.genQueue.firstLong();
+                 final int chunkX = CoordinateUtils.getChunkX(chunkKey);
+                 final int chunkZ = CoordinateUtils.getChunkZ(chunkKey);
+@@ -1121,6 +1411,9 @@ public final class RegionizedPlayerChunkLoader {
+                 );
+                 this.generatingQueue.enqueue(chunkKey);
+                 ++generationTickets;
++                if (phaseBudget != null) {
++                    phaseBudget.recordGenerationAdmission(System.nanoTime() - generationAdmissionStart);
++                }
+             }
+             if (diagnostics != null) {
+                 diagnostics.generationTickets += generationTickets;
+@@ -1176,20 +1469,30 @@ public final class RegionizedPlayerChunkLoader {
+                 }
+                 if (!((ChunkSystemLevelChunk)chunk).moonrise$isPostProcessingDone()) {
+                     // not yet post-processed, need to do this so that tile entities can properly be sent to clients
+-                    final long postProcessStart = diagnostics == null ? 0L : System.nanoTime();
++                    if (phaseBudget != null && !phaseBudget.canPostProcess()) {
++                        break;
++                    }
++                    final long postProcessStart = diagnostics == null && phaseBudget == null ? 0L : System.nanoTime();
+                     chunk.postProcessGeneration(this.world);
++                    final long postProcessDone = diagnostics != null || phaseBudget != null ? System.nanoTime() : 0L;
+                     if (diagnostics != null) {
+                         ++diagnostics.postProcessedChunks;
+-                        diagnostics.postProcessNanos += System.nanoTime() - postProcessStart;
++                        diagnostics.postProcessNanos += postProcessDone - postProcessStart;
++                    }
++                    if (phaseBudget != null) {
++                        phaseBudget.recordPostProcess(postProcessDone - postProcessStart);
+                     }
+                     // check if there was any recursive action
+                     if (this.removed || this.sendQueue.isEmpty() || this.sendQueue.firstLong() != pendingSend) {
+                         return;
+                     } // else: good to dequeue and send, fall through
+                 }
++                if (phaseBudget != null && !phaseBudget.canSend()) {
++                    break;
++                }
+                 this.sendQueue.dequeueLong();
+ 
+-                final long sendChunkStart = diagnostics == null ? 0L : System.nanoTime();
++                final long sendChunkStart = diagnostics == null && phaseBudget == null ? 0L : System.nanoTime();
+                 if (diagnostics != null) {
+                     final long sendQueueAgeNanos = this.removeSendQueueAgeNanos(pendingSend, sendChunkStart);
+                     if (sendQueueAgeNanos != Long.MIN_VALUE) {
+@@ -1199,9 +1502,13 @@ public final class RegionizedPlayerChunkLoader {
+                     }
+                 }
+                 this.sendChunk(pendingSendX, pendingSendZ);
++                final long sendChunkDone = diagnostics != null || phaseBudget != null ? System.nanoTime() : 0L;
+                 if (diagnostics != null) {
+                     ++diagnostics.sentChunks;
+-                    diagnostics.sendChunkNanos += System.nanoTime() - sendChunkStart;
++                    diagnostics.sendChunkNanos += sendChunkDone - sendChunkStart;
++                }
++                if (phaseBudget != null) {
++                    phaseBudget.recordSend(sendChunkDone - sendChunkStart);
+                 }
+ 
+                 if (this.removed) {
+diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
+index 834942432c96af7a16de7a764b8dfad9321008de..8a7830dfde27c293266d2c55538167331ca1981d 100644
+--- a/net/minecraft/network/PacketProcessor.java
++++ b/net/minecraft/network/PacketProcessor.java
+@@ -35,6 +35,15 @@ public class PacketProcessor implements AutoCloseable {
+     }
+     // Paper end - improve tick loop
+ 
++    public boolean hasPendingPackets() {
++        return !this.packetsToBeHandled.isEmpty();
++    }
++
++    public boolean hasUrgentPacketAtHead() {
++        final PacketProcessor.ListenerAndPacket<?> task = this.packetsToBeHandled.peek();
++        return task != null && task.isUrgentControlPacket();
++    }
++
+     public boolean canHandleInline() {
+         return net.minecraft.server.threading.runtime.OwnerDomainExecutor.canRunSynchronousCallbacks();
+     }
+@@ -78,11 +87,39 @@ public class PacketProcessor implements AutoCloseable {
+     // Paper start - detailed watchdog information
+     public static final java.util.concurrent.ConcurrentLinkedDeque<PacketListener> packetProcessing = new java.util.concurrent.ConcurrentLinkedDeque<>();
+     static final java.util.concurrent.atomic.AtomicLong totalMainThreadPacketsProcessed = new java.util.concurrent.atomic.AtomicLong();
++    private static final java.util.concurrent.atomic.AtomicLong totalTickStartDrainPackets = new java.util.concurrent.atomic.AtomicLong();
++    private static final java.util.concurrent.atomic.AtomicLong totalTickStartDrainUrgentPackets = new java.util.concurrent.atomic.AtomicLong();
++    private static final java.util.concurrent.atomic.AtomicLong totalTickStartDrainNanos = new java.util.concurrent.atomic.AtomicLong();
++    private static final java.util.concurrent.atomic.AtomicLong totalTickStartBudgetDeferrals = new java.util.concurrent.atomic.AtomicLong();
+ 
+     public static long getTotalProcessedPackets() {
+         return totalMainThreadPacketsProcessed.get();
+     }
+ 
++    public static void recordTickStartDrain(final int packets, final int urgentPackets, final long nanos, final boolean budgetDeferred) {
++        if (packets > 0) {
++            totalTickStartDrainPackets.addAndGet(packets);
++        }
++        if (urgentPackets > 0) {
++            totalTickStartDrainUrgentPackets.addAndGet(urgentPackets);
++        }
++        if (nanos > 0L) {
++            totalTickStartDrainNanos.addAndGet(nanos);
++        }
++        if (budgetDeferred) {
++            totalTickStartBudgetDeferrals.incrementAndGet();
++        }
++    }
++
++    public static TickStartDrainDiagnostics tickStartDrainDiagnostics() {
++        return new TickStartDrainDiagnostics(
++            totalTickStartDrainPackets.get(),
++            totalTickStartDrainUrgentPackets.get(),
++            totalTickStartDrainNanos.get(),
++            totalTickStartBudgetDeferrals.get()
++        );
++    }
++
+     public static java.util.List<PacketListener> getCurrentPacketProcessors() {
+         java.util.List<PacketListener> listeners = new java.util.ArrayList<>(4);
+         for (PacketListener listener : packetProcessing) {
+@@ -92,12 +129,12 @@ public class PacketProcessor implements AutoCloseable {
+         return listeners;
+     }
+ 
+-    private static void runListenerInOwnerContext(final PacketListener listener, final Runnable action) {
++    private static void runListenerInOwnerContext(final PacketListener listener, final Packet<?> packet, final Runnable action) {
+         if (listener instanceof net.minecraft.server.network.ServerGamePacketListenerImpl gameListener) {
+             final net.minecraft.server.level.ServerPlayer player = gameListener.player;
+             final net.minecraft.server.level.ServerLevel level = player.level();
+             final net.minecraft.world.level.ChunkPos chunkPos = player.chunkPosition();
+-            final int radius = Math.max(io.papermc.paper.FeatureHooks.getViewDistance(level), io.papermc.paper.FeatureHooks.getSimulationDistance(level)) + 1;
++            final int radius = ownerRadiusForPacket(packet, level);
+             final int minChunkX = chunkPos.x() - radius;
+             final int minChunkZ = chunkPos.z() - radius;
+             final int maxChunkX = chunkPos.x() + radius;
+@@ -126,13 +163,50 @@ public class PacketProcessor implements AutoCloseable {
+         action.run();
+     }
+ 
++    private static int ownerRadiusForPacket(final Packet<?> packet, final net.minecraft.server.level.ServerLevel level) {
++        if (isPlayerControlPacket(packet)) {
++            return 0;
++        }
++        return Math.max(io.papermc.paper.FeatureHooks.getViewDistance(level), io.papermc.paper.FeatureHooks.getSimulationDistance(level)) + 1;
++    }
++
++    private static boolean isPlayerControlPacket(final Packet<?> packet) {
++        return packet instanceof net.minecraft.network.protocol.common.ServerboundKeepAlivePacket
++            || packet instanceof net.minecraft.network.protocol.common.ServerboundPongPacket
++            || packet instanceof net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket
++            || packet instanceof net.minecraft.network.protocol.game.ServerboundClientTickEndPacket
++            || packet instanceof net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket
++            || packet instanceof net.minecraft.network.protocol.game.ServerboundChatAckPacket;
++    }
++
+     // Paper end - detailed watchdog information
+ 
++    public record TickStartDrainDiagnostics(
++        long packets,
++        long urgentPackets,
++        long nanos,
++        long budgetDeferrals
++    ) {
++    }
++
+     private record ListenerAndPacket<T extends PacketListener>(T listener, Packet<T> packet) {
++        private boolean isUrgentControlPacket() {
++            return this.packet instanceof net.minecraft.network.protocol.common.ServerboundKeepAlivePacket
++                || this.packet instanceof net.minecraft.network.protocol.common.ServerboundPongPacket
++                || this.packet instanceof net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket
++                || this.packet instanceof net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket
++                || this.packet instanceof net.minecraft.network.protocol.game.ServerboundClientTickEndPacket
++                || this.packet instanceof net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket
++                || this.packet instanceof net.minecraft.network.protocol.game.ServerboundChatAckPacket
++                || this.packet instanceof net.minecraft.network.protocol.game.ServerboundConfigurationAcknowledgedPacket
++                || this.packet instanceof net.minecraft.network.protocol.configuration.ServerboundFinishConfigurationPacket
++                || this.packet instanceof net.minecraft.network.protocol.login.ServerboundLoginAcknowledgedPacket;
++        }
++
+         public void handle() {
+             packetProcessing.push(this.listener); // Paper - detailed watchdog information
+             try { // Paper - detailed watchdog information
+-            runListenerInOwnerContext(this.listener, () -> {
++            runListenerInOwnerContext(this.listener, this.packet, () -> {
+                 if (this.listener instanceof net.minecraft.server.network.ServerCommonPacketListenerImpl serverCommonPacketListener && serverCommonPacketListener.processedDisconnect) return; // Paper - Don't handle sync packets for kicked players
+                 if (this.listener.shouldHandleMessage(this.packet)) {
+                     try {
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 566c130ac058ebf7ca13e5f78ebd99be29f6bdf7..0917d64aa105e057b79a7b9dd4503a148a6a6e54 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -199,6 +199,19 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     public static final String VANILLA_BRAND = "vanilla";
+     private static final float AVERAGE_TICK_TIME_SMOOTHING = 0.8F;
+     private static final int TICK_STATS_SPAN = 100;
++    private static final int LOOM_PACKET_TICK_START_MIN_PACKETS = Math.max(1, Integer.getInteger("Loom.PacketTickStartMinPackets", 32));
++    private static final int LOOM_PACKET_TICK_START_MAX_PACKETS = Math.max(
++        LOOM_PACKET_TICK_START_MIN_PACKETS,
++        Integer.getInteger("Loom.PacketTickStartMaxPackets", 2048)
++    );
++    private static final int LOOM_PACKET_TICK_START_URGENT_MAX_PACKETS = Math.max(
++        LOOM_PACKET_TICK_START_MIN_PACKETS,
++        Integer.getInteger("Loom.PacketTickStartUrgentMaxPackets", 256)
++    );
++    private static final long LOOM_PACKET_TICK_START_BUDGET_NANOS = Math.max(
++        250_000L,
++        Long.getLong("Loom.PacketTickStartBudgetNanos", 2_000_000L)
++    );
+     private static final long OVERLOADED_THRESHOLD_NANOS = 30L * TimeUtil.NANOSECONDS_PER_SECOND / 20L; // CraftBukkit
+     private static final int OVERLOADED_TICKS_THRESHOLD = 20;
+     private static final long OVERLOADED_WARNING_INTERVAL_NANOS = 10L * TimeUtil.NANOSECONDS_PER_SECOND;
+@@ -1214,8 +1227,49 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         this.addTickTime(time);
+     }
+ 
++    private boolean executeTickStartPacket(final TickStartPacketDrain drain) {
++        final boolean urgent = this.packetProcessor.hasUrgentPacketAtHead();
++        final long start = Util.getNanos();
++        final boolean executed = this.packetProcessor.executeSinglePacket();
++        final long elapsed = Util.getNanos() - start;
++        if (executed) {
++            ++drain.packets;
++            if (urgent) {
++                ++drain.urgentPackets;
++            }
++            drain.nanos += Math.max(0L, elapsed);
++        }
++        return executed;
++    }
++
++    private boolean shouldDrainTickStartPacket(final TickStartPacketDrain drain) {
++        if (drain.packets < LOOM_PACKET_TICK_START_MIN_PACKETS) {
++            return true;
++        }
++        if (drain.packets >= LOOM_PACKET_TICK_START_MAX_PACKETS) {
++            return false;
++        }
++        if (drain.nanos < LOOM_PACKET_TICK_START_BUDGET_NANOS) {
++            return true;
++        }
++        return drain.urgentPackets < LOOM_PACKET_TICK_START_URGENT_MAX_PACKETS
++            && this.packetProcessor.hasUrgentPacketAtHead();
++    }
++
++    private void recordTickStartPacketDrain(final TickStartPacketDrain drain) {
++        final boolean deferred = this.packetProcessor.hasPendingPackets() && !this.shouldDrainTickStartPacket(drain);
++        PacketProcessor.recordTickStartDrain(drain.packets, drain.urgentPackets, drain.nanos, deferred);
++    }
++
++    private static final class TickStartPacketDrain {
++        private int packets;
++        private int urgentPackets;
++        private long nanos;
++    }
++
+     private void runAllTasksAtTickStart() {
+         this.startMeasuringTaskExecutionTime();
++        final TickStartPacketDrain packetDrain = new TickStartPacketDrain();
+ 
+         // note: To avoid possibly spinning forever, only execute tasks that are roughly available at the beginning
+         //       of this call. Packet processing and chunk system tasks are possibly always being queued.
+@@ -1234,10 +1288,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             // draining is large - chunk system and packet processing may be latency sensitive
+ 
+             ((ca.spottedleaf.moonrise.patches.chunk_system.server.ChunkSystemMinecraftServer)this).moonrise$executeMidTickTasks(); // Paper - rewrite chunk system
+-            this.packetProcessor.executeSinglePacket();
++            this.executeTickStartPacket(packetDrain);
+         }
+         profiler.popPush("moonrise:run_all_packets");
+-        while (this.packetProcessor.executeSinglePacket()) {
++        while (this.shouldDrainTickStartPacket(packetDrain) && this.executeTickStartPacket(packetDrain)) {
+             // execute possibly latency sensitive chunk system tasks (see above)
+             ((ca.spottedleaf.moonrise.patches.chunk_system.server.ChunkSystemMinecraftServer)this).moonrise$executeMidTickTasks(); // Paper - rewrite chunk system
+         }
+@@ -1267,6 +1321,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         profiler.pop(); // moonrise:run_all_chunk
+         profiler.pop(); // moonrise:run_all_tasks
+ 
++        this.recordTickStartPacketDrain(packetDrain);
+         this.finishMeasuringTaskExecutionTime();
+     }
+ 
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -3,6 +3,7 @@ package net.minecraft.server.threading;
+ import ca.spottedleaf.moonrise.common.util.TickThread;
+ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.util.Util;
+ import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
+ import org.bukkit.plugin.IllegalPluginAccessException;
+ import org.bukkit.plugin.Plugin;
+@@ -68,6 +69,10 @@ public class TickRegions {
+         SCHEDULER_MAX_TASKS_PER_TICK,
+         Integer.getInteger("paper.threadedregions.scheduler.maxTasksPerTickBurst", SCHEDULER_MAX_TASKS_PER_TICK * 2)
+     );
++    private static final int SCHEDULER_MIN_TASKS_PER_TICK = Math.max(
++        1,
++        Integer.getInteger("paper.threadedregions.scheduler.minTasksPerTick", 64)
++    );
+     private static final int MAILBOX_MAX_MESSAGES_PER_TICK = Math.max(
+         32,
+         Integer.getInteger("paper.threadedregions.mailbox.maxMessagesPerTick", 4096)
+@@ -76,10 +81,17 @@ public class TickRegions {
+         MAILBOX_MAX_MESSAGES_PER_TICK,
+         Integer.getInteger("paper.threadedregions.mailbox.maxMessagesPerTickBurst", MAILBOX_MAX_MESSAGES_PER_TICK * 2)
+     );
++    private static final int MAILBOX_MIN_MESSAGES_PER_TICK = Math.max(
++        1,
++        Integer.getInteger("paper.threadedregions.mailbox.minMessagesPerTick", 64)
++    );
+     private static final int MAILBOX_MAX_QUEUED_MESSAGES = Math.max(
+         64,
+         Integer.getInteger("paper.threadedregions.mailbox.maxQueuedMessages", 16384)
+     );
++    private static final long ADAPTIVE_DRAIN_TARGET_SLACK_NANOS = getMillisPropertyNanos(
++        "paper.threadedregions.drain.targetSlackMillis", 8L
++    );
+     private static final boolean PARALLEL_MAILBOX_ENABLED = Boolean.parseBoolean(
+         System.getProperty("paper.threadedregions.parallelMailbox", "true")
+     );
+@@ -118,6 +130,9 @@ public class TickRegions {
+     private static final AtomicLong SCHEDULER_PARALLEL_TICKS = new AtomicLong();
+     private static final AtomicLong SCHEDULER_PARALLEL_BUCKETS = new AtomicLong();
+     private static final AtomicLong SCHEDULER_BUDGET_SKIPS = new AtomicLong();
++    private static final AtomicLong SCHEDULER_DRAIN_CALLS = new AtomicLong();
++    private static final AtomicLong SCHEDULER_DRAIN_TASKS = new AtomicLong();
++    private static final AtomicLong SCHEDULER_DRAIN_NANOS = new AtomicLong();
+     private static final AtomicLong MAILBOX_MESSAGES_POSTED = new AtomicLong();
+     private static final AtomicLong MAILBOX_MESSAGES_DELIVERED = new AtomicLong();
+     private static final AtomicLong MAILBOX_MESSAGES_DEFERRED = new AtomicLong();
+@@ -125,6 +140,9 @@ public class TickRegions {
+     private static final AtomicLong MAILBOX_PARALLEL_DRAINS = new AtomicLong();
+     private static final AtomicLong MAILBOX_PARALLEL_BUCKETS = new AtomicLong();
+     private static final AtomicLong MAILBOX_BUDGET_SKIPS = new AtomicLong();
++    private static final AtomicLong MAILBOX_DRAIN_CALLS = new AtomicLong();
++    private static final AtomicLong MAILBOX_DRAIN_MESSAGES = new AtomicLong();
++    private static final AtomicLong MAILBOX_DRAIN_NANOS = new AtomicLong();
+     private static final AtomicLong SIMULATION_BATCH_TASKS = new AtomicLong();
+     private static final AtomicLong SIMULATION_BATCH_OPERATIONS = new AtomicLong();
+     private static final AtomicLong SIMULATION_SERIAL_FALLBACKS = new AtomicLong();
+@@ -418,6 +436,9 @@ public class TickRegions {
+             SCHEDULER_PARALLEL_TICKS.get(),
+             SCHEDULER_PARALLEL_BUCKETS.get(),
+             SCHEDULER_BUDGET_SKIPS.get(),
++            SCHEDULER_DRAIN_CALLS.get(),
++            SCHEDULER_DRAIN_TASKS.get(),
++            SCHEDULER_DRAIN_NANOS.get(),
+             MAILBOX_MESSAGES_POSTED.get(),
+             MAILBOX_MESSAGES_DELIVERED.get(),
+             MAILBOX_MESSAGES_DEFERRED.get(),
+@@ -425,6 +446,9 @@ public class TickRegions {
+             MAILBOX_PARALLEL_DRAINS.get(),
+             MAILBOX_PARALLEL_BUCKETS.get(),
+             MAILBOX_BUDGET_SKIPS.get(),
++            MAILBOX_DRAIN_CALLS.get(),
++            MAILBOX_DRAIN_MESSAGES.get(),
++            MAILBOX_DRAIN_NANOS.get(),
+             SIMULATION_BATCH_TASKS.get(),
+             SIMULATION_BATCH_OPERATIONS.get(),
+             SIMULATION_SERIAL_FALLBACKS.get(),
+@@ -449,6 +473,9 @@ public class TickRegions {
+             .append(", schedulerParallelTicks=").append(diagnostics.schedulerParallelTicks())
+             .append(", schedulerParallelBuckets=").append(diagnostics.schedulerParallelBuckets())
+             .append(", schedulerBudgetSkips=").append(diagnostics.schedulerBudgetSkips())
++            .append(", schedulerDrainCalls=").append(diagnostics.schedulerDrainCalls())
++            .append(", schedulerDrainTasks=").append(diagnostics.schedulerDrainTasks())
++            .append(", schedulerDrainNanos=").append(diagnostics.schedulerDrainNanos())
+             .append(", mailboxPosted=").append(diagnostics.mailboxMessagesPosted())
+             .append(", mailboxDelivered=").append(diagnostics.mailboxMessagesDelivered())
+             .append(", mailboxDeferred=").append(diagnostics.mailboxMessagesDeferred())
+@@ -456,6 +483,9 @@ public class TickRegions {
+             .append(", mailboxParallelDrains=").append(diagnostics.mailboxParallelDrains())
+             .append(", mailboxParallelBuckets=").append(diagnostics.mailboxParallelBuckets())
+             .append(", mailboxBudgetSkips=").append(diagnostics.mailboxBudgetSkips())
++            .append(", mailboxDrainCalls=").append(diagnostics.mailboxDrainCalls())
++            .append(", mailboxDrainMessages=").append(diagnostics.mailboxDrainMessages())
++            .append(", mailboxDrainNanos=").append(diagnostics.mailboxDrainNanos())
+             .append(", simulationBatchTasks=").append(diagnostics.simulationBatchTasks())
+             .append(", simulationBatchOps=").append(diagnostics.simulationBatchOperations())
+             .append(", simulationSerialFallbacks=").append(diagnostics.simulationSerialFallbacks())
+@@ -513,6 +543,10 @@ public class TickRegions {
+         );
+     }
+ 
++    public static int getAdaptiveSchedulerBudget(final ServerLevel world, final int dueTasks) {
++        return applyTickSlackBudget(world, dueTasks, getAdaptiveSchedulerBudget(dueTasks), SCHEDULER_MIN_TASKS_PER_TICK);
++    }
++
+     public static int getAdaptiveMailboxBudget(final int queuedMessages) {
+         return computeAdaptiveDrainBudget(
+             queuedMessages,
+@@ -522,6 +556,10 @@ public class TickRegions {
+         );
+     }
+ 
++    public static int getAdaptiveMailboxBudget(final ServerLevel world, final int queuedMessages) {
++        return applyTickSlackBudget(world, queuedMessages, getAdaptiveMailboxBudget(queuedMessages), MAILBOX_MIN_MESSAGES_PER_TICK);
++    }
++
+     public static boolean areChunksInSameRegionTaskBucket(
+         final int firstChunkX,
+         final int firstChunkZ,
+@@ -560,6 +598,26 @@ public class TickRegions {
+         }
+     }
+ 
++    private static void recordSchedulerDrain(final int tasks, final long nanos) {
++        SCHEDULER_DRAIN_CALLS.incrementAndGet();
++        if (tasks > 0) {
++            SCHEDULER_DRAIN_TASKS.addAndGet(tasks);
++        }
++        if (nanos > 0L) {
++            SCHEDULER_DRAIN_NANOS.addAndGet(nanos);
++        }
++    }
++
++    private static void recordMailboxDrain(final int messages, final long nanos) {
++        MAILBOX_DRAIN_CALLS.incrementAndGet();
++        if (messages > 0) {
++            MAILBOX_DRAIN_MESSAGES.addAndGet(messages);
++        }
++        if (nanos > 0L) {
++            MAILBOX_DRAIN_NANOS.addAndGet(nanos);
++        }
++    }
++
+     static int computeAdaptiveDrainBudget(
+         final int available,
+         final int baseBudget,
+@@ -582,6 +640,36 @@ public class TickRegions {
+         return Math.max(baseBudget, Math.min(burstBudget, baseBudget + scaledBoost));
+     }
+ 
++    private static int applyTickSlackBudget(final ServerLevel world, final int available, final int computedBudget, final int floor) {
++        if (available <= floor || computedBudget <= floor || ADAPTIVE_DRAIN_TARGET_SLACK_NANOS <= 0L) {
++            return computedBudget;
++        }
++
++        final long slackNanos = world.getServer().getNextTickTime() - Util.getNanos();
++        if (slackNanos >= ADAPTIVE_DRAIN_TARGET_SLACK_NANOS) {
++            return computedBudget;
++        }
++        if (slackNanos <= 0L) {
++            return Math.min(computedBudget, floor);
++        }
++
++        final double slackRatio = Math.max(0.0D, Math.min(1.0D, (double)slackNanos / (double)ADAPTIVE_DRAIN_TARGET_SLACK_NANOS));
++        final int slackBudget = floor + (int)Math.floor((double)(computedBudget - floor) * slackRatio);
++        return Math.max(floor, Math.min(computedBudget, slackBudget));
++    }
++
++    private static long getMillisPropertyNanos(final String property, final long fallback) {
++        final String configured = System.getProperty(property);
++        if (configured == null) {
++            return java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(fallback);
++        }
++        try {
++            return java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(Math.max(0L, Long.parseLong(configured)));
++        } catch (final NumberFormatException ignored) {
++            return java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(fallback);
++        }
++    }
++
+     public static void runRegionBoundTasksFromCurrentContext(
+         final ServerLevel world,
+         final List<RegionBoundTask> tasks,
+@@ -1173,22 +1261,27 @@ public class TickRegions {
+                 return;
+             }
+ 
+-            if (STRICT_RUNTIME_MODE) {
+-                this.tickStrict(budgeted);
+-                return;
+-            }
++            final long drainStart = Util.getNanos();
++            try {
++                if (STRICT_RUNTIME_MODE) {
++                    this.tickStrict(budgeted);
++                    return;
++                }
+ 
+-            if (this.tryTickParallel(budgeted)) {
+-                return;
+-            }
++                if (this.tryTickParallel(budgeted)) {
++                    return;
++                }
+ 
+-            for (int i = 0, len = budgeted.size(); i < len; ++i) {
+-                this.runScheduledTask(budgeted.get(i));
++                for (int i = 0, len = budgeted.size(); i < len; ++i) {
++                    this.runScheduledTask(budgeted.get(i));
++                }
++            } finally {
++                recordSchedulerDrain(budgeted.size(), Util.getNanos() - drainStart);
+             }
+         }
+ 
+         private List<RegionScheduledTask> applySchedulerBudget(final List<RegionScheduledTask> toRun) {
+-            final int schedulerBudget = getAdaptiveSchedulerBudget(toRun.size());
++            final int schedulerBudget = getAdaptiveSchedulerBudget(this.world, toRun.size());
+             if (toRun.size() <= schedulerBudget) {
+                 return toRun;
+             }
+@@ -1248,17 +1341,22 @@ public class TickRegions {
+                 return;
+             }
+ 
+-            if (STRICT_RUNTIME_MODE) {
+-                this.drainMailboxStrict(toDeliver);
+-                return;
+-            }
++            final long drainStart = Util.getNanos();
++            try {
++                if (STRICT_RUNTIME_MODE) {
++                    this.drainMailboxStrict(toDeliver);
++                    return;
++                }
+ 
+-            if (this.tryDrainMailboxParallel(toDeliver)) {
+-                return;
+-            }
++                if (this.tryDrainMailboxParallel(toDeliver)) {
++                    return;
++                }
+ 
+-            for (int i = 0, len = toDeliver.size(); i < len; ++i) {
+-                this.runMailboxMessage(toDeliver.get(i));
++                for (int i = 0, len = toDeliver.size(); i < len; ++i) {
++                    this.runMailboxMessage(toDeliver.get(i));
++                }
++            } finally {
++                recordMailboxDrain(toDeliver.size(), Util.getNanos() - drainStart);
+             }
+         }
+ 
+@@ -1269,7 +1367,7 @@ public class TickRegions {
+                     return List.of();
+                 }
+ 
+-                final int mailboxBudget = getAdaptiveMailboxBudget(available);
++                final int mailboxBudget = getAdaptiveMailboxBudget(this.world, available);
+                 final int budgeted = Math.min(available, mailboxBudget);
+                 final List<CrossRegionMessage> toDeliver = new ArrayList<>(budgeted);
+                 for (int i = 0; i < budgeted; ++i) {
+@@ -1891,6 +1989,9 @@ public class TickRegions {
+         long schedulerParallelTicks,
+         long schedulerParallelBuckets,
+         long schedulerBudgetSkips,
++        long schedulerDrainCalls,
++        long schedulerDrainTasks,
++        long schedulerDrainNanos,
+         long mailboxMessagesPosted,
+         long mailboxMessagesDelivered,
+         long mailboxMessagesDeferred,
+@@ -1898,6 +1999,9 @@ public class TickRegions {
+         long mailboxParallelDrains,
+         long mailboxParallelBuckets,
+         long mailboxBudgetSkips,
++        long mailboxDrainCalls,
++        long mailboxDrainMessages,
++        long mailboxDrainNanos,
+         long simulationBatchTasks,
+         long simulationBatchOperations,
+         long simulationSerialFallbacks,
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index a0fccf9062f7e9faa96aaa4deeb5de13d61924ee..58d6eb3e87ddc3e1473bcd76efe7e77c349c6bdc 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -1,5 +1,7 @@
+ package net.minecraft.server.threading.runtime;
+ 
++import java.util.EnumMap;
++import java.util.Map;
+ import java.util.Objects;
+ import java.util.UUID;
+ import java.util.concurrent.CompletableFuture;
+@@ -8,6 +10,7 @@ import java.util.concurrent.Executors;
+ import java.util.concurrent.RejectedExecutionException;
+ import java.util.concurrent.ThreadFactory;
+ import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicLong;
+ import java.util.function.Supplier;
+ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerLevel;
+@@ -30,6 +33,10 @@ public final class OwnerDomainExecutor {
+ 
+     private static final ThreadLocal<@Nullable OwnerContext> CURRENT_OWNER = new ThreadLocal<>();
+     private static final Executor LOGIN_EXECUTOR = Executors.newSingleThreadExecutor(new NamedThreadFactory("Owner domain login"));
++    private static final AtomicLong EXECUTE_INLINE = new AtomicLong();
++    private static final AtomicLong EXECUTE_HANDOFF = new AtomicLong();
++    private static final AtomicLong[] EXECUTE_INLINE_BY_DOMAIN = createDomainCounters();
++    private static final AtomicLong[] EXECUTE_HANDOFF_BY_DOMAIN = createDomainCounters();
+ 
+     private OwnerDomainExecutor() {
+     }
+@@ -178,10 +185,12 @@ public final class OwnerDomainExecutor {
+         Objects.requireNonNull(owner, "owner");
+         Objects.requireNonNull(task, "task");
+         if (isOwner(owner)) {
++            recordInline(owner);
+             task.run();
+             return;
+         }
+ 
++        recordHandoff(owner);
+         switch (owner.domain()) {
+             case GLOBAL_CONTROL -> enqueueGlobal(owner, task);
+             case REGION -> enqueueRegion(owner, task);
+@@ -202,6 +211,7 @@ public final class OwnerDomainExecutor {
+         Objects.requireNonNull(owner, "owner");
+         Objects.requireNonNull(supplier, "supplier");
+         if (isOwner(owner)) {
++            recordInline(owner);
+             try {
+                 return CompletableFuture.completedFuture(supplier.get());
+             } catch (final Throwable throwable) {
+@@ -220,6 +230,20 @@ public final class OwnerDomainExecutor {
+         return future;
+     }
+ 
++    public static Diagnostics snapshotDiagnostics() {
++        final EnumMap<Domain, DomainDiagnostics> domains = new EnumMap<>(Domain.class);
++        for (final Domain domain : Domain.values()) {
++            domains.put(
++                domain,
++                new DomainDiagnostics(
++                    EXECUTE_INLINE_BY_DOMAIN[domain.ordinal()].get(),
++                    EXECUTE_HANDOFF_BY_DOMAIN[domain.ordinal()].get()
++                )
++            );
++        }
++        return new Diagnostics(EXECUTE_INLINE.get(), EXECUTE_HANDOFF.get(), Map.copyOf(domains));
++    }
++
+     private static void enqueueGlobal(final Owner owner, final Runnable task) {
+         final MinecraftServer server = owner.server();
+         if (server == null || server.hasStopped()) {
+@@ -263,6 +287,38 @@ public final class OwnerDomainExecutor {
+         };
+     }
+ 
++    private static AtomicLong[] createDomainCounters() {
++        final Domain[] domains = Domain.values();
++        final AtomicLong[] counters = new AtomicLong[domains.length];
++        for (int i = 0, len = domains.length; i < len; ++i) {
++            counters[i] = new AtomicLong();
++        }
++        return counters;
++    }
++
++    private static void recordInline(final Owner owner) {
++        EXECUTE_INLINE.incrementAndGet();
++        EXECUTE_INLINE_BY_DOMAIN[owner.domain().ordinal()].incrementAndGet();
++    }
++
++    private static void recordHandoff(final Owner owner) {
++        EXECUTE_HANDOFF.incrementAndGet();
++        EXECUTE_HANDOFF_BY_DOMAIN[owner.domain().ordinal()].incrementAndGet();
++    }
++
++    public record Diagnostics(
++        long inline,
++        long handoff,
++        Map<Domain, DomainDiagnostics> domains
++    ) {
++    }
++
++    public record DomainDiagnostics(
++        long inline,
++        long handoff
++    ) {
++    }
++
+     private record OwnerContext(Owner owner, @Nullable OwnerContext previous) {
+     }
+ 

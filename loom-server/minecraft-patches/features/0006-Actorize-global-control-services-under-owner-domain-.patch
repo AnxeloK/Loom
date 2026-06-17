@@ -1,0 +1,605 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 8 May 2026 17:38:02 +0000
+Subject: [PATCH] Actorize global-control services under owner-domain checks
+
+
+diff --git a/net/minecraft/server/ServerScoreboard.java b/net/minecraft/server/ServerScoreboard.java
+index 9bf09b888425e491072864265c8de3885154a0ba..187eeaad5c2bc84bba011df39d89578ad3cd0d0e 100644
+--- a/net/minecraft/server/ServerScoreboard.java
++++ b/net/minecraft/server/ServerScoreboard.java
+@@ -211,9 +211,17 @@ public class ServerScoreboard extends Scoreboard {
+     }
+ 
+     protected void setDirty() {
++        this.ensureOwner();
+         this.dirty = true;
+     }
+ 
++    private void ensureOwner() {
++        if (this.server == null) {
++            return;
++        }
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "scoreboard operation");
++    }
++
+     public void storeToSaveDataIfDirty(final ScoreboardSaveData saveData) {
+         if (this.dirty) {
+             this.dirty = false;
+diff --git a/net/minecraft/server/bossevents/CustomBossEvents.java b/net/minecraft/server/bossevents/CustomBossEvents.java
+index fb55ed68a1f8470b551030a27ca2656555c93d9e..36b514fe61b2f752fc5b9fe31aee940f7de4a643 100644
+--- a/net/minecraft/server/bossevents/CustomBossEvents.java
++++ b/net/minecraft/server/bossevents/CustomBossEvents.java
+@@ -7,6 +7,7 @@ import java.util.Map;
+ import java.util.UUID;
+ import net.minecraft.network.chat.Component;
+ import net.minecraft.resources.Identifier;
++import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerPlayer;
+ import net.minecraft.util.Mth;
+ import net.minecraft.util.RandomSource;
+@@ -46,10 +47,12 @@ public class CustomBossEvents extends SavedData {
+     }
+ 
+     public Collection<Identifier> getIds() {
++        ensureOwner();
+         return this.events.keySet();
+     }
+ 
+     public Collection<CustomBossEvent> getEvents() {
++        ensureOwner();
+         return this.events.values();
+     }
+ 
+@@ -64,4 +67,11 @@ public class CustomBossEvents extends SavedData {
+             event.onPlayerDisconnect(player);
+         }
+     }
++
++    private static void ensureOwner() {
++        final MinecraftServer server = MinecraftServer.getServer();
++        if (server != null) {
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(server, "custom boss events operation");
++        }
++    }
+ }
+diff --git a/net/minecraft/world/RandomSequences.java b/net/minecraft/world/RandomSequences.java
+index 08b59be32ff3fee1afd45f727e601fec3b4bfb0b..89bd1e93c0520cef6be09b1bfb5b136e3b7dd914 100644
+--- a/net/minecraft/world/RandomSequences.java
++++ b/net/minecraft/world/RandomSequences.java
+@@ -8,6 +8,7 @@ import java.util.Objects;
+ import java.util.Optional;
+ import java.util.function.BiConsumer;
+ import net.minecraft.resources.Identifier;
++import net.minecraft.server.MinecraftServer;
+ import net.minecraft.util.RandomSource;
+ import net.minecraft.util.datafix.DataFixTypes;
+ import net.minecraft.world.level.levelgen.PositionalRandomFactory;
+@@ -69,19 +70,29 @@ public class RandomSequences extends SavedData {
+     }
+ 
+     public int clear() {
++        ensureOwner();
+         int count = this.sequences.size();
+         this.sequences.clear();
+         return count;
+     }
+ 
+     public void reset(final Identifier id, final long worldSeed) {
++        ensureOwner();
+         this.sequences.put(id, this.createSequence(id, worldSeed));
+     }
+ 
+     public void reset(final Identifier id, final long worldSeed, final int salt, final boolean includeWorldSeed, final boolean includeSequenceId) {
++        ensureOwner();
+         this.sequences.put(id, this.createSequence(id, worldSeed, salt, includeWorldSeed, includeSequenceId));
+     }
+ 
++    private static void ensureOwner() {
++        final MinecraftServer server = MinecraftServer.getServer();
++        if (server != null) {
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(server, "random sequence operation");
++        }
++    }
++
+     private int salt() {
+         return this.salt;
+     }
+diff --git a/net/minecraft/world/clock/ServerClockManager.java b/net/minecraft/world/clock/ServerClockManager.java
+index 436ed3d95c21b8590664a125785545e0d07375fd..c6bdff28889a68dd96e7e810cf6b8276642a3e2c 100644
+--- a/net/minecraft/world/clock/ServerClockManager.java
++++ b/net/minecraft/world/clock/ServerClockManager.java
+@@ -30,7 +30,6 @@ public class ServerClockManager extends SavedData implements ClockManager {
+     );
+     private final PackedClockStates packedClockStates;
+     private MinecraftServer server;
+-    private @org.jspecify.annotations.Nullable ServerLevel level; // Paper - per-world time
+     private final Map<Holder<WorldClock>, ServerClockManager.ClockInstance> clocks = new HashMap<>();
+ 
+     private ServerClockManager(final PackedClockStates packedClockStates) {
+@@ -38,12 +37,6 @@ public class ServerClockManager extends SavedData implements ClockManager {
+     }
+ 
+     public void init(final MinecraftServer server) {
+-        // Paper start - per-world time
+-        this.init(server, null);
+-    }
+-    public void init(final MinecraftServer server, @org.jspecify.annotations.Nullable final ServerLevel level) {
+-        this.level = level;
+-        // Paper end - per-world time
+         this.server = server;
+         server.registryAccess()
+             .lookupOrThrow(Registries.WORLD_CLOCK)
+@@ -68,7 +61,8 @@ public class ServerClockManager extends SavedData implements ClockManager {
+     }
+ 
+     public void tick() {
+-        boolean advanceTime = this.advanceTime(); // Paper - per-world time
++        this.ensureGlobalOwner("tick");
++        boolean advanceTime = this.server.getGlobalGameRules().get(GameRules.ADVANCE_TIME);
+         if (advanceTime) {
+             this.clocks.values().forEach(ServerClockManager.ClockInstance::tick);
+             this.setDirty();
+@@ -126,20 +120,16 @@ public class ServerClockManager extends SavedData implements ClockManager {
+     }
+ 
+     private void modifyClock(final Holder<WorldClock> clock, final Consumer<? super ServerClockManager.ClockInstance> action) {
++        this.ensureGlobalOwner("modify");
+         ServerClockManager.ClockInstance instance = this.getInstance(clock);
+         action.accept(instance);
+-        // Paper start - per-world time
+-        this.broadcastUpdates(clock, instance);
++        Map<Holder<WorldClock>, ClockNetworkState> updates = Map.of(clock, instance.packNetworkState(this.server));
++        this.server.getPlayerList().broadcastAll(new ClientboundSetTimePacket(this.getGameTime(), updates)); // TODO 26.1 per-player time
+         this.setDirty();
+ 
+-        if (this.level != null) {
+-            this.level.environmentAttributes().invalidateTickCache();
+-        } else {
+         for (ServerLevel level : this.server.getAllLevels()) {
+             level.environmentAttributes().invalidateTickCache();
+         }
+-        }
+-        // Paper end - per-world time
+     }
+ 
+     @Override
+@@ -147,49 +137,41 @@ public class ServerClockManager extends SavedData implements ClockManager {
+         return this.getInstance(definition).totalTicks;
+     }
+ 
+-    public ClientboundSetTimePacket createFullSyncPacket() {
+-        // Paper start - per-player time
+-        return this.createFullSyncPacket(null);
++    // Paper start
++    // TODO: once upstream access allows it, expose the inner class and accessors directly.
++    public boolean isPaused(final Holder<WorldClock> definition) {
++        return this.getInstance(definition).paused;
+     }
+ 
+-    public ClientboundSetTimePacket createFullSyncPacket(final net.minecraft.server.level.ServerPlayer player) {
+-        final Map<Holder<WorldClock>, ClockNetworkState> updates = new HashMap<>(this.clocks.size());
+-        this.clocks.forEach((clock, instance) -> updates.put(clock, this.packNetworkState(clock, instance, player)));
+-        return new ClientboundSetTimePacket(this.getGameTime(), updates);
+-        // Paper end - per-player time
++    public float partialTick(final Holder<WorldClock> definition) {
++        return this.getInstance(definition).partialTick;
+     }
+ 
+-    private long getGameTime() {
+-        return this.level != null ? this.level.getGameTime() : this.server.overworld().getGameTime(); // Paper - per-world time
++    public float rate(final Holder<WorldClock> definition) {
++        return this.getInstance(definition).rate;
+     }
++    // Paper end
+ 
+-    // Paper start - per-world time; per-player time
+-    private void broadcastUpdates(final Holder<WorldClock> clock, final ServerClockManager.ClockInstance instance) {
+-        for (final net.minecraft.server.level.ServerPlayer player : this.level != null ? this.level.players() : this.server.getPlayerList().getPlayers()) {
+-            final var packet = new net.minecraft.network.protocol.game.ClientboundSetTimePacket(
+-                this.getGameTime(),
+-                java.util.Map.of(clock, this.packNetworkState(clock, instance, player))
+-            );
+-            player.connection.send(packet);
+-        }
++    public ClientboundSetTimePacket createFullSyncPacket() {
++        // TODO: restore per-player time sync for 26.1.
++        return new ClientboundSetTimePacket(this.getGameTime(), Util.mapValues(this.clocks, clock -> clock.packNetworkState(this.server)));
+     }
+ 
+-    private ClockNetworkState packNetworkState(
+-        final Holder<WorldClock> clock,
+-        final ServerClockManager.ClockInstance instance,
+-        final net.minecraft.server.level.ServerPlayer player
+-    ) {
+-        if (player != null && player.level().dimensionType().defaultClock().filter(clock::equals).isPresent()) {
+-            final boolean paused = !player.relativeTime || instance.paused || !this.advanceTime();
+-            return new ClockNetworkState(player.getPlayerTime(), instance.partialTick, paused ? 0.0F : instance.rate);
++    public void broadcastFullSyncPacket() {
++        this.ensureGlobalOwner("broadcast full sync packet");
++        this.server.getPlayerList().broadcastAll(this.createFullSyncPacket());
++    }
++
++    private void ensureGlobalOwner(final String operation) {
++        if (this.server == null) {
++            return;
+         }
+-        return instance.packNetworkState(this.advanceTime());
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "server clock operation: " + operation);
+     }
+ 
+-    private boolean advanceTime() {
+-        return this.level != null ? this.level.getGameRules().get(GameRules.ADVANCE_TIME) : this.server.getGlobalGameRules().get(GameRules.ADVANCE_TIME);
++    private long getGameTime() {
++        return this.server.overworld().getGameTime();
+     }
+-    // Paper end - per-world time; per-player time
+ 
+     public boolean isAtTimeMarker(final Holder<WorldClock> clock, final ResourceKey<ClockTimeMarker> timeMarkerId) {
+         ServerClockManager.ClockInstance clockInstance = this.getInstance(clock);
+@@ -228,7 +210,8 @@ public class ServerClockManager extends SavedData implements ClockManager {
+             return new ClockState(this.totalTicks, this.partialTick, this.rate, this.paused);
+         }
+ 
+-        public ClockNetworkState packNetworkState(final boolean advanceTime) { // Paper - per-world time
++        public ClockNetworkState packNetworkState(final MinecraftServer server) {
++            boolean advanceTime = server.getGlobalGameRules().get(GameRules.ADVANCE_TIME);
+             boolean paused = this.paused || !advanceTime;
+             return new ClockNetworkState(this.totalTicks, this.partialTick, paused ? 0.0F : this.rate);
+         }
+diff --git a/net/minecraft/world/entity/raid/Raid.java b/net/minecraft/world/entity/raid/Raid.java
+index 130cc6769c8a21ea0a0eabacacf77d9ef5e0dbb4..c1efcff5fbad3f9bacd8e2eab12dd6a3d3ef3393 100644
+--- a/net/minecraft/world/entity/raid/Raid.java
++++ b/net/minecraft/world/entity/raid/Raid.java
+@@ -224,6 +224,26 @@ public class Raid {
+         return this.groupsSpawned;
+     }
+ 
++    public long getTicksActive() {
++        return this.ticksActive;
++    }
++
++    public int getTotalGroups() {
++        return this.numGroups;
++    }
++
++    public int getStoredGroupCount() {
++        return this.groupsSpawned;
++    }
++
++    public void setStoredGroupCount(final int waves) {
++        this.groupsSpawned = waves;
++    }
++
++    public Set<UUID> getHeroesOfTheVillage() {
++        return this.heroesOfTheVillage;
++    }
++
+     private Predicate<ServerPlayer> validPlayer() {
+         return player -> {
+             BlockPos pos = player.blockPosition();
+diff --git a/net/minecraft/world/entity/raid/Raids.java b/net/minecraft/world/entity/raid/Raids.java
+index d5d3c86327d8feefb9fa2a3330bcb4dbdc629342..01daaf99766314545d199013c06af213582633d4 100644
+--- a/net/minecraft/world/entity/raid/Raids.java
++++ b/net/minecraft/world/entity/raid/Raids.java
+@@ -63,6 +63,13 @@ public class Raids extends SavedData {
+         return this.raidMap.get(raidId);
+     }
+ 
++    public List<Raid> getRaids() {
++        return this.raidMap.int2ObjectEntrySet().stream()
++            .sorted(java.util.Comparator.comparingInt(Entry::getIntKey))
++            .map(Entry::getValue)
++            .toList();
++    }
++
+     public OptionalInt getId(final Raid raid) {
+         for (Entry<Raid> entry : this.raidMap.int2ObjectEntrySet()) {
+             if (entry.getValue() == raid) {
+diff --git a/net/minecraft/world/item/crafting/RecipeManager.java b/net/minecraft/world/item/crafting/RecipeManager.java
+index 298908003d5422b8b58de631145fad381e8294c1..e55f857e42292be8cc7877f7357a4fd810ff3a96 100644
+--- a/net/minecraft/world/item/crafting/RecipeManager.java
++++ b/net/minecraft/world/item/crafting/RecipeManager.java
+@@ -89,7 +89,10 @@ public class RecipeManager extends SimplePreparableReloadListener<RecipeMap> imp
+ 
+     // CraftBukkit start
+     public void addRecipe(RecipeHolder<?> holder) {
+-        org.spigotmc.AsyncCatcher.catchOp("Recipe Add"); // Spigot
++        final net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
++        if (server != null) {
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(server, "recipe add");
++        }
+         this.recipes.addRecipe(holder);
+         this.finalizeRecipeLoading();
+     }
+diff --git a/net/minecraft/world/level/border/WorldBorder.java b/net/minecraft/world/level/border/WorldBorder.java
+index 01fa78999b0d206a74f64d46351547e673cb1eac..74721757bbcff2caa73a2fc509a15f0a8ee9a571 100644
+--- a/net/minecraft/world/level/border/WorldBorder.java
++++ b/net/minecraft/world/level/border/WorldBorder.java
+@@ -7,6 +7,7 @@ import java.util.List;
+ import java.util.Objects;
+ import net.minecraft.core.BlockPos;
+ import net.minecraft.resources.Identifier;
++import net.minecraft.server.threading.runtime.DomainClock;
+ import net.minecraft.util.Mth;
+ import net.minecraft.util.datafix.DataFixTypes;
+ import net.minecraft.world.entity.Entity;
+@@ -333,10 +334,11 @@ public class WorldBorder extends SavedData {
+ 
+     public void tick() {
+         // Paper start - Prevent ticking virtual world borders multiple times per server tick
+-        if (this.lastTick == net.minecraft.server.MinecraftServer.currentTick) {
++        final int currentTick = this.world == null ? DomainClock.currentServerTick() : DomainClock.currentWorldTick(this.world);
++        if (this.lastTick == currentTick) {
+             return;
+         }
+-        this.lastTick = net.minecraft.server.MinecraftServer.currentTick;
++        this.lastTick = currentTick;
+         // Paper end - Prevent ticking virtual world borders multiple times per server tick
+         this.extent = this.extent.update();
+     }
+diff --git a/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java b/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
+index 83a3ecf728be1129b07b5ab450861f2154cee92b..3d8a4126bc0c8d40fe09deddab8236e537631d28 100644
+--- a/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
++++ b/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
+@@ -7,6 +7,7 @@ import com.mojang.serialization.Codec;
+ import com.mojang.serialization.codecs.RecordCodecBuilder;
+ import io.netty.buffer.ByteBuf;
+ import java.nio.ByteBuffer;
++import java.util.Arrays;
+ import java.util.Collection;
+ import java.util.Iterator;
+ import java.util.List;
+@@ -69,6 +70,7 @@ public class MapItemSavedData extends SavedData {
+     public byte scale;
+     public byte[] colors = new byte[16384];
+     public boolean locked;
++    private volatile MapItemSavedData.@Nullable RenderSnapshot renderSnapshot; // Paper - owner-safe map renderer snapshots
+     private final org.bukkit.craftbukkit.map.RenderData vanillaRender = new org.bukkit.craftbukkit.map.RenderData(); // Paper - Use Vanilla map renderer when possible
+     public final List<MapItemSavedData.HoldingPlayer> carriedBy = Lists.newArrayList();
+     public final Map<Player, MapItemSavedData.HoldingPlayer> carriedByPlayers = Maps.newHashMap();
+@@ -160,6 +162,35 @@ public class MapItemSavedData extends SavedData {
+         this.vanillaRender.buffer = colors.array(); // Paper - Use Vanilla map renderer when possible
+     }
+ 
++    @Override
++    public void setDirty(final boolean dirty) {
++        if (dirty) {
++            this.renderSnapshot = null;
++        }
++        super.setDirty(dirty);
++    }
++
++    public void markRenderStateDirty() {
++        this.setDirty();
++    }
++
++    public MapItemSavedData.RenderSnapshot getRenderSnapshot() {
++        MapItemSavedData.RenderSnapshot snapshot = this.renderSnapshot;
++        if (snapshot == null) {
++            synchronized (this) {
++                snapshot = this.renderSnapshot;
++                if (snapshot == null) {
++                    snapshot = new MapItemSavedData.RenderSnapshot(
++                        Arrays.copyOf(this.colors, this.colors.length),
++                        java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(this.decorations))
++                    );
++                    this.renderSnapshot = snapshot;
++                }
++            }
++        }
++        return snapshot;
++    }
++
+     public static MapItemSavedData createFresh(
+         final double originX,
+         final double originY,
+@@ -662,6 +693,9 @@ public class MapItemSavedData extends SavedData {
+     private record MapDecorationLocation(Holder<MapDecorationType> type, byte x, byte y, byte rot) {
+     }
+ 
++    public record RenderSnapshot(byte[] colors, java.util.Map<String, MapDecoration> decorations) {
++    }
++
+     public record MapPatch(int startX, int startY, int width, int height, byte[] mapColors) {
+         public static final StreamCodec<ByteBuf, Optional<MapItemSavedData.MapPatch>> STREAM_CODEC = StreamCodec.of(
+             MapItemSavedData.MapPatch::write, MapItemSavedData.MapPatch::read
+@@ -768,4 +802,5 @@ public class MapItemSavedData extends SavedData {
+         };
+     }
+     // Paper end - store target world by uuid in addition to dimension
++
+ }
+diff --git a/net/minecraft/world/level/storage/CommandStorage.java b/net/minecraft/world/level/storage/CommandStorage.java
+index a1244f1b92ab4cf7f404d46adda241851ddc6e90..5041e5a5e73e566c967406e1b2ca9820e2f8578f 100644
+--- a/net/minecraft/world/level/storage/CommandStorage.java
++++ b/net/minecraft/world/level/storage/CommandStorage.java
+@@ -7,6 +7,7 @@ import java.util.Map;
+ import java.util.stream.Stream;
+ import net.minecraft.nbt.CompoundTag;
+ import net.minecraft.resources.Identifier;
++import net.minecraft.server.MinecraftServer;
+ import net.minecraft.util.ExtraCodecs;
+ import net.minecraft.util.datafix.DataFixTypes;
+ import net.minecraft.world.level.saveddata.SavedData;
+@@ -53,6 +54,7 @@ public class CommandStorage {
+     }
+ 
+     public void set(final Identifier id, final CompoundTag contents) {
++        ensureOwner();
+         this.getOrCreateContainer(id.getNamespace()).put(id.getPath(), contents);
+     }
+ 
+@@ -60,6 +62,13 @@ public class CommandStorage {
+         return this.namespaces.entrySet().stream().flatMap(e -> e.getValue().getKeys(e.getKey()));
+     }
+ 
++    private static void ensureOwner() {
++        final MinecraftServer server = MinecraftServer.getServer();
++        if (server != null) {
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(server, "command storage operation");
++        }
++    }
++
+     private static class Container extends SavedData {
+         public static final Codec<CommandStorage.Container> CODEC = RecordCodecBuilder.create(
+             i -> i.group(Codec.unboundedMap(ExtraCodecs.RESOURCE_PATH_CODEC, CompoundTag.CODEC).fieldOf("contents").forGetter(container -> container.storage))
+diff --git a/net/minecraft/world/level/storage/SavedDataStorage.java b/net/minecraft/world/level/storage/SavedDataStorage.java
+index 971c3f3311f5eb132817589ee5b7f65736c25b76..e305e81ad573c0547015a65387dd9b2cf11440c1 100644
+--- a/net/minecraft/world/level/storage/SavedDataStorage.java
++++ b/net/minecraft/world/level/storage/SavedDataStorage.java
+@@ -28,6 +28,7 @@ import net.minecraft.nbt.NbtUtils;
+ import net.minecraft.nbt.Tag;
+ import net.minecraft.resources.Identifier;
+ import net.minecraft.resources.RegistryOps;
++import net.minecraft.server.MinecraftServer;
+ import net.minecraft.util.FastBufferedInputStream;
+ import net.minecraft.util.FileUtil;
+ import net.minecraft.util.Mth;
+@@ -223,6 +224,7 @@ public class SavedDataStorage implements AutoCloseable {
+ 
+     @Override
+     public void close() {
++        ensureOwner();
+         if (this.closed) {
+             throw new IllegalStateException("Trying to close SavedDataStorage when it is already closed");
+         } else {
+@@ -230,4 +232,11 @@ public class SavedDataStorage implements AutoCloseable {
+             this.closed = true;
+         }
+     }
++
++    private static void ensureOwner() {
++        final MinecraftServer server = MinecraftServer.getServer();
++        if (server != null) {
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(server, "saved data storage operation");
++        }
++    }
+ }
+diff --git a/net/minecraft/world/scores/Scoreboard.java b/net/minecraft/world/scores/Scoreboard.java
+index 3013937e4b458cd46b6f3e72ce46692a43511423..34ad5e0784ee1d2ab1098c2248c7716e885aa790 100644
+--- a/net/minecraft/world/scores/Scoreboard.java
++++ b/net/minecraft/world/scores/Scoreboard.java
+@@ -49,6 +49,7 @@ public class Scoreboard {
+         final boolean displayAutoUpdate,
+         final @Nullable NumberFormat numberFormat
+     ) {
++        ScoreboardThreading.ensureThreadAccess("add objective");
+         if (this.objectivesByName.containsKey(name)) {
+             throw new IllegalArgumentException("An objective with the name '" + name + "' already exists!");
+         } else {
+@@ -73,6 +74,7 @@ public class Scoreboard {
+     }
+ 
+     public ScoreAccess getOrCreatePlayerScore(final ScoreHolder scoreHolder, final Objective objective, final boolean forceWritable) {
++        ScoreboardThreading.ensureThreadAccess("get or create player score");
+         final boolean canModify = forceWritable || !objective.getCriteria().isReadOnly();
+         PlayerScores playerScore = this.getOrCreatePlayerInfo(scoreHolder.getScoreboardName());
+         final MutableBoolean requiresSync = new MutableBoolean();
+@@ -191,6 +193,7 @@ public class Scoreboard {
+     }
+ 
+     public void resetAllPlayerScores(final ScoreHolder player) {
++        ScoreboardThreading.ensureThreadAccess("reset player scores");
+         PlayerScores removed = this.playerScores.remove(player.getScoreboardName());
+         if (removed != null) {
+             this.onPlayerRemoved(player);
+@@ -198,6 +201,7 @@ public class Scoreboard {
+     }
+ 
+     public void resetSinglePlayerScore(final ScoreHolder player, final Objective objective) {
++        ScoreboardThreading.ensureThreadAccess("reset single player score");
+         PlayerScores scores = this.playerScores.get(player.getScoreboardName());
+         if (scores != null) {
+             boolean hasRemoved = scores.remove(objective);
+@@ -218,6 +222,7 @@ public class Scoreboard {
+     }
+ 
+     public void removeObjective(final Objective objective) {
++        ScoreboardThreading.ensureThreadAccess("remove objective");
+         this.objectivesByName.remove(objective.getName());
+ 
+         for (DisplaySlot value : DisplaySlot.values()) {
+@@ -239,6 +244,7 @@ public class Scoreboard {
+     }
+ 
+     public void setDisplayObjective(final DisplaySlot slot, final @Nullable Objective objective) {
++        ScoreboardThreading.ensureThreadAccess("set display objective");
+         this.displayObjectives.put(slot, objective);
+     }
+ 
+@@ -251,6 +257,7 @@ public class Scoreboard {
+     }
+ 
+     public PlayerTeam addPlayerTeam(final String name) {
++        ScoreboardThreading.ensureThreadAccess("add team");
+         PlayerTeam team = this.getPlayerTeam(name);
+         if (team != null) {
+             LOGGER.warn("Requested creation of existing team '{}'", name);
+@@ -264,6 +271,7 @@ public class Scoreboard {
+     }
+ 
+     public void removePlayerTeam(final PlayerTeam team) {
++        ScoreboardThreading.ensureThreadAccess("remove team");
+         this.teamsByName.remove(team.getName());
+ 
+         for (String player : team.getPlayers()) {
+@@ -274,6 +282,7 @@ public class Scoreboard {
+     }
+ 
+     public boolean addPlayerToTeam(final String player, final PlayerTeam team) {
++        ScoreboardThreading.ensureThreadAccess("add player to team");
+         if (this.getPlayersTeam(player) != null) {
+             this.removePlayerFromTeam(player);
+         }
+@@ -283,6 +292,7 @@ public class Scoreboard {
+     }
+ 
+     public boolean removePlayerFromTeam(final String player) {
++        ScoreboardThreading.ensureThreadAccess("remove player from team");
+         PlayerTeam team = this.getPlayersTeam(player);
+         if (team != null) {
+             this.removePlayerFromTeam(player, team);
+@@ -293,6 +303,7 @@ public class Scoreboard {
+     }
+ 
+     public void removePlayerFromTeam(final String player, final PlayerTeam team) {
++        ScoreboardThreading.ensureThreadAccess("remove player from team");
+         if (this.getPlayersTeam(player) != team) {
+             throw new IllegalStateException("Player is either on another team or not on any team. Cannot remove from team '" + team.getName() + "'.");
+         } else {
+@@ -344,6 +355,7 @@ public class Scoreboard {
+     }
+ 
+     public void entityRemoved(final Entity entity) {
++        ScoreboardThreading.ensureThreadAccess("entity removed");
+         if (!(entity instanceof Player) && !entity.isAlive()) {
+             this.resetAllPlayerScores(entity);
+             this.removePlayerFromTeam(entity.getScoreboardName());
+diff --git a/net/minecraft/world/scores/ScoreboardThreading.java b/net/minecraft/world/scores/ScoreboardThreading.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..31bae024d0ece3175edd6e0072d9afe79929b937
+--- /dev/null
++++ b/net/minecraft/world/scores/ScoreboardThreading.java
+@@ -0,0 +1,21 @@
++package net.minecraft.world.scores;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import net.minecraft.server.MinecraftServer;
++
++final class ScoreboardThreading {
++
++    private ScoreboardThreading() {
++    }
++
++    static void ensureThreadAccess(final String reason) {
++        final MinecraftServer server = MinecraftServer.getServer();
++        if (server == null) {
++            return;
++        }
++        if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(server) || TickThread.isShutdownThread()) {
++            return;
++        }
++        throw new IllegalStateException("Scoreboard owner-domain violation: " + reason);
++    }
++}

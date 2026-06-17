@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sun, 31 May 2026 13:58:45 +0000
+Subject: [PATCH] Enforce owner-domain context checks in AsyncCatcher overload
+
+
+diff --git a/src/main/java/org/spigotmc/AsyncCatcher.java b/src/main/java/org/spigotmc/AsyncCatcher.java
+index 832fe50a45be55712e2ee92cd54ec927ac421a85..9dc747dd256ae69825fb77c162ef83524b824054 100644
+--- a/src/main/java/org/spigotmc/AsyncCatcher.java
++++ b/src/main/java/org/spigotmc/AsyncCatcher.java
+@@ -1,6 +1,12 @@
+ package org.spigotmc;
+ 
++import net.minecraft.core.BlockPos;
+ import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.entity.Entity;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
+ 
+ public class AsyncCatcher {
+ 
+@@ -13,5 +19,80 @@ public class AsyncCatcher {
+ 
+     public static void catchOp(final String reason, final Object... context) {
+         catchOp(reason);
++        if (context == null || context.length == 0 || isOwnerForContext(context)) {
++            return;
++        }
++        final String message = "Owner-domain violation for " + reason + ", context=" + describeContext(context);
++        MinecraftServer.LOGGER.error(message, new Throwable());
++        throw new IllegalStateException("Asynchronous " + reason + " (owner mismatch)!");
++    }
++
++    private static boolean isOwnerForContext(final Object... context) {
++        final MinecraftServer server = MinecraftServer.getServer();
++        if (server != null && OwnerDomainExecutor.isGlobalOwner(server)) {
++            return true;
++        }
++
++        for (final Object entry : context) {
++            if (entry instanceof Entity entity && OwnerDomainExecutor.isOwner(OwnerDomainExecutor.entity(entity, "async-catcher-entity"))) {
++                return true;
++            }
++        }
++
++        ServerLevel level = null;
++        BlockPos blockPos = null;
++        ChunkPos chunkPos = null;
++        Integer chunkX = null;
++        Integer chunkZ = null;
++
++        for (final Object entry : context) {
++            if (entry instanceof ServerLevel serverLevel) {
++                level = serverLevel;
++            } else if (entry instanceof Level anyLevel && anyLevel instanceof ServerLevel serverLevel) {
++                level = serverLevel;
++            } else if (entry instanceof BlockPos pos) {
++                blockPos = pos;
++            } else if (entry instanceof ChunkPos chunk) {
++                chunkPos = chunk;
++            } else if (entry instanceof Integer integer) {
++                if (chunkX == null) {
++                    chunkX = integer;
++                } else if (chunkZ == null) {
++                    chunkZ = integer;
++                }
++            }
++        }
++
++        if (level == null) {
++            return false;
++        }
++        if (chunkPos != null) {
++            return OwnerDomainExecutor.isOwner(OwnerDomainExecutor.region(level, chunkPos.x(), chunkPos.z(), "async-catcher-chunk-pos"));
++        }
++        if (blockPos != null) {
++            return OwnerDomainExecutor.isOwner(OwnerDomainExecutor.region(level, blockPos.getX() >> 4, blockPos.getZ() >> 4, "async-catcher-block-pos"));
++        }
++        if (chunkX != null && chunkZ != null) {
++            return OwnerDomainExecutor.isOwner(OwnerDomainExecutor.region(level, chunkX, chunkZ, "async-catcher-chunk-coordinates"));
++        }
++
++        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.currentOwner();
++        return owner != null && owner.domain() == OwnerDomainExecutor.Domain.REGION && owner.level() == level;
++    }
++
++    private static String describeContext(final Object... context) {
++        final StringBuilder builder = new StringBuilder("[");
++        for (int i = 0; i < context.length; ++i) {
++            if (i > 0) {
++                builder.append(", ");
++            }
++            final Object value = context[i];
++            if (value == null) {
++                builder.append("null");
++                continue;
++            }
++            builder.append(value.getClass().getSimpleName()).append(":").append(value);
++        }
++        return builder.append(']').toString();
+     }
+ }
