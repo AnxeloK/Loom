@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 17 Jun 2026 20:39:36 +0000
+Subject: [PATCH] Route scoreboard entity-removal cleanup to the global owner
+
+
+diff --git a/net/minecraft/world/scores/Scoreboard.java b/net/minecraft/world/scores/Scoreboard.java
+index 34ad5e0784ee1d2ab1098c2248c7716e885aa790..fe1984ac2372ff8f207c31c3e322a7fd0913d9f7 100644
+--- a/net/minecraft/world/scores/Scoreboard.java
++++ b/net/minecraft/world/scores/Scoreboard.java
+@@ -355,6 +355,23 @@ public class Scoreboard {
+     }
+ 
+     public void entityRemoved(final Entity entity) {
++        // Loom - the scoreboard is global (server-wide) state. When an entity is removed off the global
++        // owner thread - e.g. during parallel world ticking, where the work runs on a region thread - route
++        // the cleanup to the global owner so scoreboard mutation stays serialized on the domain that owns it.
++        // It is slightly deferred but never racy; under serial ticking this runs inline as before.
++        final net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
++        if (server != null
++            && !net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(server)
++            && !ca.spottedleaf.moonrise.common.util.TickThread.isShutdownThread()) {
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(server, "scoreboard entity removed"),
++                () -> this.entityRemovedOnOwner(entity));
++            return;
++        }
++        this.entityRemovedOnOwner(entity);
++    }
++
++    private void entityRemovedOnOwner(final Entity entity) {
+         ScoreboardThreading.ensureThreadAccess("entity removed");
+         if (!(entity instanceof Player) && !entity.isAlive()) {
+             this.resetAllPlayerScores(entity);

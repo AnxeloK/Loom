@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 17 Jun 2026 20:27:18 +0000
+Subject: [PATCH] Accept region owners for entity operations during parallel
+ world ticks
+
+
+diff --git a/src/main/java/org/spigotmc/AsyncCatcher.java b/src/main/java/org/spigotmc/AsyncCatcher.java
+index 142cdd3d3884e3d243a9b09aee0db44d5ad8c10f..00e829286d7d36d6130ad1a5ea4c1992a79f13c9 100644
+--- a/src/main/java/org/spigotmc/AsyncCatcher.java
++++ b/src/main/java/org/spigotmc/AsyncCatcher.java
+@@ -29,12 +29,24 @@ public class AsyncCatcher {
+ 
+     public static void catchOp(final String reason, final Entity entity) {
+         catchOp(reason);
+-        if (isGlobalOwner() || OwnerDomainExecutor.isEntityOwner(entity)) {
++        if (isGlobalOwner() || OwnerDomainExecutor.isEntityOwner(entity) || isRegionOwnerForEntity(entity)) {
+             return;
+         }
+         failOwnerMismatch(reason, entity);
+     }
+ 
++    // Loom - a tick thread that owns the region an entity currently occupies may operate on that entity.
++    // Players carry a PLAYER owner domain distinct from the region they stand in, so during a (possibly
++    // parallel) world tick the region owner must still be accepted for entity/tracker work on entities in
++    // it. Under serial ticking the full-level lease already covers the chunk, so this changes nothing.
++    private static boolean isRegionOwnerForEntity(final Entity entity) {
++        if (!(entity.level() instanceof final ServerLevel serverLevel)) {
++            return false;
++        }
++        final BlockPos pos = entity.blockPosition();
++        return OwnerDomainExecutor.isRegionOwner(serverLevel, pos.getX() >> 4, pos.getZ() >> 4);
++    }
++
+     public static void catchOp(final String reason, final Level level) {
+         catchOp(reason);
+         final ServerLevel serverLevel = asServerLevel(level);

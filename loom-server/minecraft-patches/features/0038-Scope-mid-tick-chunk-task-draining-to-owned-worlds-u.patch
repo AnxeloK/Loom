@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 17 Jun 2026 20:50:52 +0000
+Subject: [PATCH] Scope mid-tick chunk task draining to owned worlds under
+ parallel ticking
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index c5c331ebec003c980b7224600fa54331fd5be332..8b9b0ad7a8d3ec895f9368a16271679d4809c8a6 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -480,6 +480,13 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         // if we execute too many tasks, that's fine - we have logic to correctly handle overuse of allocated time.
+         boolean executed = false;
+         for (final ServerLevel world : this.getAllLevels()) {
++            // Loom - under parallel world ticking, only drain mid-tick chunk tasks for worlds this thread
++            // owns; polling another world's chunk source would claim its full-level lease and conflict with
++            // that world's own tick thread. Under serial ticking this guard is disabled and all worlds drain.
++            if (net.minecraft.server.threading.TickRegions.PARALLEL_WORLDS_ENABLED
++                && !net.minecraft.server.threading.runtime.OwnerDomainExecutor.isCurrentRegionOwnerForLevel(world)) {
++                continue;
++            }
+             long currTime = System.nanoTime();
+             if (currTime - ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)world).moonrise$getLastMidTickFailure() <= TASK_EXECUTION_FAILURE_BACKOFF) {
+                 continue;
