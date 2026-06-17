@@ -45,6 +45,28 @@ java -Xms4G -Xmx4G \
 
 Scale `-Xms`/`-Xmx` together and adjust to your hardware.
 
+## Experimental: parallel world ticking
+
+Loom can tick independent worlds concurrently instead of one after another. Start
+the server with:
+
+```bash
+-Dloom.parallelWorlds=true
+```
+
+When enabled, the overworld, nether, end, and any additional worlds each tick on
+their own thread (drawn from the region scheduler pool), so a server running more
+than one busy world uses otherwise idle cores. Each world still ticks on a single
+thread internally, so ordinary plugins keep normal main-thread behaviour *within* a
+world; only interactions that cross between worlds are affected. While enabled,
+tick-thread ownership checks become world-aware so accidental cross-world access is
+detected rather than passing silently.
+
+This is **off by default** and **experimental**. Cross-world interactions (for
+example travelling through a nether portal while both worlds are mid-tick) are not
+yet fully hardened, so validate it on a copy of your world before relying on it. A
+single-world server gains nothing from it.
+
 ## Tuning properties
 
 All of the following are JVM system properties (`-Dname=value`); the defaults

@@ -1,0 +1,120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 17 Jun 2026 17:56:06 +0000
+Subject: [PATCH] Tick independent worlds in parallel behind opt-in flag
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index a7aa7bd36b2fc47242fe9a3d6b3d6a5b3cead034..c5c331ebec003c980b7224600fa54331fd5be332 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -2031,6 +2031,37 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         this.updateEffectiveRespawnData();
+ 
+         this.isIteratingOverLevels = true; // Paper - Throw exception on world create while being ticked
++        if (net.minecraft.server.threading.TickRegions.PARALLEL_WORLDS_ENABLED) {
++            // Loom start - experimental parallel world ticking
++            // The per-level latches below read shared, global handler lists, so they are set serially on the
++            // main thread before any world ticks. Per-world profiler scoping is skipped because the profiler
++            // is main-thread only; each world's own tick still records into its thread-local profiler.
++            final java.util.List<ServerLevel> parallelLevels = new java.util.ArrayList<>();
++            for (ServerLevel level : this.getAllLevels()) {
++                level.hasPhysicsEvent = org.bukkit.event.block.BlockPhysicsEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - BlockPhysicsEvent
++                level.hasEntityMoveEvent = io.papermc.paper.event.entity.EntityMoveEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - Add EntityMoveEvent
++                level.updateLagCompensationTick(); // Paper - lag compensation
++                net.minecraft.world.level.block.entity.HopperBlockEntity.skipHopperEvents = level.paperConfig().hopper.disableMoveEvent || org.bukkit.event.inventory.InventoryMoveItemEvent.getHandlerList().getRegisteredListeners().length == 0; // Paper - Perf: Optimize Hoppers
++                parallelLevels.add(level);
++            }
++            net.minecraft.server.threading.TickRegions.tickWorldsInParallel(parallelLevels, level -> {
++                net.minecraft.server.threading.TickRegions.tickWorld(level);
++                final net.minecraft.server.threading.TickRegions.RegionContext tickRegionContext =
++                    net.minecraft.server.threading.TickRegions.pushLevelContext(level);
++                try {
++                    level.tick(haveTime);
++                } catch (Throwable throwable) {
++                    CrashReport report = CrashReport.forThrowable(throwable, "Exception ticking world");
++                    level.fillReportDetails(report);
++                    throw new ReportedException(report);
++                } finally {
++                    net.minecraft.server.threading.TickRegions.popContext(tickRegionContext);
++                }
++                net.minecraft.server.threading.TickRegions.postWorldTick(level);
++                level.explosionDensityCache.clear(); // Paper - Optimize explosions
++            });
++            // Loom end
++        } else {
+         for (ServerLevel level : this.getAllLevels()) {
+             level.hasPhysicsEvent = org.bukkit.event.block.BlockPhysicsEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - BlockPhysicsEvent
+             level.hasEntityMoveEvent = io.papermc.paper.event.entity.EntityMoveEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - Add EntityMoveEvent
+@@ -2057,6 +2088,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             profiler.pop();
+             level.explosionDensityCache.clear(); // Paper - Optimize explosions
+         }
++        }
+         this.isIteratingOverLevels = false; // Paper - Throw exception on world create while being ticked
+ 
+         profiler.popPush("connection");
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index 2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791..3e6f5f09c05d29035bc73515d9d01c25a06c978b 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -110,6 +110,10 @@ public class TickRegions {
+         1,
+         Integer.getInteger("paper.threadedregions.parallelSimulation.targetTasksPerWorker", 4)
+     );
++    // Loom - experimental, opt-in parallel world ticking. Default off preserves the vanilla serial level loop.
++    // When enabled, independent worlds (overworld/nether/end and any others) tick concurrently on the region
++    // pool, each on a single thread holding its own full-level lease. Each world stays internally serial.
++    public static final boolean PARALLEL_WORLDS_ENABLED = Boolean.getBoolean("loom.parallelWorlds");
+     private static final int DIAGNOSTIC_EVENT_LIMIT = Math.max(
+         64,
+         Integer.getInteger("paper.threadedregions.diagnostics.eventLimit", 512)
+@@ -1022,6 +1026,48 @@ public class TickRegions {
+         stateFor(world).drainMailbox();
+     }
+ 
++    // Loom - experimental parallel world ticking. Ticks each world on the region pool (one task per
++    // world, each holding its own full-level lease) and waits for all of them. A single world runs on
++    // the calling thread. The first failure is rethrown, mirroring the serial loop's crash behaviour.
++    public static void tickWorldsInParallel(final List<ServerLevel> worlds, final java.util.function.Consumer<ServerLevel> worldTick) {
++        if (worlds.size() <= 1) {
++            for (final ServerLevel world : worlds) {
++                worldTick.accept(world);
++            }
++            return;
++        }
++        final List<CompletableFuture<Void>> futures = new ArrayList<>(worlds.size());
++        for (final ServerLevel world : worlds) {
++            futures.add(CompletableFuture.runAsync(() -> worldTick.accept(world), REGION_SCHEDULER_EXECUTOR));
++        }
++        RuntimeException firstFailure = null;
++        Error firstError = null;
++        for (int i = 0, len = futures.size(); i < len; ++i) {
++            try {
++                futures.get(i).join();
++            } catch (final java.util.concurrent.CompletionException ex) {
++                final Throwable cause = unwrapParallelStageFailure(ex);
++                if (cause instanceof final Error error) {
++                    if (firstError == null) {
++                        firstError = error;
++                    }
++                } else if (cause instanceof final RuntimeException runtimeException) {
++                    if (firstFailure == null) {
++                        firstFailure = runtimeException;
++                    }
++                } else if (firstFailure == null) {
++                    firstFailure = new RuntimeException("Parallel world tick failed", cause);
++                }
++            }
++        }
++        if (firstError != null) {
++            throw firstError;
++        }
++        if (firstFailure != null) {
++            throw firstFailure;
++        }
++    }
++
+     public static void cancelTasks(final Plugin plugin) {
+         for (final WorldSchedulerState state : SCHEDULER_STATES.values()) {
+             state.cancelTasks(plugin);

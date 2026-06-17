@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 17 Jun 2026 17:53:48 +0000
+Subject: [PATCH] Make tick-thread ownership checks region-aware for parallel
+ execution
+
+
+diff --git a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+index 071e2191bab8fd9de1fc4fb5fa2472f8315adaff..c7fd1508a886192a7a3529f64f52c60bbf8fd39b 100644
+--- a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
++++ b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+@@ -135,51 +135,77 @@ public class TickThread extends Thread {
+         return false;
+     }
+ 
++    // Loom start - region-aware tick-thread ownership checks
++    // With parallel execution disabled (the default) these behave exactly as before: any tick thread is
++    // valid for any world. With it enabled, a thread is only valid for a world it actually owns (or when
++    // acting as the global owner), so cross-world access off the owning thread is detected instead of
++    // silently passing. World granularity is sufficient while each world ticks on a single thread.
++    private static final boolean PARALLEL_WORLDS = Boolean.getBoolean("loom.parallelWorlds");
++
++    private static boolean ownsLevel(final Level world) {
++        if (!(world instanceof final net.minecraft.server.level.ServerLevel level)) {
++            return true;
++        }
++        return net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(level.getServer())
++            || net.minecraft.server.threading.runtime.OwnerDomainExecutor.isCurrentRegionOwnerForLevel(level);
++    }
++
++    private static boolean isTickThreadForLevel(final Level world) {
++        if (!PARALLEL_WORLDS) {
++            return isTickThread();
++        }
++        return isTickThread() && ownsLevel(world);
++    }
++
+     public static boolean isTickThreadFor(final Level world, final BlockPos pos) {
+-        return isTickThread();
++        return isTickThreadForLevel(world);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world) {
+-        return isTickThread();
++        return isTickThreadForLevel(world);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final BlockPos pos, final int blockRadius) {
+-        return isTickThread();
++        return isTickThreadForLevel(world);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final ChunkPos pos) {
+-        return isTickThread();
++        return isTickThreadForLevel(world);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final Vec3 pos) {
+-        return isTickThread();
++        return isTickThreadForLevel(world);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final int chunkX, final int chunkZ) {
+-        return isTickThread();
++        return isTickThreadForLevel(world);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final AABB aabb) {
+-        return isTickThread();
++        return isTickThreadForLevel(world);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final double blockX, final double blockZ) {
+-        return isTickThread();
++        return isTickThreadForLevel(world);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final Vec3 position, final Vec3 deltaMovement, final int buffer) {
+-        return isTickThread();
++        return isTickThreadForLevel(world);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final int fromChunkX, final int fromChunkZ, final int toChunkX, final int toChunkZ) {
+-        return isTickThread();
++        return isTickThreadForLevel(world);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final int chunkX, final int chunkZ, final int radius) {
+-        return isTickThread();
++        return isTickThreadForLevel(world);
+     }
+ 
+     public static boolean isTickThreadFor(final Entity entity) {
+-        return isTickThread();
++        if (!PARALLEL_WORLDS) {
++            return isTickThread();
++        }
++        return isTickThread() && ownsLevel(entity.level());
+     }
++    // Loom end
+ }
