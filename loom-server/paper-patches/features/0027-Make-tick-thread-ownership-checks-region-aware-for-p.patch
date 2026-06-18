@@ -1,24 +1,27 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: anxelok <anxelok@localhost>
-Date: Wed, 17 Jun 2026 17:53:48 +0000
+Date: Wed, 17 Jun 2026 23:36:52 +0000
 Subject: [PATCH] Make tick-thread ownership checks region-aware for parallel
  execution
 
 
 diff --git a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
-index 071e2191bab8fd9de1fc4fb5fa2472f8315adaff..c7fd1508a886192a7a3529f64f52c60bbf8fd39b 100644
+index 071e2191bab8fd9de1fc4fb5fa2472f8315adaff..50b7f94d7e172c825d69b2e810df4b5b9aecc5c9 100644
 --- a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
 +++ b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
-@@ -135,51 +135,77 @@ public class TickThread extends Thread {
+@@ -135,51 +135,98 @@ public class TickThread extends Thread {
          return false;
      }
  
 +    // Loom start - region-aware tick-thread ownership checks
 +    // With parallel execution disabled (the default) these behave exactly as before: any tick thread is
-+    // valid for any world. With it enabled, a thread is only valid for a world it actually owns (or when
-+    // acting as the global owner), so cross-world access off the owning thread is detected instead of
-+    // silently passing. World granularity is sufficient while each world ticks on a single thread.
++    // valid for any world. With parallel WORLD or parallel CHUNK ticking enabled, a thread is only valid
++    // for the world/region it actually owns, so cross-world or cross-region access off the owning thread is
++    // detected as a loud throw instead of silently corrupting another region's state. The position-aware
++    // overloads check CHUNK ownership (region granularity); the level-only overload checks the world.
 +    private static final boolean PARALLEL_WORLDS = Boolean.getBoolean("loom.parallelWorlds");
++    private static final boolean PARALLEL_CHUNK_TICK = Boolean.getBoolean("loom.parallelChunkTick");
++    private static final boolean PARALLEL_EXECUTION = PARALLEL_WORLDS || PARALLEL_CHUNK_TICK;
 +
 +    private static boolean ownsLevel(final Level world) {
 +        if (!(world instanceof final net.minecraft.server.level.ServerLevel level)) {
@@ -28,16 +31,31 @@ index 071e2191bab8fd9de1fc4fb5fa2472f8315adaff..c7fd1508a886192a7a3529f64f52c60b
 +            || net.minecraft.server.threading.runtime.OwnerDomainExecutor.isCurrentRegionOwnerForLevel(level);
 +    }
 +
++    private static boolean ownsChunk(final Level world, final int chunkX, final int chunkZ) {
++        if (!(world instanceof final net.minecraft.server.level.ServerLevel level)) {
++            return true;
++        }
++        return net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(level.getServer())
++            || net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, chunkX, chunkZ);
++    }
++
 +    private static boolean isTickThreadForLevel(final Level world) {
-+        if (!PARALLEL_WORLDS) {
++        if (!PARALLEL_EXECUTION) {
 +            return isTickThread();
 +        }
 +        return isTickThread() && ownsLevel(world);
 +    }
 +
++    private static boolean isTickThreadForChunk(final Level world, final int chunkX, final int chunkZ) {
++        if (!PARALLEL_EXECUTION) {
++            return isTickThread();
++        }
++        return isTickThread() && ownsChunk(world, chunkX, chunkZ);
++    }
++
      public static boolean isTickThreadFor(final Level world, final BlockPos pos) {
 -        return isTickThread();
-+        return isTickThreadForLevel(world);
++        return isTickThreadForChunk(world, pos.getX() >> 4, pos.getZ() >> 4);
      }
  
      public static boolean isTickThreadFor(final Level world) {
@@ -47,55 +65,58 @@ index 071e2191bab8fd9de1fc4fb5fa2472f8315adaff..c7fd1508a886192a7a3529f64f52c60b
  
      public static boolean isTickThreadFor(final Level world, final BlockPos pos, final int blockRadius) {
 -        return isTickThread();
-+        return isTickThreadForLevel(world);
++        return isTickThreadForChunk(world, pos.getX() >> 4, pos.getZ() >> 4);
      }
  
      public static boolean isTickThreadFor(final Level world, final ChunkPos pos) {
 -        return isTickThread();
-+        return isTickThreadForLevel(world);
++        return isTickThreadForChunk(world, pos.x(), pos.z());
      }
  
      public static boolean isTickThreadFor(final Level world, final Vec3 pos) {
 -        return isTickThread();
-+        return isTickThreadForLevel(world);
++        return isTickThreadForChunk(world, net.minecraft.util.Mth.floor(pos.x) >> 4, net.minecraft.util.Mth.floor(pos.z) >> 4);
      }
  
      public static boolean isTickThreadFor(final Level world, final int chunkX, final int chunkZ) {
 -        return isTickThread();
-+        return isTickThreadForLevel(world);
++        return isTickThreadForChunk(world, chunkX, chunkZ);
      }
  
      public static boolean isTickThreadFor(final Level world, final AABB aabb) {
 -        return isTickThread();
-+        return isTickThreadForLevel(world);
++        return isTickThreadForChunk(world, net.minecraft.util.Mth.floor((aabb.minX + aabb.maxX) * 0.5D) >> 4, net.minecraft.util.Mth.floor((aabb.minZ + aabb.maxZ) * 0.5D) >> 4);
      }
  
      public static boolean isTickThreadFor(final Level world, final double blockX, final double blockZ) {
 -        return isTickThread();
-+        return isTickThreadForLevel(world);
++        return isTickThreadForChunk(world, net.minecraft.util.Mth.floor(blockX) >> 4, net.minecraft.util.Mth.floor(blockZ) >> 4);
      }
  
      public static boolean isTickThreadFor(final Level world, final Vec3 position, final Vec3 deltaMovement, final int buffer) {
 -        return isTickThread();
-+        return isTickThreadForLevel(world);
++        return isTickThreadForChunk(world, net.minecraft.util.Mth.floor(position.x) >> 4, net.minecraft.util.Mth.floor(position.z) >> 4);
      }
  
      public static boolean isTickThreadFor(final Level world, final int fromChunkX, final int fromChunkZ, final int toChunkX, final int toChunkZ) {
 -        return isTickThread();
-+        return isTickThreadForLevel(world);
++        return isTickThreadForChunk(world, fromChunkX, fromChunkZ);
      }
  
      public static boolean isTickThreadFor(final Level world, final int chunkX, final int chunkZ, final int radius) {
 -        return isTickThread();
-+        return isTickThreadForLevel(world);
++        return isTickThreadForChunk(world, chunkX, chunkZ);
      }
  
      public static boolean isTickThreadFor(final Entity entity) {
 -        return isTickThread();
-+        if (!PARALLEL_WORLDS) {
++        if (!PARALLEL_EXECUTION) {
 +            return isTickThread();
 +        }
-+        return isTickThread() && ownsLevel(entity.level());
++        if (!isTickThread()) {
++            return false;
++        }
++        return ownsChunk(entity.level(), net.minecraft.util.Mth.floor(entity.getX()) >> 4, net.minecraft.util.Mth.floor(entity.getZ()) >> 4);
      }
 +    // Loom end
  }

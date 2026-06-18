@@ -1,0 +1,244 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 17 Jun 2026 23:59:38 +0000
+Subject: [PATCH] Stage writes, scheduled ticks and spawns; dispatch one task
+ per region during parallel chunk ticking
+
+
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index d7aed66d6d14a1468f14bd66394889f7cbd2140f..e00c6e45fcd6b695fa84c204634bd0e9bc59c6cc 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -176,15 +176,46 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         java.util.Objects.checkFromToIndex(0, size, raw.length);
+         // Loom start - experimental intra-world parallel chunk ticking (Stage 3, opt-in)
+         if (net.minecraft.server.threading.TickRegions.PARALLEL_CHUNK_TICK_ENABLED && size > 1) {
+-            final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(size);
++            // Group the entity-ticking chunks by region and dispatch ONE task per region (each ticking all of
++            // its chunks under a single staging buffer), instead of one task per chunk. This keeps the per-tick
++            // dispatch/staging overhead proportional to the (small) number of regions, not the chunk count.
++            final int shift = net.minecraft.server.threading.TickRegions.getRegionChunkShift();
++            final it.unimi.dsi.fastutil.longs.Long2ObjectMap<java.util.List<net.minecraft.world.level.chunk.LevelChunk>> byRegion =
++                new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
+             for (int i = 0; i < size; ++i) {
+                 final net.minecraft.world.level.chunk.LevelChunk chunk = raw[i];
+                 final net.minecraft.world.level.ChunkPos pos = chunk.getPos();
+-                tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(pos.x(), pos.z(), () -> world.tickChunk(chunk, randomTickSpeed)));
++                final long key = (((long) (pos.x() >> shift)) << 32) | ((pos.z() >> shift) & 0xFFFFFFFFL);
++                byRegion.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(chunk);
++            }
++            final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(byRegion.size());
++            for (final java.util.List<net.minecraft.world.level.chunk.LevelChunk> regionChunks : byRegion.values()) {
++                int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
++                for (int j = 0, n = regionChunks.size(); j < n; ++j) {
++                    final net.minecraft.world.level.ChunkPos p = regionChunks.get(j).getPos();
++                    if (p.x() < minX) { minX = p.x(); }
++                    if (p.x() > maxX) { maxX = p.x(); }
++                    if (p.z() < minZ) { minZ = p.z(); }
++                    if (p.z() > maxZ) { maxZ = p.z(); }
++                }
++                final int fMinX = minX, fMinZ = minZ, fMaxX = maxX, fMaxZ = maxZ;
++                tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(fMinX, fMinZ, fMinX, fMinZ, fMaxX, fMaxZ, () -> {
++                    // Buffer this region's side effects on the worker; they are replayed serially below.
++                    net.minecraft.server.threading.RegionTickStaging.begin();
++                    try {
++                        for (int j = 0, n = regionChunks.size(); j < n; ++j) {
++                            world.tickChunk(regionChunks.get(j), randomTickSpeed);
++                        }
++                    } finally {
++                        net.minecraft.server.threading.RegionTickStaging.end();
++                    }
++                }));
+             }
+             // The engine suspends this world's full-level lease, buckets the tasks by region (with the
+             // non-adjacency buffer), and ticks non-adjacent regions concurrently, then restores the lease.
+             net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(world, tasks, "chunkTick");
++            // Apply all staged side effects serially on this (the owning) thread, with the full-level lease restored.
++            net.minecraft.server.threading.RegionTickStaging.applyAndClear();
+         } else {
+         for (int i = 0; i < size; ++i) {
+             world.tickChunk(raw[i], randomTickSpeed);
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 339f68767697304e41f7534e19657927bab729a1..6df1134c67ef03a03f05940ad428a822ba4f0ae3 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1624,6 +1624,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+ 
+     @Override
+     public boolean addFreshEntity(final Entity entity, final org.bukkit.event.entity.CreatureSpawnEvent.@Nullable SpawnReason reason) {
++        // Loom - during parallel chunk ticking, buffer the spawn and add (link + track) it serially after the
++        // parallel phase, so an entity is never left half-linked by an off-thread add.
++        if (net.minecraft.server.threading.RegionTickStaging.stageSpawn(this, entity, reason)) {
++            return true;
++        }
+         return this.addEntity(entity, reason);
+         // CraftBukkit end
+     }
+diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..e8f595529c212b9c31f3f21b46078098898fc158
+--- /dev/null
++++ b/net/minecraft/server/threading/RegionTickStaging.java
+@@ -0,0 +1,130 @@
++package net.minecraft.server.threading;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Set;
++import java.util.concurrent.ConcurrentHashMap;
++import net.minecraft.core.BlockPos;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.world.entity.Entity;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.level.block.state.BlockState;
++import net.minecraft.world.ticks.LevelTicks;
++import net.minecraft.world.ticks.ScheduledTick;
++
++// Loom - per-region tick staging for parallel chunk ticking (Stage 3).
++//
++// During the parallel chunk-tick phase, region workers run on separate threads. If they applied side
++// effects directly they would write into chunks outside their region's lease and race on shared per-world
++// state (the scheduled-tick scheduler, neighbour updater, broadcast set, etc.). Instead, each worker
++// BUFFERS its side effects per-thread; after the parallel phase joins, the buffers are replayed serially
++// on the owning thread, reusing the normal single-threaded machinery unchanged.
++//
++// Block writes are buffered (which also defers the neighbour updates, broadcasts and navigation recompute
++// they trigger). Scheduled (block/fluid) ticks are buffered and re-scheduled serially. Reads during the
++// parallel phase therefore see pre-mutation state; for random ticks this is an acceptable, non-corrupting
++// behavioural divergence, because every actual mutation happens serially.
++public final class RegionTickStaging {
++
++    private RegionTickStaging() {
++    }
++
++    private record StagedWrite(Level level, BlockPos pos, BlockState state, int flags, int updateLimit) {
++    }
++
++    @SuppressWarnings("rawtypes")
++    private record StagedTick(LevelTicks ticks, ScheduledTick tick) {
++    }
++
++    private record StagedSpawn(ServerLevel level, Entity entity, org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason) {
++    }
++
++    private static final class Buffer {
++        final List<StagedWrite> writes = new ArrayList<>();
++        final List<StagedTick> ticks = new ArrayList<>();
++        final List<StagedSpawn> spawns = new ArrayList<>();
++    }
++
++    private static final ThreadLocal<Buffer> CURRENT = new ThreadLocal<>();
++    private static final Set<Buffer> ACTIVE = ConcurrentHashMap.newKeySet();
++
++    public static boolean isStaging() {
++        return CURRENT.get() != null;
++    }
++
++    // Begin staging on the current worker thread (idempotent within a thread).
++    public static void begin() {
++        if (CURRENT.get() == null) {
++            final Buffer buffer = new Buffer();
++            CURRENT.set(buffer);
++            ACTIVE.add(buffer);
++        }
++    }
++
++    // Stop intercepting on the current worker thread; the buffer stays registered for the serial replay.
++    public static void end() {
++        CURRENT.remove();
++    }
++
++    // Returns true if buffered; false if not staging (caller applies normally).
++    public static boolean stageSetBlock(final Level level, final BlockPos pos, final BlockState state, final int flags, final int updateLimit) {
++        final Buffer buffer = CURRENT.get();
++        if (buffer == null) {
++            return false;
++        }
++        buffer.writes.add(new StagedWrite(level, pos.immutable(), state, flags, updateLimit));
++        return true;
++    }
++
++    @SuppressWarnings("rawtypes")
++    public static boolean stageScheduledTick(final LevelTicks ticks, final ScheduledTick tick) {
++        final Buffer buffer = CURRENT.get();
++        if (buffer == null) {
++            return false;
++        }
++        buffer.ticks.add(new StagedTick(ticks, tick));
++        return true;
++    }
++
++    // Buffer an entity spawn so it is added (and tracked) serially, never half-linked off-thread.
++    public static boolean stageSpawn(final ServerLevel level, final Entity entity, final org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason) {
++        final Buffer buffer = CURRENT.get();
++        if (buffer == null) {
++            return false;
++        }
++        buffer.spawns.add(new StagedSpawn(level, entity, reason));
++        return true;
++    }
++
++    // Apply every staged side effect serially on the calling (owning) thread, then clear. Must be called
++    // after the parallel chunk-tick phase has joined and with staging disabled on this thread.
++    @SuppressWarnings("unchecked")
++    public static void applyAndClear() {
++        if (ACTIVE.isEmpty()) {
++            return;
++        }
++        final List<Buffer> buffers = new ArrayList<>(ACTIVE);
++        ACTIVE.clear();
++        for (int b = 0, blen = buffers.size(); b < blen; ++b) {
++            final List<StagedWrite> writes = buffers.get(b).writes;
++            for (int i = 0, len = writes.size(); i < len; ++i) {
++                final StagedWrite w = writes.get(i);
++                w.level().setBlock(w.pos(), w.state(), w.flags(), w.updateLimit());
++            }
++        }
++        for (int b = 0, blen = buffers.size(); b < blen; ++b) {
++            final List<StagedTick> ticks = buffers.get(b).ticks;
++            for (int i = 0, len = ticks.size(); i < len; ++i) {
++                final StagedTick t = ticks.get(i);
++                t.ticks().schedule(t.tick());
++            }
++        }
++        for (int b = 0, blen = buffers.size(); b < blen; ++b) {
++            final List<StagedSpawn> spawns = buffers.get(b).spawns;
++            for (int i = 0, len = spawns.size(); i < len; ++i) {
++                final StagedSpawn s = spawns.get(i);
++                s.level().addFreshEntity(s.entity(), s.reason());
++            }
++        }
++    }
++}
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index 49f828e1fdfd7fba8752c67c05cfc322332c3fa0..c8773594b0f6f85461f6d745592b202ae51d4e86 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -1050,6 +1050,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+ 
+     @Override
+     public boolean setBlock(final BlockPos pos, final BlockState blockState, @Block.UpdateFlags final int updateFlags, final int updateLimit) {
++        // Loom - during parallel chunk ticking, buffer the write and apply it serially after the parallel
++        // phase instead of mutating another region's chunk / shared world state off-thread.
++        if (net.minecraft.server.threading.RegionTickStaging.stageSetBlock(this, pos, blockState, updateFlags, updateLimit)) {
++            return true;
++        }
+         // CraftBukkit start - tree generation
+         if (this.captureTreeGeneration) {
+             // Paper start - Protect Bedrock and End Portal/Frames from being destroyed
+diff --git a/net/minecraft/world/ticks/LevelTicks.java b/net/minecraft/world/ticks/LevelTicks.java
+index d5e6f38a3cfab247acea785c4e34b6fddad3fd09..da1d73394343fdad8819aa7443b17acdb70b6402 100644
+--- a/net/minecraft/world/ticks/LevelTicks.java
++++ b/net/minecraft/world/ticks/LevelTicks.java
+@@ -77,6 +77,11 @@ public class LevelTicks<T> implements LevelTickAccess<T> {
+ 
+     @Override
+     public void schedule(final ScheduledTick<T> tick) {
++        // Loom - during parallel chunk ticking, buffer the scheduled tick and re-schedule it serially after
++        // the parallel phase instead of mutating this shared per-world scheduler off-thread.
++        if (net.minecraft.server.threading.RegionTickStaging.stageScheduledTick(this, tick)) {
++            return;
++        }
+         this.ensureOwner("level ticks operation");
+         long chunkKey = ChunkPos.pack(tick.pos());
+         LevelChunkTicks<T> tickContainer = this.allContainers.get(chunkKey);

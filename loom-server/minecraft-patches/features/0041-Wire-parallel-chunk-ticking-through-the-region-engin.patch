@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 17 Jun 2026 23:02:48 +0000
+Subject: [PATCH] Wire parallel chunk ticking through the region engine
+
+
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index c0c5d5f8f26e910274a5be116eddd02c6dc404af..d7aed66d6d14a1468f14bd66394889f7cbd2140f 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -174,6 +174,18 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         final int size = entityTickingChunks.size();
+ 
+         java.util.Objects.checkFromToIndex(0, size, raw.length);
++        // Loom start - experimental intra-world parallel chunk ticking (Stage 3, opt-in)
++        if (net.minecraft.server.threading.TickRegions.PARALLEL_CHUNK_TICK_ENABLED && size > 1) {
++            final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(size);
++            for (int i = 0; i < size; ++i) {
++                final net.minecraft.world.level.chunk.LevelChunk chunk = raw[i];
++                final net.minecraft.world.level.ChunkPos pos = chunk.getPos();
++                tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(pos.x(), pos.z(), () -> world.tickChunk(chunk, randomTickSpeed)));
++            }
++            // The engine suspends this world's full-level lease, buckets the tasks by region (with the
++            // non-adjacency buffer), and ticks non-adjacent regions concurrently, then restores the lease.
++            net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(world, tasks, "chunkTick");
++        } else {
+         for (int i = 0; i < size; ++i) {
+             world.tickChunk(raw[i], randomTickSpeed);
+ 
+@@ -183,6 +195,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+                 continue;
+             }
+         }
++        }
++        // Loom end
+     }
+     // Paper end - chunk tick iteration optimisations
+ 
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index e2be7edb8c284abedbe4dd43a4e2929cb2642e68..5489d4dfc6f5fbed56bcdd8efeee85fc73ef458c 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -119,6 +119,10 @@ public class TickRegions {
+     // together, guaranteeing parallel buckets cannot race on a shared edge chunk. This is the load-bearing
+     // safety primitive for intra-world parallel ticking. Higher = safer but coarser (less parallelism).
+     static final int REGION_TASK_BUFFER_CHUNKS = Math.max(0, Integer.getInteger("loom.regionTaskBufferChunks", 1));
++    // Loom - experimental intra-world parallel chunk ticking (Stage 3). When enabled, the per-chunk tick
++    // (random ticks + chunk block updates) is dispatched as region-bound tasks and non-adjacent regions tick
++    // concurrently on the region pool. Default off. This is the first wired tick phase of intra-world regions.
++    public static final boolean PARALLEL_CHUNK_TICK_ENABLED = Boolean.getBoolean("loom.parallelChunkTick");
+     private static final int DIAGNOSTIC_EVENT_LIMIT = Math.max(
+         64,
+         Integer.getInteger("paper.threadedregions.diagnostics.eventLimit", 512)
