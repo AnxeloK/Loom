@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Thu, 18 Jun 2026 01:59:05 +0000
+Subject: [PATCH] Route parallel-tick events through the deferred main-thread
+ dispatch
+
+
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+index c6fb5dbd9a05b23f050cdb2a2712fe4a8445c0d1..f19e7eab56f264b1cb7387c57da976bbe572b452 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+@@ -49,6 +49,13 @@ class PaperEventManager {
+ 
+     // SimplePluginManager
+     public void callEvent(final @NotNull Event event) {
++        // Loom start - defer synchronous events fired on a region worker thread during parallel ticking to
++        // the owning (main) thread's serial replay, so plugin handlers run single-threaded as under serial
++        // ticking. This keeps legacy main-thread-only plugins safe with the parallel flags enabled.
++        if (!event.isAsynchronous() && net.minecraft.server.threading.RegionTickStaging.stageEvent(event)) {
++            return;
++        }
++        // Loom end
+         if (event.isAsynchronous() && this.server.isPrimaryThread()) {
+             throw new IllegalStateException(event.getEventName() + " may only be triggered asynchronously.");
+         } else if (!event.isAsynchronous() && !this.server.isPrimaryThread() && !this.server.isStopping()) {
