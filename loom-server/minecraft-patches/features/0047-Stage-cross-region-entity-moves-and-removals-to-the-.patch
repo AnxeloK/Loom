@@ -1,0 +1,237 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 19 Jun 2026 17:04:25 +0000
+Subject: [PATCH] Stage cross-region entity moves and removals to the world
+ owner under parallel entity ticking
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When an entity moves across a chunk-section / region boundary or despawns
+(death/discard) while being ticked in a parallel region bucket on a region
+worker thread, Moonrise's per-region "off-main" thread check trips:
+"Cannot move/remove entity off-main" (EntityLookup$EntityCallback.onMove /
+onRemove), because moveEntity()/removeEntity() mutate shared per-world
+entity-tracking tables that are only safe to touch on the world-owning
+thread.
+
+Mirror the existing entity-spawn staging (patch 0045): when staging is
+active on a worker, defer onMove()/onRemove() into the per-dispatch
+RegionTickStaging session and replay them on the world-owning thread in
+RegionTickStaging.applyAndClear, after the parallel phase joins.
+
+RegionTickStaging gains stageEntityMove()/stageEntityRemove() entry points
+(returning false when not staging, so the serial/default path runs the
+original onMove/onRemove inline, byte-identical to upstream). Moves are
+coalesced per entity (one applyMove() reads the entity's final position) via
+an insertion-ordered map keyed by the EntityCallback; removes are kept
+ordered. applyAndClear applies, in strict order: events, writes, scheduled
+ticks, MOVES, REMOVES, spawns — moves before removes so a remove never
+unmaps an entity a later move still needs. A de-dup/staleness guard
+(EntityCallback.isStale, true once the entity is unmapped from entityById)
+skips a redundant second remove (an entity can be discarded twice in one
+tick via checkDespawn + guardEntityTick) and any move of an already-removed
+entity.
+
+The EntityCallback onMove/onRemove bodies are factored verbatim into
+package-visible applyMove()/applyRemove() so the replay re-invokes the
+original Moonrise logic unchanged; EntityCallback is made public so
+RegionTickStaging can hold it as a staged-op handle. moveEntity/removeEntity
+internals are untouched. The multipart/boss owner-tick path (patch 0046)
+stays as a belt-and-suspenders complement.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
+index 56e71bf01f22579c294c6b33450bd282e082f6ae..7b88008f0a69bd522530abe9db96825ae4a2b510 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
+@@ -954,7 +954,9 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+         }
+     }
+ 
+-    protected final class EntityCallback implements EntityInLevelCallback {
++    // Loom - public (was protected) so RegionTickStaging in net.minecraft.server.threading can hold the
++    // callback as a staged-op handle and re-invoke applyMove()/applyRemove() on the owning thread.
++    public final class EntityCallback implements EntityInLevelCallback {
+ 
+         public final Entity entity;
+ 
+@@ -964,6 +966,23 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+ 
+         @Override
+         public void onMove() {
++            // Loom start - stage cross-section/cross-region entity moves to the owner thread under parallel
++            // entity ticking. moveEntity()/entityStatusChange() mutate shared per-world entity-tracking state
++            // and Moonrise's per-region "off-main" thread checks would trip if run on a region worker. When
++            // staging (parallel phase active on this worker), defer to the per-dispatch session; the deferred
++            // op is replayed verbatim by applyMove() on the world-owning thread. When NOT staging
++            // (serial/default path), stageEntityMove returns false and the original body runs inline, byte-
++            // identical to upstream.
++            if (net.minecraft.server.threading.RegionTickStaging.stageEntityMove(this, this.entity)) {
++                return;
++            }
++            this.applyMove();
++            // Loom end
++        }
++
++        // Loom - original Moonrise onMove() body, factored out so the staged replay re-invokes it verbatim on
++        // the world-owning thread. Package-visible so RegionTickStaging.applyAndClear can call it.
++        public void applyMove() {
+             final Entity entity = this.entity;
+             final Visibility oldVisibility = getEntityStatus(entity);
+             final ChunkEntitySlices newSlices = EntityLookup.this.moveEntity(this.entity);
+@@ -979,6 +998,21 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+ 
+         @Override
+         public void onRemove(final Entity.RemovalReason reason) {
++            // Loom start - stage entity removals (despawn/death) to the owner thread under parallel entity
++            // ticking, for the same reason as onMove above: removeEntity() unmaps the entity from shared
++            // per-world tracking tables and trips Moonrise's per-region thread check off-main. When staging,
++            // defer to the per-dispatch session and replay via applyRemove() on the owning thread; otherwise
++            // the original body runs inline, byte-identical to upstream.
++            if (net.minecraft.server.threading.RegionTickStaging.stageEntityRemove(this, this.entity, reason)) {
++                return;
++            }
++            this.applyRemove(reason);
++            // Loom end
++        }
++
++        // Loom - original Moonrise onRemove() body, factored out so the staged replay re-invokes it verbatim
++        // on the world-owning thread. Package-visible so RegionTickStaging.applyAndClear can call it.
++        public void applyRemove(final Entity.RemovalReason reason) {
+             final Entity entity = this.entity;
+             EntityLookup.this.checkThread(entity, "Cannot remove entity off-main");
+             final Visibility tickingState = EntityLookup.getEntityStatus(entity);
+@@ -991,6 +1025,18 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+ 
+             this.entity.setLevelCallback(NoOpCallback.INSTANCE);
+         }
++
++        // Loom - de-dup / staleness guard for the staged replay. An entity can be discarded more than once in
++        // a single tick (e.g. checkDespawn followed by guardEntityTick's removal path), each scheduling a
++        // staged remove; and a staged move may be queued for an entity that is removed later in the same tick.
++        // Once applyRemove() has run for this entity, removeEntity() has unmapped it from entityById (and set
++        // its section coords to Integer.MIN_VALUE). Detect that here so applyAndClear can skip a second remove
++        // or a move whose entity is already gone. Reference-equality lookup: a freshly-spawned entity that
++        // reused this id would not be == this.entity.
++        public boolean isStale() {
++            final Entity entity = this.entity;
++            return EntityLookup.this.entityById.get((long) entity.getId()) != entity;
++        }
+     }
+ 
+     protected static final class NoOpCallback implements EntityInLevelCallback {
+diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
+index 92b98206707f4ccb922880851771795efe3e16ff..43110810c8c48367b0a30b4f5f45815990f53104 100644
+--- a/net/minecraft/server/threading/RegionTickStaging.java
++++ b/net/minecraft/server/threading/RegionTickStaging.java
+@@ -1,6 +1,8 @@
+ package net.minecraft.server.threading;
+ 
++import ca.spottedleaf.moonrise.patches.chunk_system.level.entity.EntityLookup;
+ import java.util.ArrayList;
++import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Set;
+ import java.util.concurrent.ConcurrentHashMap;
+@@ -46,11 +48,28 @@ public final class RegionTickStaging {
+     private record StagedSpawn(ServerLevel level, Entity entity, org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason) {
+     }
+ 
++    // A deferred entity removal. Stores the Moonrise EntityLookup$EntityCallback (which carries the entity and
++    // the back-reference to its owning lookup) and the RemovalReason, so the replay re-invokes the original
++    // onRemove logic verbatim on the owning thread.
++    private record StagedRemove(EntityLookup.EntityCallback callback, Entity.RemovalReason reason) {
++    }
++
+     private static final class Buffer {
+         final List<StagedWrite> writes = new ArrayList<>();
+         final List<StagedTick> ticks = new ArrayList<>();
+         final List<StagedSpawn> spawns = new ArrayList<>();
+         final List<org.bukkit.event.Event> events = new ArrayList<>();
++        // Deferred entity moves, COALESCED per entity: an entity may setPos() many times in one tick, but a
++        // single applyMove() at replay reads its current (final) position and re-sections it once. The map is
++        // keyed by the EntityCallback instance (one per live entity, reference identity — Entity.equals is
++        // id-based, so the callback, not the entity, is the identity key) and is a LinkedHashMap to preserve
++        // first-seen insertion order across distinct entities within this buffer (the order in which a
++        // vehicle and its passengers were ticked on this one worker thread).
++        final LinkedHashMap<EntityLookup.EntityCallback, EntityLookup.EntityCallback> moves = new LinkedHashMap<>();
++        // Deferred entity removals, kept in insertion order. An entity may be discarded more than once in a
++        // tick (checkDespawn + guardEntityTick), so duplicates can appear here; applyAndClear's de-dup guard
++        // skips the redundant ones.
++        final List<StagedRemove> removes = new ArrayList<>();
+     }
+ 
+     // A single parallel dispatch's staging scope. Owns the set of per-worker buffers produced during that
+@@ -123,6 +142,32 @@ public final class RegionTickStaging {
+         return true;
+     }
+ 
++    // Buffer an entity move (cross-section / cross-region re-sectioning) so the shared per-world entity
++    // tracking tables are mutated serially on the owning thread, never off-main on a region worker. Coalesced
++    // per entity: re-registering the same callback keeps only the first insertion slot, because a single
++    // applyMove() reads the entity's current position at replay time and re-sections it once regardless of how
++    // many setPos() calls happened this tick. Returns false (caller runs onMove inline) when not staging.
++    public static boolean stageEntityMove(final EntityLookup.EntityCallback callback, final Entity entity) {
++        final Buffer buffer = CURRENT.get();
++        if (buffer == null) {
++            return false;
++        }
++        buffer.moves.putIfAbsent(callback, callback);
++        return true;
++    }
++
++    // Buffer an entity removal (despawn/death) so it is unmapped from the shared per-world tracking tables
++    // serially on the owning thread. Removals are kept ordered (and may legitimately duplicate within a tick;
++    // applyAndClear de-dups them). Returns false (caller runs onRemove inline) when not staging.
++    public static boolean stageEntityRemove(final EntityLookup.EntityCallback callback, final Entity entity, final Entity.RemovalReason reason) {
++        final Buffer buffer = CURRENT.get();
++        if (buffer == null) {
++            return false;
++        }
++        buffer.removes.add(new StagedRemove(callback, reason));
++        return true;
++    }
++
+     // Buffer a Bukkit event fired during the parallel phase so its plugin listeners are dispatched on the
+     // owning (main) thread during the serial replay — exactly where serial ticking fires them — instead of
+     // running plugin handlers on a region worker thread. This keeps legacy (main-thread-only) plugins safe
+@@ -198,6 +243,37 @@ public final class RegionTickStaging {
+                 t.ticks().schedule(t.tick());
+             }
+         }
++        // (4) MOVES — strictly BEFORE removes. moveEntity() reads the entity's CURRENT section coords (the
++        // ones recorded when the entity entered its section this tick); applying a remove first would unmap
++        // the entity and corrupt a later move of the same/related entity. We replay one applyMove() per
++        // coalesced entity, in this buffer's first-seen order, then across buffers in buffer-discovery order.
++        // MOVE guard: skip if the entity has already been removed (a remove staged later in the same tick that
++        // applyAndClear has not reached yet cannot have run, but an entity removed inline earlier — e.g. during
++        // a not-staged path — would be stale; the guard is belt-and-suspenders and matches the design).
++        for (int b = 0; b < blen; ++b) {
++            for (final EntityLookup.EntityCallback callback : buffers.get(b).moves.keySet()) {
++                if (callback.isStale()) {
++                    continue;
++                }
++                callback.applyMove();
++            }
++        }
++        // (5) REMOVES — after moves, before spawns. REMOVE DE-DUP GUARD: an entity can be discarded twice in a
++        // single tick (checkDespawn followed by guardEntityTick's removal path), staging two removes for the
++        // same entity. applyRemove() unmaps the entity from entityById; isStale() then reports it as gone, so
++        // the redundant second remove is skipped — no double-remove.
++        for (int b = 0; b < blen; ++b) {
++            final List<StagedRemove> removes = buffers.get(b).removes;
++            for (int i = 0, len = removes.size(); i < len; ++i) {
++                final StagedRemove r = removes.get(i);
++                if (r.callback().isStale()) {
++                    continue;
++                }
++                r.callback().applyRemove(r.reason());
++            }
++        }
++        // (6) spawns — last, so a freshly added entity is never observed mid-replay while moves/removes of the
++        // pre-existing population are still settling.
+         for (int b = 0; b < blen; ++b) {
+             final List<StagedSpawn> spawns = buffers.get(b).spawns;
+             for (int i = 0, len = spawns.size(); i < len; ++i) {

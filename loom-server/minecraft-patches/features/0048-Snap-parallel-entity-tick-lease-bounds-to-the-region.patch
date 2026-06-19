@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Loom <library_team_1@superbullet.ai>
+Date: Fri, 19 Jun 2026 17:26:07 +0000
+Subject: [PATCH] Snap parallel entity-tick lease bounds to the region grid and
+ merge region buckets to a fixed point
+
+Parallel entity ticking derived each bucket's lease bounds from the entities'
+aggregated chunk positions, and the region-bucket overlap merge made only a
+single absorb pass. Either could leave two concurrently-dispatched buckets with
+overlapping (raw) lease bounds, producing a 'Region lease conflict' crash during
+parallel entity ticking.
+
+Tick each region's entities under that region's fixed grid-cell extent (chunk >>
+regionShift), exactly like parallel chunk ticking, so buckets are disjoint by
+construction; cross-cell reads stay handled by staging and the non-adjacency
+buffer. Snapping changes only the claimed lease bounds, not which entities a
+bucket ticks. Additionally, iterate the bucket-overlap absorb to a fixed point so
+a bucket grown by an absorption that newly overlaps another bucket also merges;
+this protects the parallel chunk-tick path too.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 8085c43e442ef59c33a9b29eba62ea60ca6236e0..5618baa72f01592fdee0bff7c802ab0cea6b502a 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1469,17 +1469,28 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         final net.minecraft.server.threading.RegionTickStaging.Session stagingSession =
+             net.minecraft.server.threading.RegionTickStaging.newSession();
+         final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(byRegion.size());
+-        for (final java.util.List<Entity> regionEntities : byRegion.values()) {
+-            int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+-            for (int i = 0, n = regionEntities.size(); i < n; ++i) {
+-                final ChunkPos cp = regionEntities.get(i).chunkPosition();
+-                if (cp.x() < minX) { minX = cp.x(); }
+-                if (cp.x() > maxX) { maxX = cp.x(); }
+-                if (cp.z() < minZ) { minZ = cp.z(); }
+-                if (cp.z() > maxZ) { maxZ = cp.z(); }
+-            }
+-            final int fMinX = minX, fMinZ = minZ, fMaxX = maxX, fMaxZ = maxZ;
+-            tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(fMinX, fMinZ, fMinX, fMinZ, fMaxX, fMaxZ, () -> {
++        final int regionChunks = 1 << shift;
++        for (final it.unimi.dsi.fastutil.longs.Long2ObjectMap.Entry<java.util.List<Entity>> regionEntry :
++            byRegion.long2ObjectEntrySet()) {
++            final java.util.List<Entity> regionEntities = regionEntry.getValue();
++            // Snap the bucket's lease bounds to the fixed region-grid cell this region key maps to, exactly like
++            // parallel chunk ticking. Entities were bucketed by (chunk >> shift), so every entity here has its
++            // home chunk inside this one cell; claiming the whole cell makes concurrently-dispatched entity
++            // buckets disjoint by construction, instead of deriving (possibly overlapping) bounds from the
++            // entities' aggregated chunk positions. Cross-cell reads are handled by staging + the non-adjacency
++            // buffer. This changes only the claimed lease bounds, not which entities a bucket ticks.
++            final long key = regionEntry.getLongKey();
++            final int regionX = (int) (key >> 32);
++            final int regionZ = (int) key;
++            final int fMinX = regionX << shift;
++            final int fMinZ = regionZ << shift;
++            final int fMaxX = fMinX + regionChunks - 1;
++            final int fMaxZ = fMinZ + regionChunks - 1;
++            // Dispatch chunk: an actual occupied chunk inside the cell (used for bounds validation only).
++            final ChunkPos dispatchPos = regionEntities.get(0).chunkPosition();
++            final int dispatchX = dispatchPos.x();
++            final int dispatchZ = dispatchPos.z();
++            tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(dispatchX, dispatchZ, fMinX, fMinZ, fMaxX, fMaxZ, () -> {
+                 net.minecraft.server.threading.RegionTickStaging.begin(stagingSession);
+                 try {
+                     for (int i = 0, n = regionEntities.size(); i < n; ++i) {
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index 051d7d6f101d571da003d9b3e17814d7e832d118..64a24a727e2097918ab28904356568e69db966e0 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -825,13 +825,22 @@ public class TickRegions {
+             }
+             target.add(task);
+ 
+-            for (int bucketIndex = buckets.size() - 1; bucketIndex >= 0; --bucketIndex) {
+-                final RegionBoundBucket bucket = buckets.get(bucketIndex);
+-                if (bucket == target || !target.intersects(bucket)) {
+-                    continue;
++            // Absorbing a bucket grows the target, which can bring it within the non-adjacency buffer of a bucket
++            // that did not previously overlap. Re-scan until no further bucket merges (fixed point); a single pass
++            // can otherwise leave two surviving buckets whose (raw) lease bounds overlap, which then races as a
++            // region-lease conflict when those buckets dispatch concurrently. Loom - correctness-critical.
++            boolean mergedAny = true;
++            while (mergedAny) {
++                mergedAny = false;
++                for (int bucketIndex = buckets.size() - 1; bucketIndex >= 0; --bucketIndex) {
++                    final RegionBoundBucket bucket = buckets.get(bucketIndex);
++                    if (bucket == target || !target.intersects(bucket)) {
++                        continue;
++                    }
++                    target.absorb(bucket);
++                    buckets.remove(bucketIndex);
++                    mergedAny = true;
+                 }
+-                target.absorb(bucket);
+-                buckets.remove(bucketIndex);
+             }
+         }
+ 

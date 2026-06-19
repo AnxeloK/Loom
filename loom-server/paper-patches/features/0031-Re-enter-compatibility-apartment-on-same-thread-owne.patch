@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 19 Jun 2026 19:28:56 +0000
+Subject: [PATCH] Re-enter compatibility apartment on same-thread ownership
+ alone
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The per-plugin compatibility apartment keyed re-entrancy on (ownerThread,
+transactionId). A plugin that synchronously fires its OWN event from inside one
+of its listeners (a nested callEvent, a NEW transaction on the SAME thread) hit
+BUSY and was REFUSED, even though a single thread cannot race itself. This is
+exactly WorldGuard: its listener on a Bukkit CreatureSpawnEvent / BlockPlaceEvent
+/ BlockBreakEvent fires WG's own delegate (SpawnEntityEvent / PlaceBlockEvent /
+BreakBlockEvent) via Bukkit.getPluginManager().callEvent(); the delegate's
+region-protection listeners then hit the same-thread BUSY refusal and never run,
+silently bypassing place/break/spawn protection under parallel ticking
+(transient_refusal: SpawnEntity x396, PlaceBlock x40, BreakBlock x40 in the
+compat corpus — all same-thread nested re-entries, zero cross-thread).
+
+Match re-entrancy on thread identity alone. The apartment is per-plugin, so a
+thread already holding the lease that re-enters is always the plugin's own
+synchronous nested call. Safe (no data race) and correct (plugin re-entering
+itself); the cross-thread BUSY path (the apartment's actual cross-thread
+serialization purpose) is unchanged.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
+index 8bd9acfc677a854a19bf3e5b88473f0ad27120ef..63009af5233851977b4bb84099b8de84e9e7a2e7 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
+@@ -102,7 +102,20 @@ public final class CompatibilityApartment {
+                 continue;
+             }
+ 
+-            if (current.ownerThread == currentThread && current.transactionId == transactionId) {
++            // Loom Fix 1d - re-enter on SAME-THREAD ownership alone, regardless of transactionId. This apartment
++            // is per-plugin, so a thread that already holds this plugin's lease and re-enters is ALWAYS the
++            // plugin's own synchronous, nested call — never a concurrent contender (a single thread cannot race
++            // itself). The previous `&& current.transactionId == transactionId` guard only re-entered the SAME
++            // event's re-dispatch and treated a NESTED dispatch of a DIFFERENT event as foreign contention. That
++            // is exactly the WorldGuard pattern: WG's listener on a Bukkit event (e.g. CreatureSpawnEvent /
++            // BlockPlaceEvent / BlockBreakEvent) synchronously fires WG's own delegate event (SpawnEntityEvent /
++            // PlaceBlockEvent / BreakBlockEvent) via Bukkit.getPluginManager().callEvent() from inside that
++            // listener. The delegate is a fresh transaction, so under the old guard the nested dispatch hit BUSY
++            // on the same thread and was REFUSED — so WG's region-protection listeners on the delegate never ran,
++            // silently bypassing place/break/spawn protection under parallel ticking. Matching on thread identity
++            // alone is both safe (same thread, no data race) and correct (it is the plugin re-entering itself),
++            // and leaves the cross-thread BUSY path (the apartment's actual purpose) unchanged.
++            if (current.ownerThread == currentThread) {
+                 current.depth.incrementAndGet();
+                 final CompatibilityRuntimeContext.Scope context = transaction == null
+                     ? CompatibilityRuntimeContext.enter(this.plugin, transactionId, strictFallback, path)
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
+index ed1d500b0398b32135926e234045cbdafccf6422..c1b9987c7f63f6b0fde0845a8b12d00e62016c80 100644
+--- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
+@@ -39,6 +39,32 @@ class CompatibilityApartmentTest {
+         }
+     }
+ 
++    @Test
++    void sameThreadNestedDifferentTransactionReenters() {
++        // Loom Fix 1d regression - a thread that already holds this plugin's lease re-enters even when the
++        // nested dispatch is a DIFFERENT transaction (the WorldGuard pattern: a listener synchronously fires the
++        // plugin's own delegate event, a fresh transaction, from inside the current one). This must be REENTRANT,
++        // not BUSY, or WorldGuard's region-protection listeners on the delegate would be refused and its
++        // place/break/spawn protection silently bypassed.
++        final Plugin plugin = mockPlugin("LegacyPlugin");
++        final CompatibilityApartment apartment = new CompatibilityApartment(plugin);
++        final CompatibilityTransaction outer = transactionFor(plugin);
++        final CompatibilityTransaction nested = transactionFor(plugin);
++        Assertions.assertNotEquals(outer.id(), nested.id(), "the nested dispatch must be a distinct transaction");
++
++        try (CompatibilityApartment.Scope outerScope = apartment.enter(outer, false)) {
++            Assertions.assertEquals(CompatibilityApartment.EnterResult.ACQUIRED, outerScope.result());
++            try (CompatibilityApartment.Scope nestedScope = apartment.enter(nested, false)) {
++                Assertions.assertEquals(CompatibilityApartment.EnterResult.REENTRANT, nestedScope.result());
++                Assertions.assertTrue(nestedScope.acquired());
++            }
++            // After the nested scope closes the outer lease must still be held (depth bookkeeping).
++            try (CompatibilityApartment.Scope stillHeld = apartment.enter(outer, false)) {
++                Assertions.assertEquals(CompatibilityApartment.EnterResult.REENTRANT, stillHeld.result());
++            }
++        }
++    }
++
+     @Test
+     void strictFallbackExecutorRunsSerializedTasks() {
+         final Plugin plugin = mockPlugin("LegacyPlugin");

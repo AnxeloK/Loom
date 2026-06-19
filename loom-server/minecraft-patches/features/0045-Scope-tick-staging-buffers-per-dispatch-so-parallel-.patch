@@ -1,0 +1,227 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 19 Jun 2026 15:50:19 +0000
+Subject: [PATCH] Scope tick-staging buffers per dispatch so parallel worlds
+ compose
+
+Replace the process-global ACTIVE buffer set in RegionTickStaging with a
+per-dispatch Session that owns its own buffer collection. Each parallel
+chunk-tick / entity-tick dispatch site creates a Session, threads it into
+the region-worker closures (begin(session)), and drains ONLY that session in
+applyAndClear(session, world). Two worlds ticking concurrently can no longer
+have one world's serial replay touch the other world's staged writes.
+
+In applyAndClear, route each replayed setBlock through the region that owns
+the target chunk: inline fast path when the calling (owning) thread already
+leases it (the common case, since the full-level lease is restored before
+replay), otherwise hand the write to the owning region's mailbox via
+OwnerDomainExecutor so it lands on the lease-holder instead of tripping the
+AsyncCatcher owner-domain guard. Deferred-event ordering and the
+veto-before-write cancellation gate are unchanged.
+
+Serial/default path (parallel flags off) is byte-identical; no new -D flag.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index e00c6e45fcd6b695fa84c204634bd0e9bc59c6cc..6d99acf276e49a075e0a40ce79dbc77e66b4a239 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -188,6 +188,10 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+                 final long key = (((long) (pos.x() >> shift)) << 32) | ((pos.z() >> shift) & 0xFFFFFFFFL);
+                 byRegion.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(chunk);
+             }
++            // One staging session per dispatch: workers register their buffers into THIS session only, so the
++            // serial replay below drains only this world's buffers — never another world ticking in parallel.
++            final net.minecraft.server.threading.RegionTickStaging.Session stagingSession =
++                net.minecraft.server.threading.RegionTickStaging.newSession();
+             final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(byRegion.size());
+             for (final java.util.List<net.minecraft.world.level.chunk.LevelChunk> regionChunks : byRegion.values()) {
+                 int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+@@ -201,7 +205,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+                 final int fMinX = minX, fMinZ = minZ, fMaxX = maxX, fMaxZ = maxZ;
+                 tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(fMinX, fMinZ, fMinX, fMinZ, fMaxX, fMaxZ, () -> {
+                     // Buffer this region's side effects on the worker; they are replayed serially below.
+-                    net.minecraft.server.threading.RegionTickStaging.begin();
++                    net.minecraft.server.threading.RegionTickStaging.begin(stagingSession);
+                     try {
+                         for (int j = 0, n = regionChunks.size(); j < n; ++j) {
+                             world.tickChunk(regionChunks.get(j), randomTickSpeed);
+@@ -214,8 +218,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+             // The engine suspends this world's full-level lease, buckets the tasks by region (with the
+             // non-adjacency buffer), and ticks non-adjacent regions concurrently, then restores the lease.
+             net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(world, tasks, "chunkTick");
+-            // Apply all staged side effects serially on this (the owning) thread, with the full-level lease restored.
+-            net.minecraft.server.threading.RegionTickStaging.applyAndClear();
++            // Apply this session's staged side effects serially on this (the owning) thread, with the full-level lease restored.
++            net.minecraft.server.threading.RegionTickStaging.applyAndClear(stagingSession, world);
+         } else {
+         for (int i = 0; i < size; ++i) {
+             world.tickChunk(raw[i], randomTickSpeed);
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index e28fb19a36703a1b81405926ec6282bbb22be078..352d3a455e77b742dcbf6c0427b7c3222fd0b71d 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1443,6 +1443,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             }
+             return;
+         }
++        // One staging session per dispatch: workers register their buffers into THIS session only, so the
++        // serial replay below drains only this world's buffers — never another world ticking in parallel.
++        final net.minecraft.server.threading.RegionTickStaging.Session stagingSession =
++            net.minecraft.server.threading.RegionTickStaging.newSession();
+         final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(byRegion.size());
+         for (final java.util.List<Entity> regionEntities : byRegion.values()) {
+             int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+@@ -1455,7 +1459,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             }
+             final int fMinX = minX, fMinZ = minZ, fMaxX = maxX, fMaxZ = maxZ;
+             tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(fMinX, fMinZ, fMinX, fMinZ, fMaxX, fMaxZ, () -> {
+-                net.minecraft.server.threading.RegionTickStaging.begin();
++                net.minecraft.server.threading.RegionTickStaging.begin(stagingSession);
+                 try {
+                     for (int i = 0, n = regionEntities.size(); i < n; ++i) {
+                         this.tickOneEntity(regionEntities.get(i));
+@@ -1466,7 +1470,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             }));
+         }
+         net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(this, tasks, "entityTick");
+-        net.minecraft.server.threading.RegionTickStaging.applyAndClear();
++        net.minecraft.server.threading.RegionTickStaging.applyAndClear(stagingSession, this);
+     }
+     // Loom end
+ 
+diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
+index 44290bf7b2df954404e46a0dc8268317493756e5..92b98206707f4ccb922880851771795efe3e16ff 100644
+--- a/net/minecraft/server/threading/RegionTickStaging.java
++++ b/net/minecraft/server/threading/RegionTickStaging.java
+@@ -5,6 +5,7 @@ import java.util.List;
+ import java.util.Set;
+ import java.util.concurrent.ConcurrentHashMap;
+ import net.minecraft.core.BlockPos;
++import net.minecraft.core.SectionPos;
+ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.world.entity.Entity;
+ import net.minecraft.world.level.Level;
+@@ -24,6 +25,12 @@ import net.minecraft.world.ticks.ScheduledTick;
+ // they trigger). Scheduled (block/fluid) ticks are buffered and re-scheduled serially. Reads during the
+ // parallel phase therefore see pre-mutation state; for random ticks this is an acceptable, non-corrupting
+ // behavioural divergence, because every actual mutation happens serially.
++//
++// Buffers are owned by a per-dispatch {@link Session}, NOT a process-global set. Each dispatch site (one
++// world's parallel chunk-tick or entity-tick phase) creates its own Session, threads it into the worker
++// closures (which register their buffer into that Session), and drains ONLY that Session in applyAndClear.
++// This is what lets two worlds tick in parallel safely: world A's applyAndClear can never see — and never
++// replays — world B's staged writes, even though their workers run concurrently.
+ public final class RegionTickStaging {
+ 
+     private RegionTickStaging() {
+@@ -46,26 +53,42 @@ public final class RegionTickStaging {
+         final List<org.bukkit.event.Event> events = new ArrayList<>();
+     }
+ 
++    // A single parallel dispatch's staging scope. Owns the set of per-worker buffers produced during that
++    // dispatch and nothing else; drained exactly once by the owning thread in applyAndClear.
++    public static final class Session {
++        private final Set<Buffer> active = ConcurrentHashMap.newKeySet();
++
++        private Session() {
++        }
++    }
++
+     private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger("Loom/RegionTickStaging");
+     private static final boolean VETO_DEBUG = Boolean.getBoolean("loom.debugVeto");
+ 
++    // Points to the buffer for whatever staged task the current worker thread is presently running. A worker
++    // only runs one task (hence one Session's buffer) at a time, so this stays correct even when several
++    // Sessions are alive across different worlds at once.
+     private static final ThreadLocal<Buffer> CURRENT = new ThreadLocal<>();
+-    private static final Set<Buffer> ACTIVE = ConcurrentHashMap.newKeySet();
++
++    public static Session newSession() {
++        return new Session();
++    }
+ 
+     public static boolean isStaging() {
+         return CURRENT.get() != null;
+     }
+ 
+-    // Begin staging on the current worker thread (idempotent within a thread).
+-    public static void begin() {
++    // Begin staging on the current worker thread for the given dispatch session (idempotent within a thread).
++    public static void begin(final Session session) {
+         if (CURRENT.get() == null) {
+             final Buffer buffer = new Buffer();
+             CURRENT.set(buffer);
+-            ACTIVE.add(buffer);
++            session.active.add(buffer);
+         }
+     }
+ 
+-    // Stop intercepting on the current worker thread; the buffer stays registered for the serial replay.
++    // Stop intercepting on the current worker thread; the buffer stays registered in its Session for the
++    // serial replay.
+     public static void end() {
+         CURRENT.remove();
+     }
+@@ -113,15 +136,18 @@ public final class RegionTickStaging {
+         return true;
+     }
+ 
+-    // Apply every staged side effect serially on the calling (owning) thread, then clear. Must be called
+-    // after the parallel chunk-tick phase has joined and with staging disabled on this thread.
++    // Apply every side effect staged in the given dispatch session serially on the calling (owning) thread,
++    // then clear it. Must be called after that session's parallel phase has joined and with staging disabled
++    // on this thread. {@code owningWorld} is the world this dispatch ticked; it is the world whose full-level
++    // lease the calling thread holds, and the world whose regions own the staged writes.
+     @SuppressWarnings("unchecked")
+-    public static void applyAndClear() {
+-        if (ACTIVE.isEmpty()) {
++    public static void applyAndClear(final Session session, final ServerLevel owningWorld) {
++        final Set<Buffer> active = session.active;
++        if (active.isEmpty()) {
+             return;
+         }
+-        final List<Buffer> buffers = new ArrayList<>(ACTIVE);
+-        ACTIVE.clear();
++        final List<Buffer> buffers = new ArrayList<>(active);
++        active.clear();
+         final int blen = buffers.size();
+         // Dispatch deferred Bukkit events first, on this (the owning/main) thread, now that the workers have
+         // joined — so plugin handlers run single-threaded exactly as under serial ticking. A handler that
+@@ -156,7 +182,7 @@ public final class RegionTickStaging {
+             for (int i = 0, len = writes.size(); i < len; ++i) {
+                 final StagedWrite w = writes.get(i);
+                 if (vetoed.isEmpty() || !vetoed.contains(w.pos().asLong())) {
+-                    w.level().setBlock(w.pos(), w.state(), w.flags(), w.updateLimit());
++                    applyStagedWrite(w);
+                 } else {
+                     vetoedWrites++;
+                 }
+@@ -180,4 +206,26 @@ public final class RegionTickStaging {
+             }
+         }
+     }
++
++    // Replay one staged block write on the thread that owns the target chunk's region. The calling thread
++    // holds the owning world's full-level lease, so for a write into this world it already owns the target
++    // region and takes the inline fast path. The cross-region routing is a defensive fallback: if a write's
++    // target chunk is somehow not owned by the calling thread (e.g. a cross-region edge write into a region
++    // this thread does not currently lease), hand it to the owning region's mailbox so the mutation lands on
++    // the lease-holder instead of tripping the AsyncCatcher owner-domain guard.
++    private static void applyStagedWrite(final StagedWrite w) {
++        final Level level = w.level();
++        final int chunkX = SectionPos.blockToSectionCoord(w.pos().getX());
++        final int chunkZ = SectionPos.blockToSectionCoord(w.pos().getZ());
++        if (!(level instanceof ServerLevel serverLevel)
++            || net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(serverLevel, chunkX, chunkZ)) {
++            // Inline fast path: thread already owns the target region (the common case during replay), or the
++            // level is not a ServerLevel and has no region domain to route through.
++            level.setBlock(w.pos(), w.state(), w.flags(), w.updateLimit());
++            return;
++        }
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.region(serverLevel, chunkX, chunkZ, "staged-setBlock"),
++            () -> serverLevel.setBlock(w.pos(), w.state(), w.flags(), w.updateLimit()));
++    }
+ }

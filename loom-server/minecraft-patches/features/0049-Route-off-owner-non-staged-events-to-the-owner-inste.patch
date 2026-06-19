@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 19 Jun 2026 19:07:39 +0000
+Subject: [PATCH] Route off-owner non-staged events to the owner instead of
+ dropping them
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Fix 1c. Events fired on a region worker thread OUTSIDE a random-tick/entity-tick
+staging window (e.g. ChunkLoadEvent/ChunkUnloadEvent from the chunk pipeline and
+other post-facto notifications) previously ran inline on the worker, where the
+compat layer then refused them on apartment contention. RegionTickStaging now
+exposes deferEventToOwner(event): for a genuinely off-owner sub-region worker it
+hands the whole event to the global server queue (fire-and-forget, drained on the
+main thread — the owner is blocked in futures.join() during the parallel phase so a
+synchronous round-trip would deadlock), where the plugin listeners run
+single-threaded exactly as under serial ticking. The staged-veto class (events
+whose cancellation must synchronously suppress a side effect) is excluded and left
+on the existing path as documented follow-up.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
+index 43110810c8c48367b0a30b4f5f45815990f53104..56de9e0ec3ef2dd8d2df8d780fcd89f5accbafb9 100644
+--- a/net/minecraft/server/threading/RegionTickStaging.java
++++ b/net/minecraft/server/threading/RegionTickStaging.java
+@@ -89,6 +89,15 @@ public final class RegionTickStaging {
+     // Sessions are alive across different worlds at once.
+     private static final ThreadLocal<Buffer> CURRENT = new ThreadLocal<>();
+ 
++    // Set true while a previously-deferred event is being re-dispatched on the owner thread (see
++    // deferEventToOwner). The re-dispatch must run the listeners INLINE — never defer again — or it would
++    // loop forever. The owner-domain re-entry restores a REGION owner context, so without this guard
++    // deferEventToOwner could wrongly re-classify the replay as "off-owner" and re-enqueue it.
++    private static final ThreadLocal<Boolean> REPLAYING_DEFERRED_EVENT = ThreadLocal.withInitial(() -> Boolean.FALSE);
++
++    private static final boolean DEFER_DEBUG = Boolean.getBoolean("loom.debugDefer");
++    private static final java.util.concurrent.atomic.AtomicLong DEFERRED_EVENTS = new java.util.concurrent.atomic.AtomicLong();
++
+     public static Session newSession() {
+         return new Session();
+     }
+@@ -181,6 +190,101 @@ public final class RegionTickStaging {
+         return true;
+     }
+ 
++    // Fix 1c — route a non-async event fired on a genuinely OFF-OWNER region worker thread (but OUTSIDE any
++    // staging window, so stageEvent did not catch it) back to the owning thread, where its plugin listeners
++    // run single-threaded exactly as under serial ticking. Chunk-system events such as ChunkLoadEvent /
++    // ChunkUnloadEvent fire on region workers in the chunk pipeline, not inside the random-tick/entity-tick
++    // begin/end window, so CURRENT is null and they would otherwise run inline on a worker thread (and the
++    // legacy compat layer then refuses them on apartment contention). We hand the whole event off to the
++    // current region's mailbox via OwnerDomainExecutor.execute — a FIRE-AND-FORGET enqueue, drained by the
++    // owner in postWorldTick(world).drainMailbox() once the parallel phase joins. It must be fire-and-forget:
++    // the owner is hard-blocked in futures.join() during the parallel phase, so a synchronous round-trip
++    // would deadlock.
++    //
++    // Returns true if the event was deferred (caller must return without dispatching inline); false if the
++    // caller should dispatch the event inline on the current thread (the serial / on-owner / replay case).
++    //
++    // Conditions to defer (ALL must hold):
++    //   - we are NOT already replaying a previously-deferred event (else infinite loop),
++    //   - the current thread is inside a REGION owner context whose world is a real ServerLevel, AND
++    //   - the current thread does NOT already own (hold the lease for) the full extent of that world's
++    //     tick — i.e. it is a sub-region worker running in the parallel phase, not the owning thread that
++    //     suspended its full-level lease to dispatch the workers.
++    // On the owning/main thread under serial ticking the current owner is GLOBAL_CONTROL or the full-level
++    // REGION owner, so this returns false and dispatch stays byte-identical to today.
++    public static boolean deferEventToOwner(final org.bukkit.event.Event event) {
++        if (REPLAYING_DEFERRED_EVENT.get()) {
++            return false;
++        }
++        // Do NOT defer the STAGED-VETO class — events whose cancellation must SYNCHRONOUSLY suppress a side
++        // effect at the firing site (block physics, fluid spread, pre-spawn, block change by an entity).
++        // Deferring them would run the plugin's veto AFTER the side effect already happened, silently losing
++        // the cancellation. Correctly handling those requires the firing site itself to stage its side effect
++        // and honour a replayed veto (the 0029/0044 random-tick mechanism, generalized) — out of scope here.
++        // Returning false leaves them on the existing (now non-latching) path so they never silently mis-fire
++        // and never poison the plugin for the post-facto events this method DOES handle.
++        if (isStagedVetoClass(event)) {
++            return false;
++        }
++        final net.minecraft.server.threading.runtime.OwnerDomainExecutor.Owner owner =
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.currentOwner();
++        if (owner == null
++            || owner.domain() != net.minecraft.server.threading.runtime.OwnerDomainExecutor.Domain.REGION
++            || !(owner.level() instanceof ServerLevel level)) {
++            // Not a region worker (global owner / player / async / login / no context) — dispatch inline.
++            return false;
++        }
++        // A full-level region owner ([MIN..MAX]) is the world's own tick thread, even when it has suspended
++        // that lease to fan out sub-region workers; events it fires must run inline on it (it IS the owner).
++        // Only a bounded sub-region owner is an off-owner parallel worker that must hand back.
++        final boolean fullLevel = owner.minChunkX() == Integer.MIN_VALUE
++            && owner.minChunkZ() == Integer.MIN_VALUE
++            && owner.maxChunkX() == Integer.MAX_VALUE
++            && owner.maxChunkZ() == Integer.MAX_VALUE;
++        if (fullLevel) {
++            return false;
++        }
++        // Hand the event to the GLOBAL server queue (the main/Server thread), not the current sub-region:
++        // OwnerDomainExecutor.execute runs INLINE when the caller already owns the target, and a sub-region
++        // worker DOES own its own sub-region — so enqueuing to that region would just run on the worker,
++        // defeating the hand-off. The Server thread is never the current worker, so the global enqueue is a
++        // true cross-thread hand-off; it is drained by the main thread in its normal task loop (runAllTasks /
++        // pollTask), which is exactly where serial ticking would have fired these notifications.
++        final net.minecraft.server.MinecraftServer server = level.getServer();
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(server, "deferred-event:" + event.getEventName()),
++            () -> {
++                final Boolean previous = REPLAYING_DEFERRED_EVENT.get();
++                REPLAYING_DEFERRED_EVENT.set(Boolean.TRUE);
++                try {
++                    org.bukkit.Bukkit.getPluginManager().callEvent(event);
++                } catch (final Throwable t) {
++                    LOGGER.error("Deferred (off-owner) event dispatch failed for {}", event.getEventName(), t);
++                } finally {
++                    REPLAYING_DEFERRED_EVENT.set(previous);
++                }
++            });
++        if (DEFER_DEBUG) {
++            final long n = DEFERRED_EVENTS.incrementAndGet();
++            if ((n & 0x3FF) == 0L) {
++                LOGGER.info("Loom off-owner event deferral: {} events routed to owner so far (latest {})", n, event.getEventName());
++            }
++        }
++        return true;
++    }
++
++    // The staged-veto class: cancellable events whose cancellation must synchronously suppress a side effect
++    // at the point they fire. These cannot be deferred (the side effect would already be applied). They are
++    // the documented remaining follow-up; handling them needs the firing site to stage its side effect and
++    // honour a replayed veto.
++    public static boolean isStagedVetoClass(final org.bukkit.event.Event event) {
++        return event instanceof org.bukkit.event.block.BlockPhysicsEvent
++            || event instanceof org.bukkit.event.block.BlockFromToEvent
++            || event instanceof org.bukkit.event.entity.EntityChangeBlockEvent
++            || event instanceof org.bukkit.event.entity.CreatureSpawnEvent
++            || event instanceof org.bukkit.event.entity.EntitySpawnEvent;
++    }
++
+     // Apply every side effect staged in the given dispatch session serially on the calling (owning) thread,
+     // then clear it. Must be called after that session's parallel phase has joined and with staging disabled
+     // on this thread. {@code owningWorld} is the world this dispatch ticked; it is the world whose full-level

@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 19 Jun 2026 19:07:51 +0000
+Subject: [PATCH] De-latch REFUSED and route off-owner events to the owner
+
+Fix 0 (dominant root cause): apartment contention is a transient, per-dispatch
+condition, but the contention branch in callThroughApartment called
+recordRefusal -> noteRefusal -> escalate(Mode.REFUSED), permanently latching the
+plugin's sticky volatile compatibility mode. Once latched, planFor returned REFUSE
+for EVERY subsequent dispatch on EVERY thread (including the owner thread, where the
+listener could run safely), silently dropping all of that plugin's events -- this is
+how WorldGuard's protection listeners were bypassed (3366 events). The contention
+branch no longer escalates the persistent mode (no noteApartmentContention /
+recordStrictFallback / recordRefusal); when a dispatch genuinely cannot run it is
+dropped LOCALLY via a new recordTransientRefusal that bumps the diagnostics counter
+and logs type=transient_refusal but never mutates profile.mode, so the plugin is
+fully re-evaluated on the next dispatch.
+
+Fix 1c: callEvent now routes non-async events fired off-owner outside a staging
+window to the owner via RegionTickStaging.deferEventToOwner before they reach the
+apartment path, so post-facto events (ChunkLoad/Unload, notifications) dispatch on
+the owner thread instead of being refused.
+
+Serial / single-thread ticking is byte-identical: on the owner thread the apartment
+is never contended, so the changed BUSY branch is never entered.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+index f19e7eab56f264b1cb7387c57da976bbe572b452..23fea5deafb8d19a27f989a457b477dd50baba9d 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+@@ -55,6 +55,16 @@ class PaperEventManager {
+         if (!event.isAsynchronous() && net.minecraft.server.threading.RegionTickStaging.stageEvent(event)) {
+             return;
+         }
++        // Loom Fix 1c - the stageEvent path above only catches events fired INSIDE a random-tick / entity-tick
++        // staging window. Events fired on a region worker OUTSIDE that window (e.g. ChunkLoadEvent /
++        // ChunkUnloadEvent from the chunk pipeline, and other post-facto notifications) are routed back to the
++        // owning thread here, where their listeners run single-threaded. This replaces the old behaviour of
++        // running them inline on a worker and then REFUSING them on apartment contention (which silently
++        // dropped e.g. WorldGuard's protection listeners). Staged-veto events (cancellation gating a
++        // synchronous side effect) are intentionally NOT deferred and fall through unchanged.
++        if (!event.isAsynchronous() && net.minecraft.server.threading.RegionTickStaging.deferEventToOwner(event)) {
++            return;
++        }
+         // Loom end
+         if (event.isAsynchronous() && this.server.isPrimaryThread()) {
+             throw new IllegalStateException(event.getEventName() + " may only be triggered asynchronously.");
+@@ -177,15 +187,27 @@ class PaperEventManager {
+         final CompatibilityApartment apartment = this.compatibilityKernel.apartmentFor(registration.getPlugin());
+         try (CompatibilityApartment.Scope scope = apartment.enter(transaction, strictFallback, path)) {
+             if (!scope.acquired()) {
+-                profile.noteApartmentContention("contention in " + event.getEventName() + " lane=" + registration.getPriority());
+-                this.compatibilityKernel.diagnostics().recordStrictFallback(
+-                    profile,
+-                    "apartment busy in " + event.getEventName() + " owner=" + scope.busyLease()
+-                );
++                // Loom Fix 0 - apartment contention is a TRANSIENT, per-dispatch condition (another thread
++                // currently holds this plugin's single apartment lease). It must NOT permanently latch the
++                // plugin's persistent compatibility mode to LEGACY_STRICT / REFUSED: doing so dropped ALL of
++                // that plugin's subsequent events on EVERY thread (incl. the owner thread, where the listener
++                // could run safely), which silently bypassed e.g. WorldGuard's protection listeners. So we no
++                // longer call noteApartmentContention / recordStrictFallback / recordRefusal here (each of which
++                // escalated the sticky volatile mode). Instead the refusal — when we cannot run the listener
++                // for this one dispatch — is a LOCAL, non-persistent decision recorded for diagnostics only.
+                 if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
+-                    this.compatibilityKernel.diagnostics().recordRefusal(
++                    // The owner thread is hard-blocked in futures.join() during the parallel phase, so we can
++                    // neither run the listener inline here (off-owner, would race shared plugin state) nor
++                    // synchronously round-trip to the owner (deadlock). Post-facto events were already routed
++                    // to the owner by RegionTickStaging.deferEventToOwner before reaching this path; anything
++                    // still arriving here is the staged-veto class (cancellation must suppress a synchronous
++                    // side effect) which cannot be deferred without firing-site staging. Drop ONLY this one
++                    // dispatch (no persistent mode change), recording it for the diagnostics counter so the
++                    // remaining gap stays visible.
++                    this.compatibilityKernel.diagnostics().recordTransientRefusal(
+                         profile,
+-                        "owner-domain contention refusal for " + event.getEventName() + " lane=" + registration.getPriority()
++                        "transient apartment contention for " + event.getEventName() + " lane=" + registration.getPriority()
++                            + " owner=" + scope.busyLease()
+                     );
+                     return;
+                 }
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
+index a9c393b7e563e78be3c17209453fe8064ba97628..95263f66f2515d9e07bcb8ccc7c35d0a1cb7698c 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
+@@ -261,6 +261,24 @@ public final class CompatibilityDiagnostics {
+         );
+     }
+ 
++    // Loom Fix 0 - a PER-DISPATCH refusal that does NOT latch the plugin's persistent compatibility mode.
++    // Used for transient apartment contention: we drop only the current dispatch but leave the plugin fully
++    // re-evaluated on the next one (so an event firing on the owner thread, or after the lease frees, runs
++    // normally). It bumps the diagnostics counter and emits a distinct "transient_refusal" log so the
++    // remaining staged-veto gap stays observable, but it never calls profile.noteRefusal (which would set the
++    // sticky volatile mode to REFUSED and poison every future dispatch on every thread).
++    public void recordTransientRefusal(final PluginCompatibilityProfile profile, final String reason) {
++        this.refusals.increment();
++        this.logStructured(
++            "transient_refusal",
++            Map.of(
++                "plugin", profile.pluginName(),
++                "reason", reason,
++                "mode", profile.mode().name()
++            )
++        );
++    }
++
+     public void recordAsyncViolation(final String reason) {
+         this.asyncViolations.increment();
+         final org.bukkit.plugin.Plugin current = CompatibilityRuntimeContext.currentPlugin();
