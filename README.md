@@ -5,7 +5,6 @@ Loom is an experimental Paper fork that keeps the Paper/Bukkit plugin surface as
 The short version:
 
 - Paper assumes most mutable server state is protected by one main thread.
-- Folia exposes region-threaded rules directly to plugins.
 - Loom tries a harder target: preserve normal Paper-style plugin behavior where it can be preserved safely, while internally routing work through explicit owner domains.
 
 Loom is not a promise that every plugin ever written will work perfectly. It is a compatibility-first threaded runtime: ordinary Paper plugins should keep working, broken legacy behavior is rescued when Loom can do so without corrupting state or deadlocking, and unsafe patterns remain strict.
@@ -112,5 +111,5 @@ Recommended study order:
 - Loom does not guarantee that every plugin works 100%.
 - Loom does not make unsafe async Bukkit access safe in all cases.
 - Loom does not allow owner-domain threads to block on sync waits.
-- Loom does not expose Folia-style responsibility to ordinary plugin authors as the default compatibility model.
+- Loom does not push region-threading responsibility onto ordinary plugin authors as its default compatibility model.
 - Loom does not treat performance wins as valid if they come from weakening compatibility or owner safety.
