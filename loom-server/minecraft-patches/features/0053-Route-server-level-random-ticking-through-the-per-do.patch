@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 20 Jun 2026 17:21:02 +0000
+Subject: [PATCH] Route server-level random ticking through the per-domain RNG
+
+optimiseRandomTick and tickChunk pulled the shared SimpleThreadUnsafeRandom
+directly. Under parallel chunk ticking several region threads run those paths
+at once on the one instance, which tears its seed. Route the capture through
+DomainRandom.forRuntimeLevel like Level.getRandom already does, so each
+sub-region gets its own deterministic stream. It returns the shared instance
+when there is no sub-region context, so the serial path is unchanged.
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 5618baa72f01592fdee0bff7c802ab0cea6b502a..e8ee4cf8e87e250d3aa26bad2e23468088a76f1a 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -984,7 +984,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     private void optimiseRandomTick(final LevelChunk chunk, final int tickSpeed) {
+         final LevelChunkSection[] sections = chunk.getSections();
+         final int minSection = ca.spottedleaf.moonrise.common.util.WorldUtil.getMinSection((ServerLevel)(Object)this);
+-        final ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom simpleRandom = this.simpleRandom;
++        // Loom - route the random-tick RNG through the per-domain random so each parallel region
++        // gets its own deterministic stream instead of sharing one thread-unsafe instance (torn
++        // seed). Falls back to this.simpleRandom when not in a sub-region context, so the serial
++        // path is unchanged.
++        final net.minecraft.util.RandomSource simpleRandom = net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom);
+         final boolean doubleTickFluids = !ca.spottedleaf.moonrise.common.PlatformHooks.get().configFixMC224294();
+ 
+         final ChunkPos cpos = chunk.getPos();
+@@ -1031,7 +1035,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     // Paper end - optimise random ticking
+ 
+     public void tickChunk(final LevelChunk chunk, final int tickSpeed) {
+-        final ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom simpleRandom = this.simpleRandom; // Paper - optimise random ticking
++        final net.minecraft.util.RandomSource simpleRandom = net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom); // Loom - per-domain RNG (was this.simpleRandom; torn seed under parallel ticking)
+         ChunkPos chunkPos = chunk.getPos();
+         int minX = chunkPos.getMinBlockX();
+         int minZ = chunkPos.getMinBlockZ();
