@@ -1,0 +1,121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 20 Jun 2026 02:10:25 +0000
+Subject: [PATCH] Relax cross-region block-state reads under parallel ticking
+
+
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index d495b50210396ee5f714c1cdaf3ba00fd80e75e2..2f935b2705da19dd212db8d87d81d45e4ea03e94 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -127,6 +127,10 @@ public class TickRegions {
+     public static final boolean PARALLEL_CHUNK_TICK_ENABLED = !"false".equalsIgnoreCase(System.getProperty("loom.parallelChunkTick"));
+     // Loom - intra-world parallel entity ticking, ON by default. Disable with -Dloom.parallelEntityTick=false.
+     public static final boolean PARALLEL_ENTITY_TICK_ENABLED = !"false".equalsIgnoreCase(System.getProperty("loom.parallelEntityTick"));
++    // Loom - true when ANY parallel tick phase is enabled. Used as a cheap gate for owner-domain read
++    // relaxations: when this is false the server ticks fully serially and owner-aware read fast-paths must be
++    // skipped so the serial/default code path stays byte-identical.
++    public static final boolean PARALLEL_ANY_ENABLED = PARALLEL_WORLDS_ENABLED || PARALLEL_CHUNK_TICK_ENABLED || PARALLEL_ENTITY_TICK_ENABLED;
+     private static final int DIAGNOSTIC_EVENT_LIMIT = Math.max(
+         64,
+         Integer.getInteger("paper.threadedregions.diagnostics.eventLimit", 512)
+diff --git a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
+index 568c538a56589aeefa0d77e38d4bdd3bc187420c..d912b312127e979d261a5a1249ed4316d209dc2d 100644
+--- a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
++++ b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
+@@ -30,6 +30,16 @@ public final class ThreadedRegionsBlockingBarrier {
+             && server.getTickCount() == 0;
+     }
+ 
++    // Loom - true when the current thread can CLEANLY block for a synchronous chunk load right now without entering
++    // a degraded path. The only such case is the startup chunk-load barrier (managedBlock drains chunk tasks with
++    // no leases held). Note: a plugin compatibility context (CompatibilityChunkBridge) can also technically await a
++    // load, but that route is the emergency off-owner sync-wait lane that RECORDS an owner-domain-wait violation
++    // and is exactly what a plain block-state READ must avoid - so it is deliberately NOT treated as "can load"
++    // here. READ relaxations use this to decide between forcing a clean load and serving already-loaded data.
++    public static boolean canSynchronouslyLoadChunk(final ServerLevel level) {
++        return isStartupChunkLoadBarrier(level);
++    }
++
+     public static boolean isShutdownThread(final MinecraftServer server) {
+         return Thread.currentThread() == server.serverThread;
+     }
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index bce8fdb3e473f3d38034b60ad4d59b0aed04e6a2..4d299b589e4b2ce6d8d066f367f38360faf25528 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -1320,11 +1320,74 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+         if (!this.isInValidBounds(pos)) {
+             return Blocks.VOID_AIR.defaultBlockState();
+         } else {
++            // Loom start - allow cross-region block-state READS under parallel ticking.
++            // Block writes during the parallel compute phase are STAGED (see Level#setBlock ->
++            // RegionTickStaging) and only applied serially on the owner thread after the parallel join, so a
++            // section's PalettedContainer is frozen during the compute phase: reading another region's
++            // already-loaded block-state is a consistent, non-torn read. The only thing the owner-domain machinery
++            // legitimately blocks here is FORCING a synchronous chunk load/generate mid-tick (that cannot be
++            // synchronously awaited off the startup barrier, see ThreadedRegionsBlockingBarrier, and off-owner it
++            // would also claim a conflicting full-level lease) - so a cross-region/unloaded read serves the loaded
++            // chunk directly or the default state, and never forces a mid-tick load. With parallel execution
++            // disabled this returns null immediately and the serial path below is byte-identical.
++            final BlockState relaxed = this.loomRelaxedBlockStateRead(pos);
++            if (relaxed != null) {
++                return relaxed;
++            }
++            // Loom end
+             ChunkAccess chunk = this.getChunk(pos.getX() >> 4, pos.getZ() >> 4, ChunkStatus.FULL, true); // Paper - manually inline to reduce hops and avoid unnecessary null check to reduce total byte code size, this should never return null and if it does we will see it the next line but the real stack trace will matter in the chunk engine
+             return chunk.getBlockState(pos);
+         }
+     }
+ 
++    // Loom start - block-state READ relaxation under parallel ticking
++    // Returns a consistent (frozen) block state to serve the read directly, or null to signal "take the normal
++    // path below" (which may force a synchronous load). This NEVER stages, writes, or schedules a load: it only
++    // reads already-resident chunk data. The relaxation is strictly READ-only and only fires when the normal path
++    // would otherwise throw, so it converts a mid-tick crash into a consistent read - it never weakens a write
++    // guard or relaxes a load the engine can legitimately perform.
++    private @Nullable BlockState loomRelaxedBlockStateRead(final BlockPos pos) {
++        if (!net.minecraft.server.threading.TickRegions.PARALLEL_ANY_ENABLED) {
++            return null; // parallel execution disabled - serial path, byte-identical
++        }
++        if (!((Object) this instanceof final ServerLevel serverLevel)) {
++            return null; // client/other level - no owner domain
++        }
++        if (!ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) {
++            return null; // genuinely async access (not a tick worker) - let the normal guard handle it loudly
++        }
++        final int chunkX = pos.getX() >> 4;
++        final int chunkZ = pos.getZ() >> 4;
++        final net.minecraft.world.level.chunk.LevelChunk loaded =
++            serverLevel.getChunkSource().getChunkAtIfLoadedImmediately(chunkX, chunkZ);
++        final boolean owner = net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(serverLevel.getServer())
++            || net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(serverLevel, chunkX, chunkZ);
++        if (owner) {
++            // The owner (region owner or the global-lease holder) reads its own data through the unchanged path
++            // whenever that path is correct: a LOADED chunk reads byte-identically, and an UNLOADED chunk that the
++            // engine can still CLEANLY synchronously load (only the startup chunk-load barrier) must keep forcing
++            // that load. We only intercept the one case the normal path cannot serve - an UNLOADED chunk mid-tick
++            // where a synchronous load would throw "Non-blocking runtime cannot synchronously wait..." or be routed
++            // through the degraded violation-recording sync-bridge - converting that into a consistent default read.
++            if (loaded != null
++                || net.minecraft.server.threading.runtime.ThreadedRegionsBlockingBarrier.canSynchronouslyLoadChunk(serverLevel)) {
++                return null;
++            }
++            return Blocks.VOID_AIR.defaultBlockState();
++        }
++        // Off-owner (cross-region) READ: serve the frozen, already-loaded block state directly. We deliberately do
++        // NOT force a load of an unloaded chunk off-owner (that would claim a conflicting full-level lease and
++        // could deadlock, and cannot be synchronously awaited mid-tick anyway); an unloaded cross-region read
++        // resolves to the default state rather than crashing the listener - matching the "if-loaded" read
++        // semantics plugins already rely on elsewhere, and the same answer the engine would surface for an
++        // out-of-bounds read.
++        if (loaded != null) {
++            return loaded.getBlockState(pos);
++        }
++        return Blocks.VOID_AIR.defaultBlockState();
++    }
++    // Loom end
++
+     @Override
+     public FluidState getFluidState(final BlockPos pos) {
+         if (!this.isInValidBounds(pos)) {
