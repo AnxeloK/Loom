@@ -33,7 +33,7 @@ index e2fa3cfd9361880ff23dfb3e2935f7416e2a4647..fe6353566092a4248426a351c2392cc3
  
      public void raisePriority(final int x, final int z, final Priority priority) {
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 0917d64aa105e057b79a7b9dd4503a148a6a6e54..a7aa7bd36b2fc47242fe9a3d6b3d6a5b3cead034 100644
+index d0fc3f983c83d74221d31e83cb56b3d673538c5b..1c69ded5a8f948157a70535c32d452ee4d8522dd 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -212,6 +212,11 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa

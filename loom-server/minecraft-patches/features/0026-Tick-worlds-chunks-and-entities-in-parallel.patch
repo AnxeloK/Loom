@@ -85,7 +85,7 @@ index 56e71bf01f22579c294c6b33450bd282e082f6ae..7b88008f0a69bd522530abe9db96825a
  
      protected static final class NoOpCallback implements EntityInLevelCallback {
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index a7aa7bd36b2fc47242fe9a3d6b3d6a5b3cead034..3276f99480dcc9864fe8c8faa7c3ba94bfe2994f 100644
+index 1c69ded5a8f948157a70535c32d452ee4d8522dd..3b2451b173b4bbe4f929c3ffa7c9ed8b7023bbf3 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -480,6 +480,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
