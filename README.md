@@ -8,7 +8,7 @@ Most Minecraft servers do nearly all of their work on a single thread. That keep
 
 - **More of your CPU, automatically.** World, chunk, and entity work is spread across cores instead of being pinned to one thread.
 - **Your plugins keep working.** Commands, events, scheduler tasks, permissions, GUIs, placeholders, and most gameplay plugins behave the way they do on Paper.
-- **One path, no tuning required.** There are no "compatibility" or "performance" modes to choose between. Loom runs a single path and keeps it safe by default.
+- **One path, no setup required.** There are no modes to pick between — Loom runs a single path and keeps it safe by default.
 
 Loom is honest about its limits. It is compatibility-first, not a promise that every plugin ever written will work perfectly: well-behaved plugins should just work, common legacy mistakes are handled where it is safe to, and genuinely unsafe patterns are rejected rather than allowed to corrupt your world or deadlock the server.
 

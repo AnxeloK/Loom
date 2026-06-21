@@ -45,7 +45,7 @@ Source directory:
 
 Internally, each plugin has a compatibility classification.
 
-The source currently calls this a `PluginCompatibilityProfile`. In user-facing language, think of it as the plugin's compatibility state, not a runtime mode.
+The source currently calls this a `PluginCompatibilityProfile`. In user-facing language, think of it as the plugin's compatibility state.
 
 Internal modes:
 

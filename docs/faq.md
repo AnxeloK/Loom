@@ -10,9 +10,7 @@ No, and that is the whole point. Loom keeps normal Paper/Bukkit plugin behavior 
 
 ## Are there runtime modes?
 
-No. Loom has one runtime path.
-
-Old references to `compatibility`, `balanced`, or `performance` runtime modes are historical artifacts. Loom is just Loom now.
+No. Loom has one runtime path — there is nothing to switch between.
 
 ## Is the compatibility kernel a bypass?
 

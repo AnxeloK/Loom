@@ -1,36 +1,40 @@
 # Performance and Tuning
 
-Loom is a compatibility-first runtime. It keeps ordinary Paper plugins on
-familiar single-main-thread semantics while routing mutable world, entity,
-player, login, and global work through explicit owner domains. That lets Loom
-move chunk loading, generation, I/O, and scheduled work off the main tick
-without exposing region-threaded responsibilities to plugin authors.
+Loom spreads the server's heaviest work across CPU cores by default. World, chunk,
+and entity ticking run in parallel across a region scheduler pool, while the
+effects plugins can observe (block changes, events, spawns) are committed in a
+safe, ordered way so ordinary plugins still see Paper-like single-thread behavior.
+Chunk loading, generation, I/O, networking, and scheduled tasks also run off the
+main path.
 
 ## What runs where
 
-- **World simulation tick** (entity ticking, block/fluid ticks, chunk ticking)
-  runs serially so plugin callbacks keep Paper's single-thread guarantees.
+- **World simulation** (chunk ticking, block/fluid ticks, entity ticking) runs in
+  parallel across the region scheduler pool. Writes that a plugin could observe are
+  staged during the parallel phase and replayed in order afterward, so plugin
+  callbacks keep Paper's main-thread guarantees.
 - **Chunk system** (load, generate, post-process, send) runs on a worker pool.
 - **Networking** runs on Netty I/O threads, with serverbound packet handlers
   resumed inside the correct owner domain.
-- **Scheduled tasks and cross-region messages** drain on the region scheduler
-  pool.
+- **Scheduled tasks and cross-region messages** drain on the region scheduler pool.
 
 ## Design tradeoffs
 
-- Because the simulation tick is serial, Loom trades raw multi-threaded
-  throughput for plugin compatibility. Per-tick **drain budgets** bound chunk
-  task drains, packet bursts, and mailbox/scheduler work to keep worst-case tick
-  spikes low.
-- Worker and region-scheduler thread counts scale with the host CPU count.
+- Keeping plugins compatible is not free: observable writes are replayed in order
+  rather than committed in place, and per-world work is coordinated so plugins never
+  see partial state. Loom accepts that overhead in exchange for running unmodified
+  plugins across multiple cores.
+- Per-tick **drain budgets** bound chunk-task drains, packet bursts, and
+  mailbox/scheduler work to keep worst-case tick spikes low.
+- Region-scheduler and worker thread counts scale with the host's CPU count.
 - A faster path is only acceptable if it preserves vanilla behavior and owner
-  safety; performance is never bought by weakening compatibility.
+  safety. Performance is never bought by weakening compatibility.
 
 ## Recommended startup
 
 A 3–6 GB heap is a sensible starting point; size it to your player count and
-available RAM, leaving headroom for the OS. The runtime benefits from G1
-tuning — for example:
+available RAM, leaving headroom for the OS. The runtime benefits from G1 tuning —
+for example:
 
 ```bash
 java -Xms4G -Xmx4G \
@@ -45,39 +49,18 @@ java -Xms4G -Xmx4G \
 
 Scale `-Xms`/`-Xmx` together and adjust to your hardware.
 
-## Experimental: parallel world ticking
-
-Loom can tick independent worlds concurrently instead of one after another. Start
-the server with:
-
-```bash
--Dloom.parallelWorlds=true
-```
-
-When enabled, the overworld, nether, end, and any additional worlds each tick on
-their own thread (drawn from the region scheduler pool), so a server running more
-than one busy world uses otherwise idle cores. Each world still ticks on a single
-thread internally, so ordinary plugins keep normal main-thread behaviour *within* a
-world; only interactions that cross between worlds are affected. While enabled,
-tick-thread ownership checks become world-aware so accidental cross-world access is
-detected rather than passing silently.
-
-This is **off by default** and **experimental**. Cross-world interactions (for
-example travelling through a nether portal while both worlds are mid-tick) are not
-yet fully hardened, so validate it on a copy of your world before relying on it. A
-single-world server gains nothing from it.
-
 ## Tuning properties
 
-All of the following are JVM system properties (`-Dname=value`); the defaults
-target a typical modern multi-core host. They do not require a rebuild.
+All of the following are JVM system properties (`-Dname=value`). They do not
+require a rebuild, and the defaults target a typical modern multi-core host.
 
-### Threads
+### Region scheduler
 
 | Property | Default | Effect |
 |---|---|---|
-| `Loom.WorkerThreadCount` | auto (scales with cores) | Chunk-system worker threads. |
-| `paper.threadedregions.parallelScheduler.threads` | `cores / 2` | Region scheduler threads. |
+| `paper.threadedregions.parallelScheduler.threads` | `cores / 2` | Threads in the pool that runs parallel world/chunk/entity ticking. |
+| `paper.threadedregions.parallelScheduler.bucketShift` | `3` | How large the region cells are that work is split into; larger is coarser. |
+| `loom.regionTaskBufferChunks` | `1` | Safety gap, in chunks, kept between cells that run in parallel. |
 
 ### Per-tick drain budgets (worst-case spike control)
 
@@ -99,6 +82,6 @@ target a typical modern multi-core host. They do not require a rebuild.
 | `Loom.PlayerChunkLoadScheduleBudgetMillis` | `2` | Time budget for scheduling chunk loads. |
 | `Loom.PlayerChunkPostProcessBudgetMillis` | `2` | Time budget for chunk post-processing. |
 
-Raising the chunk pipeline budgets favors throughput; lowering them favors
-smoother per-tick latency. Tune to your workload and validate with a live
-server before committing to non-default values.
+Raising the chunk pipeline budgets favors throughput; lowering them favors smoother
+per-tick latency. Tune to your workload and validate on a live server before
+committing to non-default values.

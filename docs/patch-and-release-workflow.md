@@ -74,7 +74,7 @@ If a path fails because it is unsafe, fix the routing. Do not silence the failur
 
 ## Compatibility Rules
 
-Loom has one runtime path. Do not add back runtime modes named `compatibility`, `balanced`, or `performance`.
+Loom has one runtime path. Do not add selectable runtime modes.
 
 The compatibility kernel is part of Loom by default. Performance changes must preserve broad Paper/Bukkit compatibility.
 
