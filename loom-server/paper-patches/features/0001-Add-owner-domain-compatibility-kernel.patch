@@ -1,0 +1,3475 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sun, 31 May 2026 13:58:45 +0000
+Subject: [PATCH] Add owner-domain compatibility kernel
+
+
+diff --git a/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java b/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java
+index 232bc5e8b7cbb528b96f8048ba683705cddc436e..998b8024a0077d99637fbfa640e35ceeaaeb2692 100644
+--- a/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java
++++ b/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java
+@@ -209,6 +209,13 @@ public class GlobalConfiguration extends ConfigurationPart {
+         public boolean saveEmptyScoreboardTeams = true;
+     }
+ 
++    public Compatibility compatibility;
++
++    public class Compatibility extends ConfigurationPart {
++        @Comment("Compatibility kernel policy: strict | hybrid | max-compat")
++        public String mode = "hybrid";
++    }
++
+     @SuppressWarnings("unused") // used in postProcess
+     public ChunkSystem chunkSystem;
+ 
+diff --git a/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java b/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java
+index f9a2c55a354c877749db3f92956de802ae575788..10da4667a66266525a63282912b7510692df7172 100644
+--- a/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java
++++ b/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java
+@@ -1,12 +1,196 @@
+ package io.papermc.paper.plugin.entrypoint.classloader;
+ 
+ import io.papermc.paper.plugin.configuration.PluginMeta;
++import io.papermc.paper.plugin.manager.compat.CompatibilityBytecodeBridge;
++import java.util.LinkedHashSet;
++import java.util.Set;
++import org.objectweb.asm.ClassReader;
++import org.objectweb.asm.ClassVisitor;
++import org.objectweb.asm.ClassWriter;
++import org.objectweb.asm.MethodVisitor;
++import org.objectweb.asm.Opcodes;
+ 
+-// Stub, implement in future.
+ public class PaperClassloaderBytecodeModifier implements ClassloaderBytecodeModifier {
+ 
++    private static final String BYTECODE_BRIDGE = "io/papermc/paper/plugin/manager/compat/CompatibilityBytecodeBridge";
++    private static final String SCHEDULER_BRIDGE = "io/papermc/paper/plugin/manager/compat/CompatibilitySchedulerBridge";
++
+     @Override
+-    public byte[] modify(PluginMeta configuration, byte[] bytecode) {
+-        return bytecode;
++    public byte[] modify(final PluginMeta configuration, final byte[] bytecode) {
++        final String pluginName = configuration.getName() == null ? "<unknown>" : configuration.getName();
++        final Set<String> staticHints = new LinkedHashSet<>();
++
++        final ClassReader reader = new ClassReader(bytecode);
++        final ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
++
++        final ClassVisitor visitor = new ClassVisitor(Opcodes.ASM9, writer) {
++            private String className = "<unknown>";
++
++            @Override
++            public void visit(
++                final int version,
++                final int access,
++                final String name,
++                final String signature,
++                final String superName,
++                final String[] interfaces
++            ) {
++                this.className = name;
++                super.visit(version, access, name, signature, superName, interfaces);
++            }
++
++            @Override
++            public MethodVisitor visitMethod(
++                final int access,
++                final String name,
++                final String descriptor,
++                final String signature,
++                final String[] exceptions
++            ) {
++                final MethodVisitor parent = super.visitMethod(access, name, descriptor, signature, exceptions);
++                return new MethodVisitor(Opcodes.ASM9, parent) {
++                    @Override
++                    public void visitLdcInsn(final Object value) {
++                        if (value instanceof String stringValue) {
++                            collectStringHint(staticHints, stringValue);
++                        }
++                        super.visitLdcInsn(value);
++                    }
++
++                    @Override
++                    public void visitMethodInsn(
++                        final int opcode,
++                        final String owner,
++                        final String targetName,
++                        final String targetDescriptor,
++                        final boolean isInterface
++                    ) {
++                        collectOwnerHint(staticHints, owner, targetName);
++
++                        if (isBlockingWait(owner, targetName, targetDescriptor)) {
++                            this.visitLdcInsn(className);
++                            this.visitLdcInsn(name);
++                            this.visitLdcInsn(owner);
++                            this.visitLdcInsn(targetName);
++                            this.visitLdcInsn(targetDescriptor);
++                            super.visitMethodInsn(
++                                Opcodes.INVOKESTATIC,
++                                BYTECODE_BRIDGE,
++                                "beforeBlockingWait",
++                                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
++                                false
++                            );
++                        }
++
++                        if (isUnsafeInvocation(owner, targetName)) {
++                            this.visitLdcInsn(className);
++                            this.visitLdcInsn(name);
++                            this.visitLdcInsn(owner);
++                            this.visitLdcInsn(targetName);
++                            this.visitLdcInsn(targetDescriptor);
++                            super.visitMethodInsn(
++                                Opcodes.INVOKESTATIC,
++                                BYTECODE_BRIDGE,
++                                "beforeUnsafeInvoke",
++                                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
++                                false
++                            );
++                        }
++
++                        final SchedulerRewrite rewrite = rewriteSchedulerCall(opcode, owner, targetName, targetDescriptor);
++                        if (rewrite != null) {
++                            super.visitMethodInsn(Opcodes.INVOKESTATIC, SCHEDULER_BRIDGE, rewrite.method(), rewrite.descriptor(), false);
++                            return;
++                        }
++
++                        super.visitMethodInsn(opcode, owner, targetName, targetDescriptor, isInterface);
++                    }
++                };
++            }
++        };
++
++        reader.accept(visitor, 0);
++
++        for (final String hint : staticHints) {
++            CompatibilityBytecodeBridge.noteStaticInternalHint(pluginName, reader.getClassName(), hint);
++        }
++
++        return writer.toByteArray();
++    }
++
++    private static void collectStringHint(final Set<String> hints, final String literal) {
++        final String lowered = literal.toLowerCase(java.util.Locale.ROOT);
++        if (lowered.contains("net.minecraft")) {
++            hints.add("literal:nms");
++        } else if (lowered.contains("org.bukkit.craftbukkit")) {
++            hints.add("literal:craftbukkit");
++        } else if (lowered.contains("gethandle")) {
++            hints.add("literal:getHandle");
++        } else if (lowered.contains("java.lang.reflect")) {
++            hints.add("literal:reflection");
++        }
++    }
++
++    private static void collectOwnerHint(final Set<String> hints, final String owner, final String methodName) {
++        if (owner.startsWith("net/minecraft/")) {
++            hints.add("owner:nms");
++        } else if (owner.startsWith("org/bukkit/craftbukkit/")) {
++            hints.add("owner:craftbukkit");
++        } else if (owner.startsWith("java/lang/reflect/") || owner.startsWith("java/lang/invoke/")) {
++            hints.add("owner:reflection");
++        }
++        if ("getHandle".equals(methodName)) {
++            hints.add("method:getHandle");
++        }
++    }
++
++    private static boolean isUnsafeInvocation(final String owner, final String methodName) {
++        return owner.startsWith("net/minecraft/")
++            || owner.startsWith("org/bukkit/craftbukkit/")
++            || owner.startsWith("java/lang/reflect/")
++            || owner.startsWith("java/lang/invoke/")
++            || "getHandle".equals(methodName);
++    }
++
++    private static boolean isBlockingWait(final String owner, final String methodName, final String descriptor) {
++        return (owner.equals("java/util/concurrent/CompletableFuture") && (methodName.equals("join") || methodName.equals("get")))
++            || (owner.equals("java/util/concurrent/Future") && methodName.equals("get"))
++            || (owner.equals("java/lang/Thread") && (methodName.equals("join") || methodName.equals("sleep")))
++            || (owner.equals("java/lang/Object") && methodName.equals("wait"))
++            || (owner.equals("java/util/concurrent/CountDownLatch") && methodName.equals("await"))
++            || (owner.equals("java/util/concurrent/locks/LockSupport") && methodName.equals("park"))
++            || (owner.equals("java/util/concurrent/locks/LockSupport") && methodName.equals("parkNanos"))
++            || (owner.equals("java/util/concurrent/locks/LockSupport") && methodName.equals("parkUntil"))
++            || (owner.equals("java/util/concurrent/CompletableFuture") && methodName.equals("get") && descriptor.startsWith("("));
++    }
++
++    private static SchedulerRewrite rewriteSchedulerCall(
++        final int opcode,
++        final String owner,
++        final String methodName,
++        final String descriptor
++    ) {
++        if (opcode != Opcodes.INVOKEINTERFACE || !"org/bukkit/scheduler/BukkitScheduler".equals(owner)) {
++            return null;
++        }
++
++        return switch (methodName + descriptor) {
++            case "runTask(Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;)Lorg/bukkit/scheduler/BukkitTask;" ->
++                new SchedulerRewrite("runTask", "(Lorg/bukkit/scheduler/BukkitScheduler;Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;)Lorg/bukkit/scheduler/BukkitTask;");
++            case "runTaskLater(Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;J)Lorg/bukkit/scheduler/BukkitTask;" ->
++                new SchedulerRewrite("runTaskLater", "(Lorg/bukkit/scheduler/BukkitScheduler;Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;J)Lorg/bukkit/scheduler/BukkitTask;");
++            case "runTaskTimer(Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;JJ)Lorg/bukkit/scheduler/BukkitTask;" ->
++                new SchedulerRewrite("runTaskTimer", "(Lorg/bukkit/scheduler/BukkitScheduler;Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;JJ)Lorg/bukkit/scheduler/BukkitTask;");
++            case "runTaskAsynchronously(Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;)Lorg/bukkit/scheduler/BukkitTask;" ->
++                new SchedulerRewrite("runTaskAsynchronously", "(Lorg/bukkit/scheduler/BukkitScheduler;Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;)Lorg/bukkit/scheduler/BukkitTask;");
++            case "runTaskLaterAsynchronously(Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;J)Lorg/bukkit/scheduler/BukkitTask;" ->
++                new SchedulerRewrite("runTaskLaterAsynchronously", "(Lorg/bukkit/scheduler/BukkitScheduler;Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;J)Lorg/bukkit/scheduler/BukkitTask;");
++            case "runTaskTimerAsynchronously(Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;JJ)Lorg/bukkit/scheduler/BukkitTask;" ->
++                new SchedulerRewrite("runTaskTimerAsynchronously", "(Lorg/bukkit/scheduler/BukkitScheduler;Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;JJ)Lorg/bukkit/scheduler/BukkitTask;");
++            default -> null;
++        };
++    }
++
++    private record SchedulerRewrite(String method, String descriptor) {
+     }
+ }
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+index 7ce9ebba8ce304d1f3f21d4f15ee5f3560d7700b..d249cfe3a8a0acfde7fcb1d6324246e9b6aa7335 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+@@ -4,6 +4,21 @@ import co.aikar.timings.TimedEventExecutor;
+ import com.destroystokyo.paper.event.server.ServerExceptionEvent;
+ import com.destroystokyo.paper.exception.ServerEventException;
+ import com.google.common.collect.Sets;
++import io.papermc.paper.plugin.manager.compat.CompatibilityApartment;
++import io.papermc.paper.plugin.manager.compat.CompatibilityKernel;
++import io.papermc.paper.plugin.manager.compat.CompatibilityRuntimeContext;
++import io.papermc.paper.plugin.manager.compat.CompatibilityTransaction;
++import io.papermc.paper.plugin.manager.compat.EventSemanticIndex;
++import io.papermc.paper.plugin.manager.compat.PluginCompatibilityProfile;
++import java.lang.reflect.Method;
++import java.util.Arrays;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.Map;
++import java.util.Set;
++import java.util.concurrent.CompletionException;
++import java.util.logging.Level;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
+ import org.bukkit.Server;
+ import org.bukkit.Warning;
+ import org.bukkit.event.Event;
+@@ -18,104 +33,263 @@ import org.bukkit.plugin.Plugin;
+ import org.bukkit.plugin.RegisteredListener;
+ import org.jetbrains.annotations.NotNull;
+ 
+-import java.lang.reflect.Method;
+-import java.util.Arrays;
+-import java.util.HashMap;
+-import java.util.HashSet;
+-import java.util.Map;
+-import java.util.Set;
+-import java.util.logging.Level;
+-
+ class PaperEventManager {
+ 
+     private final Server server;
++    private final CompatibilityKernel compatibilityKernel;
+ 
+-    public PaperEventManager(Server server) {
++    public PaperEventManager(final Server server) {
+         this.server = server;
++        this.compatibilityKernel = new CompatibilityKernel();
++    }
++
++    public CompatibilityKernel compatibilityKernel() {
++        return this.compatibilityKernel;
+     }
+ 
+     // SimplePluginManager
+-    public void callEvent(@NotNull Event event) {
++    public void callEvent(final @NotNull Event event) {
+         if (event.isAsynchronous() && this.server.isPrimaryThread()) {
+             throw new IllegalStateException(event.getEventName() + " may only be triggered asynchronously.");
+         } else if (!event.isAsynchronous() && !this.server.isPrimaryThread() && !this.server.isStopping()) {
+             throw new IllegalStateException(event.getEventName() + " may only be triggered synchronously.");
+         }
+ 
+-        HandlerList handlers = event.getHandlers();
+-        RegisteredListener[] listeners = handlers.getRegisteredListeners();
++        final HandlerList handlers = event.getHandlers();
++        final RegisteredListener[] listeners = handlers.getRegisteredListeners();
++        final CompatibilityTransaction transaction = this.compatibilityKernel.beginTransaction(event, listeners);
++        final CompatibilityKernel.RoutingDecision routingDecision = this.compatibilityKernel.routingDecision(transaction, listeners);
+ 
+-        for (RegisteredListener registration : listeners) {
+-            if (!registration.getPlugin().isEnabled()) {
+-                continue;
+-            }
++        try {
++            for (final RegisteredListener registration : listeners) {
++                if (!registration.getPlugin().isEnabled()) {
++                    continue;
++                }
+ 
+-            try {
+-                registration.callEvent(event);
+-            } catch (AuthorNagException ex) {
+-                Plugin plugin = registration.getPlugin();
++                final Plugin plugin = registration.getPlugin();
++                final PluginCompatibilityProfile profile = this.compatibilityKernel.profileFor(plugin);
++                final CompatibilityKernel.InvocationPlan plan = this.compatibilityKernel.planFor(registration, transaction, routingDecision);
++                final EventSemanticIndex.Lane lane = EventSemanticIndex.lane(registration.getPriority());
++                profile.noteLaneUsage(plan.lane());
+ 
+-                if (plugin.isNaggable()) {
+-                    plugin.setNaggable(false);
++                if (transaction.semantics().orderedDecision()) {
++                    profile.noteOrderedTransaction();
++                }
++                if (routingDecision.route() == CompatibilityKernel.DispatchRoute.SNAPSHOT_OBSERVER
++                    && profile.mode() != PluginCompatibilityProfile.Mode.NATIVE_LOOM_AWARE) {
++                    this.compatibilityKernel.diagnostics().recordSnapshotDelivery(profile, event.getEventName());
++                }
++                if (routingDecision.route() == CompatibilityKernel.DispatchRoute.UNSAFE_INTERNAL
++                    || profile.mode() == PluginCompatibilityProfile.Mode.LEGACY_INTERNAL) {
++                    this.compatibilityKernel.diagnostics().recordUnsafeInternalAccess(
++                        profile,
++                        "unsafe listener lane for " + event.getEventName() + " at " + registration.getPriority()
++                    );
++                }
+ 
+-                    this.server.getLogger().log(Level.SEVERE, String.format(
+-                        "Nag author(s): '%s' of '%s' about the following: %s",
+-                        plugin.getPluginMeta().getAuthors(),
+-                        plugin.getPluginMeta().getDisplayName(),
+-                        ex.getMessage()
+-                    ));
++                if (plan.policy() == CompatibilityKernel.InvocationPolicy.REFUSE) {
++                    this.compatibilityKernel.diagnostics().recordRefusal(
++                        profile,
++                        "policy refused " + event.getEventName() + " listener at " + registration.getPriority() + " (" + plan.reason() + ")"
++                    );
++                    continue;
+                 }
+-            } catch (Throwable ex) {
+-                String msg = "Could not pass event " + event.getEventName() + " to " + registration.getPlugin().getPluginMeta().getDisplayName();
+-                this.server.getLogger().log(Level.SEVERE, msg, ex);
+-                if (!(event instanceof ServerExceptionEvent)) { // We don't want to cause an endless event loop
+-                    this.callEvent(new ServerExceptionEvent(new ServerEventException(msg, ex, registration.getPlugin(), registration.getListener(), event)));
++
++                final CompatibilityTransaction.ListenerSnapshot beforeListener = transaction.beforeListener();
++                final long callbackStart = System.nanoTime();
++
++                try {
++                    switch (plan.policy()) {
++                        case NATIVE -> this.callListener(registration, event, transaction, false, plan.path());
++                        case APARTMENT -> this.callThroughApartment(registration, event, transaction, profile, false, plan.path());
++                        case EMERGENCY_COMPATIBILITY -> {
++                            profile.noteForcedMaxCompat(plan.path(), "emergency lane: " + plan.reason());
++                            this.compatibilityKernel.diagnostics().recordStrictFallback(
++                                profile,
++                                "emergency compatibility lane for " + event.getEventName() + " path=" + plan.path()
++                            );
++                            this.callThroughApartment(registration, event, transaction, profile, true, plan.path());
++                        }
++                        case STRICT_FALLBACK -> {
++                            this.compatibilityKernel.diagnostics().recordStrictFallback(profile, "strict policy for " + event.getEventName());
++                            this.callThroughApartment(registration, event, transaction, profile, true, plan.path());
++                        }
++                        case REFUSE -> {
++                            // handled above
++                        }
++                    }
++                } catch (final AuthorNagException ex) {
++                    if (plugin.isNaggable()) {
++                        plugin.setNaggable(false);
++
++                        this.server.getLogger().log(Level.SEVERE, String.format(
++                            "Nag author(s): '%s' of '%s' about the following: %s",
++                            plugin.getPluginMeta().getAuthors(),
++                            plugin.getPluginMeta().getDisplayName(),
++                            ex.getMessage()
++                        ));
++                    }
++                } catch (final Throwable ex) {
++                    final String msg = "Could not pass event " + event.getEventName() + " to " + plugin.getPluginMeta().getDisplayName();
++                    this.server.getLogger().log(Level.SEVERE, msg, ex);
++                    if (transaction.pendingWriteCount() > 0) {
++                        transaction.abort("listener exception in " + plugin.getPluginMeta().getName());
++                    }
++                    if (!(event instanceof ServerExceptionEvent)) { // We don't want to cause an endless event loop
++                        this.callEvent(new ServerExceptionEvent(new ServerEventException(msg, ex, plugin, registration.getListener(), event)));
++                    }
++                } finally {
++                    final long durationNanos = System.nanoTime() - callbackStart;
++                    profile.noteCallbackCost(event.getEventName(), durationNanos);
++                    transaction.afterListener(registration, lane, beforeListener, durationNanos);
++                }
++            }
++        } finally {
++            this.compatibilityKernel.finishTransaction(transaction);
++            for (final CompatibilityTransaction.MonitorMutation mutation : transaction.monitorMutations()) {
++                final Plugin profilePlugin = this.server.getPluginManager().getPlugin(mutation.plugin());
++                if (profilePlugin != null) {
++                    this.compatibilityKernel.noteMonitorMutation(this.compatibilityKernel.profileFor(profilePlugin), mutation);
++                }
++            }
++        }
++    }
++
++    private void callThroughApartment(
++        final RegisteredListener registration,
++        final Event event,
++        final CompatibilityTransaction transaction,
++        final PluginCompatibilityProfile profile,
++        final boolean strictFallback,
++        final String path
++    ) throws Throwable {
++        final CompatibilityApartment apartment = this.compatibilityKernel.apartmentFor(registration.getPlugin());
++        try (CompatibilityApartment.Scope scope = apartment.enter(transaction, strictFallback, path)) {
++            if (!scope.acquired()) {
++                profile.noteApartmentContention("contention in " + event.getEventName() + " lane=" + registration.getPriority());
++                this.compatibilityKernel.diagnostics().recordStrictFallback(
++                    profile,
++                    "apartment busy in " + event.getEventName() + " owner=" + scope.busyLease()
++                );
++                if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
++                    this.compatibilityKernel.diagnostics().recordRefusal(
++                        profile,
++                        "owner-domain contention refusal for " + event.getEventName() + " lane=" + registration.getPriority()
++                    );
++                    return;
++                }
++                final long handoffStart = System.nanoTime();
++                try {
++                    apartment.submitStrictFallback(() -> {
++                        try (CompatibilityApartment.Scope handoffScope = apartment.enter(transaction, true, path)) {
++                            if (!handoffScope.acquired()) {
++                                throw new IllegalStateException("Strict fallback apartment handoff failed: " + handoffScope.busyLease());
++                            }
++                            try {
++                                this.callListener(registration, event, transaction, true, path);
++                            } catch (final Throwable throwable) {
++                                if (throwable instanceof Exception exception) {
++                                    throw exception;
++                                }
++                                throw new RuntimeException(throwable);
++                            }
++                        }
++                        return null;
++                    }).join();
++                } catch (final CompletionException ex) {
++                    throw unwrapCompletionException(ex);
++                } finally {
++                    this.compatibilityKernel.diagnostics().recordOwnerRpcWait(
++                        profile,
++                        "apartment-handoff:" + event.getEventName(),
++                        System.nanoTime() - handoffStart
++                    );
+                 }
++                return;
+             }
++            this.callListener(registration, event, transaction, strictFallback, path);
++        }
++    }
++
++    private void callListener(
++        final RegisteredListener registration,
++        final Event event,
++        final CompatibilityTransaction transaction,
++        final boolean strictFallback,
++        final String path
++    ) throws Throwable {
++        try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(registration.getPlugin(), transaction, strictFallback, path)) {
++            registration.callEvent(event);
+         }
+     }
+ 
+-    public void registerEvents(@NotNull Listener listener, @NotNull Plugin plugin) {
++    private static Throwable unwrapCompletionException(final CompletionException completionException) {
++        final Throwable cause = completionException.getCause();
++        return cause == null ? completionException : cause;
++    }
++
++    public void registerEvents(final @NotNull Listener listener, final @NotNull Plugin plugin) {
+         if (!plugin.isEnabled()) {
+             throw new IllegalPluginAccessException("Plugin attempted to register " + listener + " while not enabled");
+         }
+ 
+-        for (Map.Entry<Class<? extends Event>, Set<RegisteredListener>> entry : this.createRegisteredListeners(listener, plugin).entrySet()) {
++        for (final Map.Entry<Class<? extends Event>, Set<RegisteredListener>> entry : this.createRegisteredListeners(listener, plugin).entrySet()) {
+             this.getEventListeners(this.getRegistrationClass(entry.getKey())).registerAll(entry.getValue());
++            for (final RegisteredListener registeredListener : entry.getValue()) {
++                this.compatibilityKernel.eventSemanticIndex().recordRegistration(
++                    entry.getKey(),
++                    plugin,
++                    registeredListener.getPriority(),
++                    registeredListener.isIgnoringCancelled()
++                );
++            }
+         }
+-
+     }
+ 
+-    public void registerEvent(@NotNull Class<? extends Event> event, @NotNull Listener listener, @NotNull EventPriority priority, @NotNull EventExecutor executor, @NotNull Plugin plugin) {
++    public void registerEvent(
++        final @NotNull Class<? extends Event> event,
++        final @NotNull Listener listener,
++        final @NotNull EventPriority priority,
++        final @NotNull EventExecutor executor,
++        final @NotNull Plugin plugin
++    ) {
+         this.registerEvent(event, listener, priority, executor, plugin, false);
+     }
+ 
+-    public void registerEvent(@NotNull Class<? extends Event> event, @NotNull Listener listener, @NotNull EventPriority priority, @NotNull EventExecutor executor, @NotNull Plugin plugin, boolean ignoreCancelled) {
++    public void registerEvent(
++        final @NotNull Class<? extends Event> event,
++        final @NotNull Listener listener,
++        final @NotNull EventPriority priority,
++        @NotNull EventExecutor executor,
++        final @NotNull Plugin plugin,
++        final boolean ignoreCancelled
++    ) {
+         if (!plugin.isEnabled()) {
+             throw new IllegalPluginAccessException("Plugin attempted to register " + event + " while not enabled");
+         }
+ 
+         executor = new TimedEventExecutor(executor, plugin, null, event);
+         this.getEventListeners(event).register(new RegisteredListener(listener, executor, priority, plugin, ignoreCancelled));
++        this.compatibilityKernel.eventSemanticIndex().recordRegistration(event, plugin, priority, ignoreCancelled);
+     }
+ 
+     @NotNull
+-    private HandlerList getEventListeners(@NotNull Class<? extends Event> type) {
++    private HandlerList getEventListeners(final @NotNull Class<? extends Event> type) {
+         try {
+-            Method method = this.getRegistrationClass(type).getDeclaredMethod("getHandlerList");
++            final Method method = this.getRegistrationClass(type).getDeclaredMethod("getHandlerList");
+             method.setAccessible(true);
+-            return (HandlerList) method.invoke(null);
+-        } catch (Exception e) {
++            return (HandlerList)method.invoke(null);
++        } catch (final Exception e) {
+             throw new IllegalPluginAccessException(e.toString());
+         }
+     }
+ 
+     @NotNull
+-    private Class<? extends Event> getRegistrationClass(@NotNull Class<? extends Event> clazz) {
++    private Class<? extends Event> getRegistrationClass(final @NotNull Class<? extends Event> clazz) {
+         try {
+             clazz.getDeclaredMethod("getHandlerList");
+             return clazz;
+-        } catch (NoSuchMethodException e) {
++        } catch (final NoSuchMethodException e) {
+             if (clazz.getSuperclass() != null
+                 && !clazz.getSuperclass().equals(Event.class)
+                 && Event.class.isAssignableFrom(clazz.getSuperclass())) {
+@@ -128,24 +302,29 @@ class PaperEventManager {
+ 
+     // JavaPluginLoader
+     @NotNull
+-    public Map<Class<? extends Event>, Set<RegisteredListener>> createRegisteredListeners(@NotNull Listener listener, @NotNull final Plugin plugin) {
+-        Map<Class<? extends Event>, Set<RegisteredListener>> ret = new HashMap<>();
++    public Map<Class<? extends Event>, Set<RegisteredListener>> createRegisteredListeners(
++        final @NotNull Listener listener,
++        final @NotNull Plugin plugin
++    ) {
++        final Map<Class<? extends Event>, Set<RegisteredListener>> ret = new HashMap<>();
+ 
+-        Set<Method> methods;
++        final Set<Method> methods;
+         try {
+-            Class<?> listenerClazz = listener.getClass();
++            final Class<?> listenerClazz = listener.getClass();
+             methods = Sets.union(
+                 Set.of(listenerClazz.getMethods()),
+                 Set.of(listenerClazz.getDeclaredMethods())
+             );
+-        } catch (NoClassDefFoundError e) {
++        } catch (final NoClassDefFoundError e) {
+             plugin.getLogger().severe("Failed to register events for " + listener.getClass() + " because " + e.getMessage() + " does not exist.");
+             return ret;
+         }
+ 
+         for (final Method method : methods) {
+             final EventHandler eh = method.getAnnotation(EventHandler.class);
+-            if (eh == null) continue;
++            if (eh == null) {
++                continue;
++            }
+             // Do not register bridge or synthetic methods to avoid event duplication
+             // Fixes SPIGOT-893
+             if (method.isBridge() || method.isSynthetic()) {
+@@ -158,13 +337,13 @@ class PaperEventManager {
+             }
+             final Class<? extends Event> eventClass = checkClass.asSubclass(Event.class);
+             method.setAccessible(true);
+-            Set<RegisteredListener> eventSet = ret.computeIfAbsent(eventClass, k -> new HashSet<>());
++            final Set<RegisteredListener> eventSet = ret.computeIfAbsent(eventClass, k -> new HashSet<>());
+ 
+             for (Class<?> clazz = eventClass; Event.class.isAssignableFrom(clazz); clazz = clazz.getSuperclass()) {
+                 // This loop checks for extending deprecated events
+                 if (clazz.getAnnotation(Deprecated.class) != null) {
+-                    Warning warning = clazz.getAnnotation(Warning.class);
+-                    Warning.WarningState warningState = this.server.getWarningState();
++                    final Warning warning = clazz.getAnnotation(Warning.class);
++                    final Warning.WarningState warningState = this.server.getWarningState();
+                     if (!warningState.printFor(warning)) {
+                         break;
+                     }
+@@ -177,12 +356,13 @@ class PaperEventManager {
+                             method.toGenericString(),
+                             (warning != null && warning.reason().length() != 0) ? warning.reason() : "Server performance will be affected",
+                             Arrays.toString(plugin.getPluginMeta().getAuthors().toArray())),
+-                        warningState == Warning.WarningState.ON ? new AuthorNagException(null) : null);
++                        warningState == Warning.WarningState.ON ? new AuthorNagException(null) : null
++                    );
+                     break;
+                 }
+             }
+ 
+-            EventExecutor executor = new TimedEventExecutor(EventExecutor.create(method, eventClass), plugin, method, eventClass);
++            final EventExecutor executor = new TimedEventExecutor(EventExecutor.create(method, eventClass), plugin, method, eventClass);
+             eventSet.add(new RegisteredListener(listener, executor, eh.priority(), plugin, eh.ignoreCancelled()));
+         }
+         return ret;
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperPluginManagerImpl.java b/src/main/java/io/papermc/paper/plugin/manager/PaperPluginManagerImpl.java
+index 097500a59336db1bbfffcd1aa4cff7a8586e46ec..3a3b1fb1f363e217393813a81a9d411bee2a4381 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperPluginManagerImpl.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperPluginManagerImpl.java
+@@ -3,6 +3,7 @@ package io.papermc.paper.plugin.manager;
+ import com.google.common.graph.MutableGraph;
+ import io.papermc.paper.plugin.PermissionManager;
+ import io.papermc.paper.plugin.configuration.PluginMeta;
++import io.papermc.paper.plugin.manager.compat.CompatibilityKernel;
+ import io.papermc.paper.plugin.provider.entrypoint.DependencyContext;
+ import org.bukkit.Bukkit;
+ import org.bukkit.Server;
+@@ -51,6 +52,10 @@ public class PaperPluginManagerImpl implements PluginManager, DependencyContext
+         return ((CraftServer) (Bukkit.getServer())).paperPluginManager;
+     }
+ 
++    public CompatibilityKernel compatibilityKernel() {
++        return this.paperEventManager.compatibilityKernel();
++    }
++
+     // Plugin Manipulation
+ 
+     @Override
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/BukkitFacadeRegistry.java b/src/main/java/io/papermc/paper/plugin/manager/compat/BukkitFacadeRegistry.java
+index 6516bdf5387fdb1e4851ff5ef20c6d932b175717..23acf5b4f4de7e92f6074f9a069d2d57708df91c 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/BukkitFacadeRegistry.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/BukkitFacadeRegistry.java
+@@ -8,10 +8,13 @@ import java.util.concurrent.ConcurrentMap;
+ import org.bukkit.Chunk;
+ import org.bukkit.Location;
+ import org.bukkit.World;
++import org.bukkit.boss.BossBar;
+ import org.bukkit.block.Block;
+ import org.bukkit.entity.Entity;
+ import org.bukkit.entity.Player;
+ import org.bukkit.inventory.Inventory;
++import org.bukkit.scoreboard.Scoreboard;
++import org.bukkit.scoreboard.Team;
+ import org.jspecify.annotations.Nullable;
+ 
+ /**
+@@ -33,14 +36,21 @@ public final class BukkitFacadeRegistry {
+             return candidate;
+         }
+ 
+-        final WeakReference<Object> existingRef = this.facades.get(key);
+-        final Object existing = existingRef == null ? null : existingRef.get();
+-        if (existing != null) {
+-            return (T)existing;
++        final Object scoped = CompatibilityRuntimeContext.scopeLookup(key);
++        if (scoped != null) {
++            return (T)scoped;
+         }
+ 
+-        this.facades.put(key, new WeakReference<>(candidate));
+-        return candidate;
++        final Object resolved = CompatibilityRuntimeContext.scopeComputeIfAbsent(key, () -> {
++            final WeakReference<Object> existingRef = this.facades.get(key);
++            final Object existing = existingRef == null ? null : existingRef.get();
++            if (existing != null) {
++                return existing;
++            }
++            this.facades.put(key, new WeakReference<>(candidate));
++            return candidate;
++        });
++        return (T)resolved;
+     }
+ 
+     public Location normalizeLocation(final @Nullable Location location) {
+@@ -54,16 +64,41 @@ public final class BukkitFacadeRegistry {
+         return new Location(world, location.x(), location.y(), location.z(), location.getYaw(), location.getPitch());
+     }
+ 
++    public <T> @Nullable T readOverlay(
++        final CompatibilityTransaction transaction,
++        final Object identity,
++        final String field,
++        final java.util.function.Supplier<T> liveRead
++    ) {
++        final OverlayKey key = new OverlayKey(keyFor(identity), field);
++        return transaction.overlayReadOrCompute(key, liveRead);
++    }
++
++    public void writeOverlay(
++        final CompatibilityTransaction transaction,
++        final Object identity,
++        final String field,
++        final Object value,
++        final String ownerDomain,
++        final String operation
++    ) {
++        final OverlayKey key = new OverlayKey(keyFor(identity), field);
++        transaction.overlayWrite(key, value, ownerDomain, operation);
++    }
++
++    public record OverlayKey(@Nullable Object identity, String field) {
++    }
++
+     private static @Nullable Object keyFor(final Object candidate) {
+         if (candidate instanceof Player player) {
+-            return new PlayerKey(player.getUniqueId(), player.getName(), player.isOnline());
++            return new PlayerKey(player.getUniqueId(), player.getEntityId(), player.getName(), player.isOnline());
+         }
+         if (candidate instanceof Entity entity) {
+             final World world = entity.getWorld();
+-            return world == null ? null : new EntityKey(entity.getUniqueId(), world.getUID());
++            return world == null ? null : new EntityKey(entity.getUniqueId(), entity.getEntityId(), world.getUID());
+         }
+         if (candidate instanceof World world) {
+-            return new WorldKey(world.getUID(), world.getName());
++            return new WorldKey(world.getUID(), world.getKey().toString());
+         }
+         if (candidate instanceof Block block) {
+             final World world = block.getWorld();
+@@ -77,19 +112,29 @@ public final class BukkitFacadeRegistry {
+             final Object holder = inventory.getHolder();
+             return new InventoryKey(System.identityHashCode(inventory), holder == null ? 0 : System.identityHashCode(holder));
+         }
++        if (candidate instanceof Scoreboard scoreboard) {
++            return new ScoreboardKey(System.identityHashCode(scoreboard));
++        }
++        if (candidate instanceof Team team) {
++            final Scoreboard scoreboard = team.getScoreboard();
++            return new TeamKey(team.getName(), scoreboard == null ? 0 : System.identityHashCode(scoreboard));
++        }
++        if (candidate instanceof BossBar bossBar) {
++            return new BossBarKey(System.identityHashCode(bossBar), bossBar.getTitle());
++        }
+         return null;
+     }
+ 
+-    private record PlayerKey(UUID uuid, String name, boolean online) {
++    private record PlayerKey(UUID uuid, int entityId, String name, boolean online) {
+         private PlayerKey {
+             Objects.requireNonNull(uuid, "uuid");
+         }
+     }
+ 
+-    private record EntityKey(UUID uuid, UUID world) {
++    private record EntityKey(UUID uuid, int entityId, UUID world) {
+     }
+ 
+-    private record WorldKey(UUID uuid, String name) {
++    private record WorldKey(UUID uuid, String key) {
+     }
+ 
+     private record BlockKey(UUID world, int x, int y, int z) {
+@@ -100,4 +145,13 @@ public final class BukkitFacadeRegistry {
+ 
+     private record InventoryKey(int identity, int holderIdentity) {
+     }
+-}
+\ No newline at end of file
++
++    private record ScoreboardKey(int identity) {
++    }
++
++    private record TeamKey(String name, int scoreboardIdentity) {
++    }
++
++    private record BossBarKey(int identity, String title) {
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
+index 15886f105717cefb08374bf132d8a1746c43a2e2..8bd9acfc677a854a19bf3e5b88473f0ad27120ef 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
+@@ -1,6 +1,10 @@
+ package io.papermc.paper.plugin.manager.compat;
+ 
+ import java.util.Objects;
++import java.util.concurrent.Callable;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
+ import java.util.concurrent.atomic.AtomicInteger;
+ import java.util.concurrent.atomic.AtomicReference;
+ import org.bukkit.plugin.Plugin;
+@@ -31,28 +35,68 @@ public final class CompatibilityApartment {
+     }
+ 
+     private final Plugin plugin;
++    private final ExecutorService strictFallbackExecutor;
+     private final AtomicReference<@Nullable Lease> activeLease = new AtomicReference<>();
+ 
+     public CompatibilityApartment(final Plugin plugin) {
+         this.plugin = Objects.requireNonNull(plugin, "plugin");
++        this.strictFallbackExecutor = Executors.newSingleThreadExecutor(runnable -> {
++            final Thread thread = new Thread(runnable, "Loom Compat " + this.plugin.getPluginMeta().getName());
++            thread.setDaemon(true);
++            return thread;
++        });
+     }
+ 
+     public Plugin plugin() {
+         return this.plugin;
+     }
+ 
++    public <T> CompletableFuture<T> submitStrictFallback(final Callable<T> action) {
++        final CompletableFuture<T> future = new CompletableFuture<>();
++        this.strictFallbackExecutor.execute(() -> {
++            try {
++                future.complete(action.call());
++            } catch (final Throwable throwable) {
++                future.completeExceptionally(throwable);
++            }
++        });
++        return future;
++    }
++
+     public Scope enter(final CompatibilityTransaction transaction, final boolean strictFallback) {
+         Objects.requireNonNull(transaction, "transaction");
++        return this.enter(transaction.id(), transaction, strictFallback, "<unknown-path>");
++    }
++
++    public Scope enter(final CompatibilityTransaction transaction, final boolean strictFallback, final String path) {
++        Objects.requireNonNull(transaction, "transaction");
++        return this.enter(transaction.id(), transaction, strictFallback, path);
++    }
++
++    public Scope enter(final long transactionId, final boolean strictFallback) {
++        return this.enter(transactionId, null, strictFallback, "<unknown-path>");
++    }
++
++    public Scope enter(final long transactionId, final boolean strictFallback, final String path) {
++        return this.enter(transactionId, null, strictFallback, path);
++    }
+ 
++    private Scope enter(
++        final long transactionId,
++        final @Nullable CompatibilityTransaction transaction,
++        final boolean strictFallback,
++        final String path
++    ) {
+         final Thread currentThread = Thread.currentThread();
+-        final long transactionId = transaction.id();
+ 
+         while (true) {
+             final Lease current = this.activeLease.get();
+             if (current == null) {
+                 final Lease created = new Lease(this.plugin, transactionId, currentThread);
+                 if (this.activeLease.compareAndSet(null, created)) {
+-                    final CompatibilityRuntimeContext.Scope context = CompatibilityRuntimeContext.enter(this.plugin, transactionId, strictFallback);
++                    final CompatibilityRuntimeContext.Scope context = transaction == null
++                        ? CompatibilityRuntimeContext.enter(this.plugin, transactionId, strictFallback, path)
++                        : CompatibilityRuntimeContext.enter(this.plugin, transaction, strictFallback, path);
+                     return new Scope(EnterResult.ACQUIRED, this, created, context, null);
+                 }
+                 continue;
+@@ -60,7 +104,9 @@ public final class CompatibilityApartment {
+ 
+             if (current.ownerThread == currentThread && current.transactionId == transactionId) {
+                 current.depth.incrementAndGet();
+-                final CompatibilityRuntimeContext.Scope context = CompatibilityRuntimeContext.enter(this.plugin, transactionId, strictFallback);
++                final CompatibilityRuntimeContext.Scope context = transaction == null
++                    ? CompatibilityRuntimeContext.enter(this.plugin, transactionId, strictFallback, path)
++                    : CompatibilityRuntimeContext.enter(this.plugin, transaction, strictFallback, path);
+                 return new Scope(EnterResult.REENTRANT, this, current, context, null);
+             }
+ 
+@@ -107,4 +153,4 @@ public final class CompatibilityApartment {
+             }
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityBytecodeBridge.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityBytecodeBridge.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9e43219b2559dd37d968cc4803bb309ab33ff59
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityBytecodeBridge.java
+@@ -0,0 +1,72 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import com.mojang.logging.LogUtils;
++import io.papermc.paper.util.StackWalkerUtil;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import org.bukkit.plugin.Plugin;
++import org.slf4j.Logger;
++
++public final class CompatibilityBytecodeBridge {
++
++    private static final Logger LOGGER = LogUtils.getLogger();
++
++    private CompatibilityBytecodeBridge() {
++    }
++
++    public static void noteStaticInternalHint(final String pluginName, final String className, final String hint) {
++        PluginCompatibilityProfile.recordStaticInternalHint(pluginName, hint + " @" + className);
++    }
++
++    public static void beforeUnsafeInvoke(
++        final String className,
++        final String methodName,
++        final String owner,
++        final String targetName,
++        final String descriptor
++    ) {
++        final Plugin plugin = currentPlugin();
++        if (plugin == null) {
++            LOGGER.debug("[loom.compat] unsafe bytecode call {}#{} -> {}#{}{}", className, methodName, owner, targetName, descriptor);
++            return;
++        }
++
++        final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
++        final PluginCompatibilityProfile profile = diagnostics.profileFor(plugin);
++        diagnostics.recordUnsafeInternalAccess(
++            profile,
++            "bytecode-call " + className + "#" + methodName + " -> " + owner + "#" + targetName + descriptor
++        );
++    }
++
++    public static void beforeBlockingWait(
++        final String className,
++        final String methodName,
++        final String owner,
++        final String targetName,
++        final String descriptor
++    ) {
++        final Plugin plugin = currentPlugin();
++        if (plugin != null) {
++            final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
++            final PluginCompatibilityProfile profile = diagnostics.profileFor(plugin);
++            diagnostics.recordOwnerDomainWaitViolation(
++                profile,
++                "bytecode-wait " + className + "#" + methodName + " -> " + owner + "#" + targetName + descriptor
++            );
++        }
++
++        if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
++            throw new IllegalStateException(
++                "Blocking wait detected in owner domain from " + className + "#" + methodName + " -> " + owner + "#" + targetName + descriptor
++            );
++        }
++    }
++
++    private static Plugin currentPlugin() {
++        final Plugin contextPlugin = CompatibilityRuntimeContext.currentPlugin();
++        if (contextPlugin != null) {
++            return contextPlugin;
++        }
++        return StackWalkerUtil.getFirstPluginCaller();
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
+index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc77ea3af0 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
+@@ -20,7 +20,10 @@ public final class CompatibilityDiagnostics {
+         long committed,
+         long aborted,
+         long totalNanos,
+-        long monitorMutations
++        long monitorMutations,
++        long snapshotDeliveries,
++        long mutationTransactions,
++        long commitFailures
+     ) {
+     }
+ 
+@@ -29,12 +32,21 @@ public final class CompatibilityDiagnostics {
+         List<EventSummary> hotEvents,
+         long transactions,
+         long monitorMutations,
++        long snapshotDeliveries,
++        long mutationTransactions,
++        long mutationCommitFailures,
+         long strictFallbacks,
+         long refusals,
+-        long asyncViolations
++        long asyncViolations,
++        long ownerRpcWaitNanos,
++        long barrierWaitNanos,
++        Map<String, BarrierSummary> barriers
+     ) {
+     }
+ 
++    public record BarrierSummary(String level, long count, long totalNanos) {
++    }
++
+     private static final Logger LOGGER = LogUtils.getLogger();
+     private static final CompatibilityDiagnostics GLOBAL = new CompatibilityDiagnostics();
+ 
+@@ -43,9 +55,15 @@ public final class CompatibilityDiagnostics {
+ 
+     private final LongAdder transactions = new LongAdder();
+     private final LongAdder monitorMutations = new LongAdder();
++    private final LongAdder snapshotDeliveries = new LongAdder();
++    private final LongAdder mutationTransactions = new LongAdder();
++    private final LongAdder mutationCommitFailures = new LongAdder();
+     private final LongAdder strictFallbacks = new LongAdder();
+     private final LongAdder refusals = new LongAdder();
+     private final LongAdder asyncViolations = new LongAdder();
++    private final LongAdder ownerRpcWaitNanos = new LongAdder();
++    private final LongAdder barrierWaitNanos = new LongAdder();
++    private final ConcurrentMap<String, BarrierCounter> barriers = new ConcurrentHashMap<>();
+ 
+     public static CompatibilityDiagnostics global() {
+         return GLOBAL;
+@@ -65,6 +83,28 @@ public final class CompatibilityDiagnostics {
+             counter.committed.increment();
+         } else if (transaction.state() == CompatibilityTransaction.State.ABORTED) {
+             counter.aborted.increment();
++            if (transaction.pendingWriteCount() > 0) {
++                counter.commitFailures.increment();
++                this.mutationCommitFailures.increment();
++            }
++        }
++
++        if (transaction.pendingWriteCount() > 0) {
++            counter.mutationTransactions.increment();
++            this.mutationTransactions.increment();
++        }
++
++        if (transaction.state() == CompatibilityTransaction.State.ABORTED) {
++            this.logStructured(
++                "transaction_aborted",
++                Map.of(
++                    "event", transaction.event().getEventName(),
++                    "transactionId", transaction.id(),
++                    "parentTransactionId", transaction.parentTransactionId(),
++                    "reason", transaction.abortReason() == null ? "<none>" : transaction.abortReason(),
++                    "pendingWrites", transaction.pendingWriteCount()
++                )
++            );
+         }
+ 
+         final List<CompatibilityTransaction.MonitorMutation> monitorChanges = transaction.monitorMutations();
+@@ -84,6 +124,13 @@ public final class CompatibilityDiagnostics {
+         }
+     }
+ 
++    public void recordSnapshotDelivery(final PluginCompatibilityProfile profile, final String eventName) {
++        this.snapshotDeliveries.increment();
++        final EventCounter counter = this.events.computeIfAbsent(eventName, ignored -> new EventCounter());
++        counter.snapshotDeliveries.increment();
++        profile.noteSnapshotDelivery(eventName);
++    }
++
+     public void recordStrictFallback(final PluginCompatibilityProfile profile, final String reason) {
+         this.strictFallbacks.increment();
+         profile.noteStrictFallback(reason);
+@@ -97,6 +144,99 @@ public final class CompatibilityDiagnostics {
+         );
+     }
+ 
++    public void recordOwnerRpcWait(
++        final PluginCompatibilityProfile profile,
++        final String operation,
++        final long nanos
++    ) {
++        final long safeNanos = Math.max(0L, nanos);
++        this.ownerRpcWaitNanos.add(safeNanos);
++        profile.noteOwnerRpcWaitNanos(safeNanos);
++        if (safeNanos >= 5_000_000L) {
++            this.logStructured(
++                "owner_rpc_wait",
++                Map.of(
++                    "plugin", profile.pluginName(),
++                    "operation", operation,
++                    "nanos", safeNanos
++                )
++            );
++        }
++    }
++
++    public void recordBarrierWait(
++        final PluginCompatibilityProfile profile,
++        final String level,
++        final String operation,
++        final long nanos
++    ) {
++        final long safeNanos = Math.max(0L, nanos);
++        this.barrierWaitNanos.add(safeNanos);
++        profile.noteBarrierTimeNanos(safeNanos);
++        final BarrierCounter counter = this.barriers.computeIfAbsent(level, ignored -> new BarrierCounter());
++        counter.count.increment();
++        counter.totalNanos.add(safeNanos);
++        if (safeNanos >= 5_000_000L) {
++            this.logStructured(
++                "barrier_wait",
++                Map.of(
++                    "plugin", profile.pluginName(),
++                    "level", level,
++                    "operation", operation,
++                    "nanos", safeNanos
++                )
++            );
++        }
++    }
++
++    public void recordUnsafeInternalAccess(final PluginCompatibilityProfile profile, final String reason) {
++        profile.noteUnsafeInternalAccess(CompatibilityRuntimeContext.currentPath(), reason);
++        this.logStructured(
++            "unsafe_internal_access",
++            Map.of(
++                "plugin", profile.pluginName(),
++                "reason", reason,
++                "mode", profile.mode().name()
++            )
++        );
++    }
++
++    public void recordOwnerDomainWaitViolation(final PluginCompatibilityProfile profile, final String operation) {
++        profile.noteOwnerDomainWaitViolation(operation);
++        this.logStructured(
++            "owner_domain_wait_violation",
++            Map.of(
++                "plugin", profile.pluginName(),
++                "operation", operation,
++                "mode", profile.mode().name()
++            )
++        );
++    }
++
++    public void recordOwnerDomainWaitViolation(
++        final PluginCompatibilityProfile profile,
++        final String path,
++        final String operation
++    ) {
++        this.recordOwnerDomainWaitViolation(profile, operation + " path=" + path);
++    }
++
++    public void recordContinuationResume(
++        final PluginCompatibilityProfile profile,
++        final String operation,
++        final long nanos
++    ) {
++        this.recordOwnerRpcWait(profile, "continuation:" + operation, nanos);
++        this.logStructured(
++            "continuation_resumed",
++            Map.of(
++                "plugin", profile.pluginName(),
++                "operation", operation,
++                "nanos", Math.max(0L, nanos)
++            )
++        );
++    }
++
+     public void recordRefusal(final PluginCompatibilityProfile profile, final String reason) {
+         this.refusals.increment();
+         profile.noteRefusal(reason);
+@@ -142,19 +282,34 @@ public final class CompatibilityDiagnostics {
+                 value.committed.longValue(),
+                 value.aborted.longValue(),
+                 value.totalNanos.longValue(),
+-                value.monitorMutations.longValue()
++                value.monitorMutations.longValue(),
++                value.snapshotDeliveries.longValue(),
++                value.mutationTransactions.longValue(),
++                value.commitFailures.longValue()
+             ));
+         }
+         hotEvents.sort(Comparator.comparingLong(EventSummary::totalNanos).reversed());
+ 
++        final Map<String, BarrierSummary> barrierSummary = new LinkedHashMap<>();
++        for (final Map.Entry<String, BarrierCounter> entry : this.barriers.entrySet()) {
++            final BarrierCounter counter = entry.getValue();
++            barrierSummary.put(entry.getKey(), new BarrierSummary(entry.getKey(), counter.count.longValue(), counter.totalNanos.longValue()));
++        }
++
+         return new Snapshot(
+             pluginSnapshots,
+             hotEvents,
+             this.transactions.longValue(),
+             this.monitorMutations.longValue(),
++            this.snapshotDeliveries.longValue(),
++            this.mutationTransactions.longValue(),
++            this.mutationCommitFailures.longValue(),
+             this.strictFallbacks.longValue(),
+             this.refusals.longValue(),
+-            this.asyncViolations.longValue()
++            this.asyncViolations.longValue(),
++            this.ownerRpcWaitNanos.longValue(),
++            this.barrierWaitNanos.longValue(),
++            barrierSummary
+         );
+     }
+ 
+@@ -165,9 +320,14 @@ public final class CompatibilityDiagnostics {
+         lines.add("Compatibility Kernel:");
+         lines.add("  transactions=" + snapshot.transactions()
+             + ", monitorMutations=" + snapshot.monitorMutations()
++            + ", snapshotDeliveries=" + snapshot.snapshotDeliveries()
++            + ", mutationTransactions=" + snapshot.mutationTransactions()
++            + ", mutationCommitFailures=" + snapshot.mutationCommitFailures()
+             + ", strictFallbacks=" + snapshot.strictFallbacks()
+             + ", refusals=" + snapshot.refusals()
+-            + ", asyncViolations=" + snapshot.asyncViolations());
++            + ", asyncViolations=" + snapshot.asyncViolations()
++            + ", ownerRpcWait=" + formatNanos(snapshot.ownerRpcWaitNanos())
++            + ", barrierWait=" + formatNanos(snapshot.barrierWaitNanos()));
+ 
+         lines.add("  Plugins:");
+         int pluginCount = 0;
+@@ -187,6 +347,8 @@ public final class CompatibilityDiagnostics {
+                 + " ordered=" + plugin.orderedTransactions()
+                 + " monitor=" + plugin.monitorMutationAttempts()
+                 + " async=" + plugin.asyncBukkitViolations()
++                + " snapshots=" + plugin.snapshotDeliveries()
++                + " lanes=" + plugin.laneUsage()
+                 + " hotEvents=" + hotEvents);
+         }
+ 
+@@ -201,9 +363,19 @@ public final class CompatibilityDiagnostics {
+                 + " commit=" + event.committed()
+                 + " abort=" + event.aborted()
+                 + " monitor=" + event.monitorMutations()
++                + " snapshots=" + event.snapshotDeliveries()
++                + " mutations=" + event.mutationTransactions()
++                + " commitFailures=" + event.commitFailures()
+                 + " total=" + formatNanos(event.totalNanos()));
+         }
+ 
++        if (!snapshot.barriers().isEmpty()) {
++            lines.add("  Barriers:");
++            for (final BarrierSummary barrier : snapshot.barriers().values()) {
++                lines.add("    " + barrier.level() + " count=" + barrier.count() + " total=" + formatNanos(barrier.totalNanos()));
++            }
++        }
++
+         return lines;
+     }
+ 
+@@ -212,9 +384,14 @@ public final class CompatibilityDiagnostics {
+         final Map<String, Object> root = new LinkedHashMap<>();
+         root.put("transactions", snapshot.transactions());
+         root.put("monitorMutations", snapshot.monitorMutations());
++        root.put("snapshotDeliveries", snapshot.snapshotDeliveries());
++        root.put("mutationTransactions", snapshot.mutationTransactions());
++        root.put("mutationCommitFailures", snapshot.mutationCommitFailures());
+         root.put("strictFallbacks", snapshot.strictFallbacks());
+         root.put("refusals", snapshot.refusals());
+         root.put("asyncViolations", snapshot.asyncViolations());
++        root.put("ownerRpcWaitNanos", snapshot.ownerRpcWaitNanos());
++        root.put("barrierWaitNanos", snapshot.barrierWaitNanos());
+ 
+         final List<Map<String, Object>> plugins = new ArrayList<>();
+         for (final PluginCompatibilityProfile.Snapshot plugin : snapshot.plugins()) {
+@@ -227,8 +404,10 @@ public final class CompatibilityDiagnostics {
+             pluginJson.put("orderedTransactions", plugin.orderedTransactions());
+             pluginJson.put("monitorMutationAttempts", plugin.monitorMutationAttempts());
+             pluginJson.put("asyncBukkitViolations", plugin.asyncBukkitViolations());
++            pluginJson.put("snapshotDeliveries", plugin.snapshotDeliveries());
+             pluginJson.put("strictFallbacks", plugin.strictFallbacks());
+             pluginJson.put("refusals", plugin.refusals());
++            pluginJson.put("laneUsage", plugin.laneUsage());
+             plugins.add(pluginJson);
+         }
+         root.put("plugins", plugins);
+@@ -241,11 +420,24 @@ public final class CompatibilityDiagnostics {
+             eventJson.put("committed", event.committed());
+             eventJson.put("aborted", event.aborted());
+             eventJson.put("monitorMutations", event.monitorMutations());
++            eventJson.put("snapshotDeliveries", event.snapshotDeliveries());
++            eventJson.put("mutationTransactions", event.mutationTransactions());
++            eventJson.put("commitFailures", event.commitFailures());
+             eventJson.put("totalNanos", event.totalNanos());
+             events.add(eventJson);
+         }
+         root.put("events", events);
+ 
++        final List<Map<String, Object>> barriers = new ArrayList<>();
++        for (final BarrierSummary barrier : snapshot.barriers().values()) {
++            final Map<String, Object> barrierJson = new LinkedHashMap<>();
++            barrierJson.put("level", barrier.level());
++            barrierJson.put("count", barrier.count());
++            barrierJson.put("totalNanos", barrier.totalNanos());
++            barriers.add(barrierJson);
++        }
++        root.put("barriers", barriers);
++
+         return toJson(root);
+     }
+ 
+@@ -315,5 +507,13 @@ public final class CompatibilityDiagnostics {
+         private final LongAdder aborted = new LongAdder();
+         private final LongAdder totalNanos = new LongAdder();
+         private final LongAdder monitorMutations = new LongAdder();
++        private final LongAdder snapshotDeliveries = new LongAdder();
++        private final LongAdder mutationTransactions = new LongAdder();
++        private final LongAdder commitFailures = new LongAdder();
++    }
++
++    private static final class BarrierCounter {
++        private final LongAdder count = new LongAdder();
++        private final LongAdder totalNanos = new LongAdder();
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
+index b5c04022749001fb25b7386a38477f842fa3c744..c7438c10b7442aa226fd53453651fd46c7a0fe20 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
+@@ -1,5 +1,6 @@
+ package io.papermc.paper.plugin.manager.compat;
+ 
++import io.papermc.paper.configuration.GlobalConfiguration;
+ import java.util.Map;
+ import java.util.concurrent.ConcurrentHashMap;
+ import org.bukkit.event.Event;
+@@ -11,10 +12,39 @@ public final class CompatibilityKernel {
+     public enum InvocationPolicy {
+         NATIVE,
+         APARTMENT,
++        EMERGENCY_COMPATIBILITY,
+         STRICT_FALLBACK,
+         REFUSE
+     }
+ 
++    public enum ExecutionLane {
++        FAST_LANE,
++        TRANSACTION_LANE,
++        APARTMENT_LANE,
++        EMERGENCY_COMPATIBILITY_LANE,
++        REFUSAL_LANE
++    }
++
++    public enum DispatchRoute {
++        NATIVE_FAST_PATH,
++        SNAPSHOT_OBSERVER,
++        ORDERED_DECISION,
++        MUTATION_TRANSACTION,
++        UNSAFE_INTERNAL,
++        STRICT_REFUSAL
++    }
++
++    public record RoutingDecision(DispatchRoute route, String reason) {
++    }
++
++    public record InvocationPlan(
++        InvocationPolicy policy,
++        ExecutionLane lane,
++        String path,
++        String reason
++    ) {
++    }
++
+     private final EventSemanticIndex eventSemanticIndex = new EventSemanticIndex();
+     private final BukkitFacadeRegistry facadeRegistry = new BukkitFacadeRegistry();
+     private final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
+@@ -46,6 +76,50 @@ public final class CompatibilityKernel {
+         return new CompatibilityTransaction(event, semantics);
+     }
+ 
++    public RoutingDecision routingDecision(final CompatibilityTransaction transaction, final RegisteredListener[] listeners) {
++        if (listeners.length == 0) {
++            return new RoutingDecision(DispatchRoute.NATIVE_FAST_PATH, "no listeners registered");
++        }
++
++        boolean hasLegacy = false;
++        boolean hasInternal = false;
++        boolean hasStrictOrRefused = false;
++
++        for (final RegisteredListener listener : listeners) {
++            final PluginCompatibilityProfile profile = this.profileFor(listener.getPlugin());
++            switch (profile.mode()) {
++                case NATIVE_LOOM_AWARE -> {
++                }
++                case LEGACY_NORMAL, LEGACY_ORDERED -> hasLegacy = true;
++                case LEGACY_INTERNAL -> {
++                    hasLegacy = true;
++                    hasInternal = true;
++                }
++                case LEGACY_STRICT, REFUSED -> {
++                    hasLegacy = true;
++                    hasStrictOrRefused = true;
++                }
++            }
++        }
++
++        if (hasStrictOrRefused) {
++            return new RoutingDecision(DispatchRoute.STRICT_REFUSAL, "strict/refused listener profile");
++        }
++        if (hasInternal) {
++            return new RoutingDecision(DispatchRoute.UNSAFE_INTERNAL, "internal listener profile");
++        }
++        if (hasLegacy && transaction.semantics().observerOnly()) {
++            return new RoutingDecision(DispatchRoute.SNAPSHOT_OBSERVER, "legacy observer listeners only");
++        }
++        if (transaction.semantics().monitorListeners()) {
++            return new RoutingDecision(DispatchRoute.MUTATION_TRANSACTION, "monitor lane present");
++        }
++        if (transaction.semantics().orderedDecision()) {
++            return new RoutingDecision(DispatchRoute.ORDERED_DECISION, "ordered/cancellable listener semantics");
++        }
++        return new RoutingDecision(DispatchRoute.NATIVE_FAST_PATH, "native listener set");
++    }
++
+     public InvocationPolicy policyFor(final PluginCompatibilityProfile profile) {
+         return switch (profile.mode()) {
+             case NATIVE_LOOM_AWARE -> InvocationPolicy.NATIVE;
+@@ -55,6 +129,52 @@ public final class CompatibilityKernel {
+         };
+     }
+ 
++    public InvocationPlan planFor(
++        final RegisteredListener listener,
++        final CompatibilityTransaction transaction,
++        final RoutingDecision routingDecision
++    ) {
++        final PluginCompatibilityProfile profile = this.profileFor(listener.getPlugin());
++        final String path = pathFor(transaction, listener);
++        final PluginCompatibilityProfile.State state = profile.stateForPath(path);
++        final CompatibilityMode compatibilityMode = configuredMode();
++
++        if (profile.mode() == PluginCompatibilityProfile.Mode.REFUSED || state == PluginCompatibilityProfile.State.REFUSED) {
++            return new InvocationPlan(InvocationPolicy.REFUSE, ExecutionLane.REFUSAL_LANE, path, "profile/path refused");
++        }
++
++        if (compatibilityMode == CompatibilityMode.STRICT && state == PluginCompatibilityProfile.State.FORCED_MAX_COMPAT) {
++            return new InvocationPlan(InvocationPolicy.REFUSE, ExecutionLane.REFUSAL_LANE, path, "strict mode refuses forced max-compat path");
++        }
++
++        if (compatibilityMode == CompatibilityMode.MAX_COMPAT) {
++            if (profile.mode() == PluginCompatibilityProfile.Mode.NATIVE_LOOM_AWARE && state == PluginCompatibilityProfile.State.NATIVE_FAST_PATH
++                && routingDecision.route() == DispatchRoute.NATIVE_FAST_PATH) {
++                return new InvocationPlan(InvocationPolicy.NATIVE, ExecutionLane.FAST_LANE, path, "max-compat preserved native fast path");
++            }
++            return new InvocationPlan(InvocationPolicy.EMERGENCY_COMPATIBILITY, ExecutionLane.EMERGENCY_COMPATIBILITY_LANE, path, "max-compat policy");
++        }
++
++        if (state == PluginCompatibilityProfile.State.FORCED_MAX_COMPAT) {
++            return new InvocationPlan(
++                InvocationPolicy.EMERGENCY_COMPATIBILITY,
++                ExecutionLane.EMERGENCY_COMPATIBILITY_LANE,
++                path,
++                "path forced to max compatibility"
++            );
++        }
++
++        final InvocationPolicy policy = this.policyFor(profile);
++        final ExecutionLane lane = laneFor(policy, routingDecision);
++        return new InvocationPlan(policy, lane, path, routingDecision.reason());
++    }
++
++    public static String pathFor(final CompatibilityTransaction transaction, final RegisteredListener listener) {
++        return "event:" + transaction.event().getEventName()
++            + "#priority:" + listener.getPriority().name()
++            + "#ignoreCancelled:" + listener.isIgnoringCancelled();
++    }
++
+     public void finishTransaction(final CompatibilityTransaction transaction) {
+         transaction.finish();
+         this.diagnostics.recordTransaction(transaction);
+@@ -66,4 +186,25 @@ public final class CompatibilityKernel {
+     ) {
+         profile.noteMonitorMutation("MONITOR lane mutated " + mutation.event() + " in tx=" + mutation.transactionId());
+     }
+-}
+\ No newline at end of file
++
++    private static ExecutionLane laneFor(final InvocationPolicy policy, final RoutingDecision routingDecision) {
++        return switch (policy) {
++            case NATIVE -> ExecutionLane.FAST_LANE;
++            case APARTMENT -> switch (routingDecision.route()) {
++                case ORDERED_DECISION, MUTATION_TRANSACTION -> ExecutionLane.TRANSACTION_LANE;
++                case SNAPSHOT_OBSERVER, UNSAFE_INTERNAL, STRICT_REFUSAL, NATIVE_FAST_PATH -> ExecutionLane.APARTMENT_LANE;
++            };
++            case STRICT_FALLBACK -> ExecutionLane.TRANSACTION_LANE;
++            case EMERGENCY_COMPATIBILITY -> ExecutionLane.EMERGENCY_COMPATIBILITY_LANE;
++            case REFUSE -> ExecutionLane.REFUSAL_LANE;
++        };
++    }
++
++    private static CompatibilityMode configuredMode() {
++        final GlobalConfiguration globalConfiguration = GlobalConfiguration.get();
++        if (globalConfiguration == null || globalConfiguration.compatibility == null) {
++            return CompatibilityMode.HYBRID;
++        }
++        return CompatibilityMode.fromConfig(globalConfiguration.compatibility.mode);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
+index d74cfaccb784b744998cfc583fa995f272fcc19d..a2088af44fc4cd5b24377c8a80ebc8afd8c55ba9 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
+@@ -2,35 +2,121 @@ package io.papermc.paper.plugin.manager.compat;
+ 
+ import java.util.ArrayDeque;
+ import java.util.Deque;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.atomic.AtomicLong;
+ import org.bukkit.plugin.Plugin;
+ import org.jspecify.annotations.Nullable;
+ 
+ public final class CompatibilityRuntimeContext {
+ 
+-    public record ScopeState(Plugin plugin, long transactionId, boolean strictFallback) {
++    public record ScopeState(
++        Plugin plugin,
++        @Nullable CompatibilityTransaction transaction,
++        long transactionId,
++        boolean strictFallback,
++        String path,
++        long scopeId,
++        Map<Object, Object> facadeScopeCache
++    ) {
+     }
+ 
+     private static final ThreadLocal<Deque<ScopeState>> STACK = ThreadLocal.withInitial(ArrayDeque::new);
++    private static final AtomicLong NEXT_SCOPE_ID = new AtomicLong(1L);
++    private static final AtomicLong NEXT_SYNTHETIC_TRANSACTION_ID = new AtomicLong(-1L);
+ 
+     private CompatibilityRuntimeContext() {
+     }
+ 
+-    public static Scope enter(final Plugin plugin, final long transactionId, final boolean strictFallback) {
++    public static Scope enter(
++        final Plugin plugin,
++        final CompatibilityTransaction transaction,
++        final boolean strictFallback,
++        final String path
++    ) {
++        final Deque<ScopeState> stack = STACK.get();
++        stack.addLast(new ScopeState(
++            plugin,
++            transaction,
++            transaction.id(),
++            strictFallback,
++            path == null ? "<unknown-path>" : path,
++            NEXT_SCOPE_ID.getAndIncrement(),
++            new ConcurrentHashMap<>()
++        ));
++        return new Scope();
++    }
++
++    public static Scope enter(final Plugin plugin, final CompatibilityTransaction transaction, final boolean strictFallback) {
++        return enter(plugin, transaction, strictFallback, "<unknown-path>");
++    }
++
++    public static Scope enter(
++        final Plugin plugin,
++        final long transactionId,
++        final boolean strictFallback,
++        final String path
++    ) {
+         final Deque<ScopeState> stack = STACK.get();
+-        stack.addLast(new ScopeState(plugin, transactionId, strictFallback));
++        stack.addLast(new ScopeState(
++            plugin,
++            null,
++            transactionId,
++            strictFallback,
++            path == null ? "<unknown-path>" : path,
++            NEXT_SCOPE_ID.getAndIncrement(),
++            new ConcurrentHashMap<>()
++        ));
+         return new Scope();
+     }
+ 
++    public static Scope enter(final Plugin plugin, final long transactionId, final boolean strictFallback) {
++        return enter(plugin, transactionId, strictFallback, "<unknown-path>");
++    }
++
+     public static @Nullable Plugin currentPlugin() {
+         final Deque<ScopeState> stack = STACK.get();
+         return stack.isEmpty() ? null : stack.getLast().plugin();
+     }
+ 
++    public static @Nullable CompatibilityTransaction currentTransaction() {
++        final Deque<ScopeState> stack = STACK.get();
++        return stack.isEmpty() ? null : stack.getLast().transaction();
++    }
++
+     public static long currentTransactionId() {
+         final Deque<ScopeState> stack = STACK.get();
+         return stack.isEmpty() ? -1L : stack.getLast().transactionId();
+     }
+ 
++    public static long currentScopeId() {
++        final Deque<ScopeState> stack = STACK.get();
++        return stack.isEmpty() ? -1L : stack.getLast().scopeId();
++    }
++
++    public static String currentPath() {
++        final Deque<ScopeState> stack = STACK.get();
++        return stack.isEmpty() ? "<unknown-path>" : stack.getLast().path();
++    }
++
++    public static long syntheticTransactionId() {
++        return NEXT_SYNTHETIC_TRANSACTION_ID.decrementAndGet();
++    }
++
++    public static @Nullable Object scopeLookup(final Object key) {
++        final Deque<ScopeState> stack = STACK.get();
++        return stack.isEmpty() ? null : stack.getLast().facadeScopeCache().get(key);
++    }
++
++    @SuppressWarnings("unchecked")
++    public static <T> T scopeComputeIfAbsent(final Object key, final java.util.function.Supplier<T> supplier) {
++        final Deque<ScopeState> stack = STACK.get();
++        if (stack.isEmpty()) {
++            return supplier.get();
++        }
++        return (T)stack.getLast().facadeScopeCache().computeIfAbsent(key, ignored -> supplier.get());
++    }
++
+     public static boolean isStrictFallback() {
+         final Deque<ScopeState> stack = STACK.get();
+         return !stack.isEmpty() && stack.getLast().strictFallback();
+@@ -54,4 +140,4 @@ public final class CompatibilityRuntimeContext {
+             }
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySchedulerBridge.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySchedulerBridge.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..fed694d6b07ef509ca56c58b90dae821f373c21b
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySchedulerBridge.java
+@@ -0,0 +1,72 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import org.bukkit.plugin.Plugin;
++import org.bukkit.scheduler.BukkitScheduler;
++import org.bukkit.scheduler.BukkitTask;
++
++public final class CompatibilitySchedulerBridge {
++
++    private CompatibilitySchedulerBridge() {
++    }
++
++    public static BukkitTask runTask(final BukkitScheduler scheduler, final Plugin plugin, final Runnable task) {
++        return scheduler.runTask(plugin, task);
++    }
++
++    public static BukkitTask runTaskLater(final BukkitScheduler scheduler, final Plugin plugin, final Runnable task, final long delay) {
++        return scheduler.runTaskLater(plugin, task, delay);
++    }
++
++    public static BukkitTask runTaskTimer(
++        final BukkitScheduler scheduler,
++        final Plugin plugin,
++        final Runnable task,
++        final long delay,
++        final long period
++    ) {
++        return scheduler.runTaskTimer(plugin, task, delay, period);
++    }
++
++    public static BukkitTask runTaskAsynchronously(final BukkitScheduler scheduler, final Plugin plugin, final Runnable task) {
++        return scheduler.runTaskAsynchronously(plugin, wrapAsyncRunnable(plugin, task));
++    }
++
++    public static BukkitTask runTaskLaterAsynchronously(
++        final BukkitScheduler scheduler,
++        final Plugin plugin,
++        final Runnable task,
++        final long delay
++    ) {
++        return scheduler.runTaskLaterAsynchronously(plugin, wrapAsyncRunnable(plugin, task), delay);
++    }
++
++    public static BukkitTask runTaskTimerAsynchronously(
++        final BukkitScheduler scheduler,
++        final Plugin plugin,
++        final Runnable task,
++        final long delay,
++        final long period
++    ) {
++        return scheduler.runTaskTimerAsynchronously(plugin, wrapAsyncRunnable(plugin, task), delay, period);
++    }
++
++    private static Runnable wrapAsyncRunnable(final Plugin plugin, final Runnable task) {
++        if (task == null) {
++            return null;
++        }
++        if (task instanceof ScopedRunnable) {
++            return task;
++        }
++        return new ScopedRunnable(plugin, task);
++    }
++
++    private record ScopedRunnable(Plugin plugin, Runnable delegate) implements Runnable {
++        @Override
++        public void run() {
++            final long transactionId = CompatibilityRuntimeContext.syntheticTransactionId();
++            try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(this.plugin, transactionId, false)) {
++                this.delegate.run();
++            }
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServiceCallGraph.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServiceCallGraph.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..bd95d70291bf7a6f04af6e550657e3a63f2935d6
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServiceCallGraph.java
+@@ -0,0 +1,74 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import java.util.ArrayDeque;
++import java.util.Deque;
++import java.util.Objects;
++
++public final class CompatibilityServiceCallGraph {
++
++    public record Frame(String caller, String provider, String service, String method) {
++    }
++
++    public record EnterResult(boolean cycleDetected, String cyclePath) {
++    }
++
++    private static final ThreadLocal<Deque<Frame>> STACK = ThreadLocal.withInitial(ArrayDeque::new);
++
++    public EnterResult enter(final String caller, final String provider, final String service, final String method) {
++        Objects.requireNonNull(caller, "caller");
++        Objects.requireNonNull(provider, "provider");
++        Objects.requireNonNull(service, "service");
++        Objects.requireNonNull(method, "method");
++
++        final Deque<Frame> stack = STACK.get();
++        final boolean cycleDetected = stack.stream().anyMatch(frame -> frame.provider().equals(provider) && !caller.equals(provider));
++        final String cyclePath = cycleDetected ? this.describeCycle(stack, caller, provider, service, method) : "";
++        stack.addLast(new Frame(caller, provider, service, method));
++        return new EnterResult(cycleDetected, cyclePath);
++    }
++
++    public void exit() {
++        final Deque<Frame> stack = STACK.get();
++        if (!stack.isEmpty()) {
++            stack.removeLast();
++        }
++        if (stack.isEmpty()) {
++            STACK.remove();
++        }
++    }
++
++    private String describeCycle(
++        final Deque<Frame> stack,
++        final String caller,
++        final String provider,
++        final String service,
++        final String method
++    ) {
++        final StringBuilder builder = new StringBuilder();
++        for (final Frame frame : stack) {
++            if (!builder.isEmpty()) {
++                builder.append(" -> ");
++            }
++            builder.append(frame.caller())
++                .append("=>")
++                .append(frame.provider())
++                .append("[")
++                .append(frame.service())
++                .append("#")
++                .append(frame.method())
++                .append("]");
++        }
++        if (!builder.isEmpty()) {
++            builder.append(" -> ");
++        }
++        builder.append(caller)
++            .append("=>")
++            .append(provider)
++            .append("[")
++            .append(service)
++            .append("#")
++            .append(method)
++            .append("]");
++        return builder.toString();
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..cea50b424187f9a6003cfc798a5e16a32e8f08f4
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
+@@ -0,0 +1,263 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.util.StackWalkerUtil;
++import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.lang.reflect.Proxy;
++import java.util.Collection;
++import java.util.Collections;
++import java.util.IdentityHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.CompletionException;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.RegisteredServiceProvider;
++import org.bukkit.plugin.ServicePriority;
++import org.bukkit.plugin.ServicesManager;
++import org.bukkit.plugin.SimpleServicesManager;
++import org.jetbrains.annotations.NotNull;
++import org.jetbrains.annotations.Nullable;
++
++public final class CompatibilityServicesManager implements ServicesManager {
++
++    private final SimpleServicesManager delegate = new SimpleServicesManager();
++    private final CompatibilityKernel compatibilityKernel;
++    private final CompatibilityServiceCallGraph callGraph = new CompatibilityServiceCallGraph();
++
++    private final Map<Object, Object> wrappedProviders = Collections.synchronizedMap(new IdentityHashMap<>());
++
++    public CompatibilityServicesManager(final CompatibilityKernel compatibilityKernel) {
++        this.compatibilityKernel = compatibilityKernel;
++    }
++
++    @Override
++    public <T> void register(
++        final @NotNull Class<T> service,
++        final @NotNull T provider,
++        final @NotNull Plugin plugin,
++        final @NotNull ServicePriority priority
++    ) {
++        final T wrapped = this.wrapProvider(service, provider, plugin);
++        if (wrapped != provider) {
++            this.wrappedProviders.put(provider, wrapped);
++        }
++        this.delegate.register(service, wrapped, plugin, priority);
++    }
++
++    @Override
++    public void unregisterAll(final @NotNull Plugin plugin) {
++        this.delegate.unregisterAll(plugin);
++        synchronized (this.wrappedProviders) {
++            this.wrappedProviders.entrySet().removeIf(entry -> {
++                final Object wrapped = entry.getValue();
++                if (wrapped == null || !Proxy.isProxyClass(wrapped.getClass())) {
++                    return false;
++                }
++                final InvocationHandler invocationHandler = Proxy.getInvocationHandler(wrapped);
++                return invocationHandler instanceof ServiceProxyHandler proxyHandler && proxyHandler.providerPlugin.equals(plugin);
++            });
++        }
++    }
++
++    @Override
++    public void unregister(final @NotNull Class<?> service, final @NotNull Object provider) {
++        final Object registeredProvider = this.resolveRegisteredProvider(provider);
++        this.delegate.unregister(service, registeredProvider);
++        this.wrappedProviders.remove(provider);
++    }
++
++    @Override
++    public void unregister(final @NotNull Object provider) {
++        final Object registeredProvider = this.resolveRegisteredProvider(provider);
++        this.delegate.unregister(registeredProvider);
++        this.wrappedProviders.remove(provider);
++    }
++
++    @Override
++    public <T> @Nullable T load(final @NotNull Class<T> service) {
++        return this.delegate.load(service);
++    }
++
++    @Override
++    public <T> @Nullable RegisteredServiceProvider<T> getRegistration(final @NotNull Class<T> service) {
++        return this.delegate.getRegistration(service);
++    }
++
++    @Override
++    public @NotNull List<RegisteredServiceProvider<?>> getRegistrations(final @NotNull Plugin plugin) {
++        return this.delegate.getRegistrations(plugin);
++    }
++
++    @Override
++    public <T> @NotNull Collection<RegisteredServiceProvider<T>> getRegistrations(final @NotNull Class<T> service) {
++        return this.delegate.getRegistrations(service);
++    }
++
++    @Override
++    public @NotNull Collection<Class<?>> getKnownServices() {
++        return this.delegate.getKnownServices();
++    }
++
++    @Override
++    public <T> boolean isProvidedFor(final @NotNull Class<T> service) {
++        return this.delegate.isProvidedFor(service);
++    }
++
++    private Object resolveRegisteredProvider(final Object provider) {
++        final Object wrapped = this.wrappedProviders.get(provider);
++        if (wrapped != null) {
++            return wrapped;
++        }
++        return provider;
++    }
++
++    @SuppressWarnings("unchecked")
++    private <T> T wrapProvider(final Class<T> service, final T provider, final Plugin providerPlugin) {
++        if (!service.isInterface()) {
++            return provider;
++        }
++        if (Proxy.isProxyClass(provider.getClass()) && Proxy.getInvocationHandler(provider) instanceof ServiceProxyHandler) {
++            return provider;
++        }
++
++        final InvocationHandler invocationHandler = new ServiceProxyHandler(service, provider, providerPlugin);
++        final ClassLoader classLoader = provider.getClass().getClassLoader() == null ? service.getClassLoader() : provider.getClass().getClassLoader();
++        return (T)Proxy.newProxyInstance(classLoader, new Class<?>[] {service}, invocationHandler);
++    }
++
++    private final class ServiceProxyHandler implements InvocationHandler {
++
++        private final Class<?> service;
++        private final Object provider;
++        private final Plugin providerPlugin;
++
++        private ServiceProxyHandler(final Class<?> service, final Object provider, final Plugin providerPlugin) {
++            this.service = service;
++            this.provider = provider;
++            this.providerPlugin = providerPlugin;
++        }
++
++        @Override
++        public Object invoke(final Object proxy, final Method method, final Object[] args) throws Throwable {
++            if (method.getDeclaringClass() == Object.class) {
++                return method.invoke(this.provider, args);
++            }
++
++            final Plugin callerPlugin = resolveCallerPlugin();
++            final String callerName = callerPlugin == null ? "<unknown>" : callerPlugin.getPluginMeta().getName();
++            final String providerName = this.providerPlugin.getPluginMeta().getName();
++
++            final CompatibilityServiceCallGraph.EnterResult graphEntry = callGraph.enter(
++                callerName,
++                providerName,
++                this.service.getName(),
++                method.getName()
++            );
++            final String path = "service:" + this.service.getSimpleName() + "#" + method.getName();
++
++            final PluginCompatibilityProfile profile = compatibilityKernel.profileFor(this.providerPlugin);
++            if (graphEntry.cycleDetected()) {
++                compatibilityKernel.diagnostics().recordRefusal(profile, "service cycle " + graphEntry.cyclePath());
++                callGraph.exit();
++                throw new IllegalStateException("Compatibility service cycle detected: " + graphEntry.cyclePath());
++            }
++
++            try {
++                final long transactionId = currentTransactionId();
++                try (CompatibilityApartment.Scope scope = compatibilityKernel.apartmentFor(this.providerPlugin).enter(transactionId, false, path)) {
++                    if (scope.acquired()) {
++                        return invokeProvider(method, args);
++                    }
++
++                    profile.noteApartmentContention(
++                        "service contention " + this.service.getSimpleName() + "#" + method.getName()
++                    );
++                    compatibilityKernel.diagnostics().recordStrictFallback(
++                        profile,
++                        "service apartment busy " + this.service.getSimpleName() + "#" + method.getName() + " owner=" + scope.busyLease()
++                    );
++
++                    if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
++                        compatibilityKernel.diagnostics().recordOwnerDomainWaitViolation(
++                            profile,
++                            path,
++                            "owner-domain wait blocked"
++                        );
++                        throw new IllegalStateException(
++                            "Service call cannot block in owner domain: " + this.service.getSimpleName() + "#" + method.getName()
++                        );
++                    }
++
++                    final long start = System.nanoTime();
++                    try {
++                        return compatibilityKernel.apartmentFor(this.providerPlugin)
++                            .submitStrictFallback(() -> {
++                                try (CompatibilityApartment.Scope fallbackScope = compatibilityKernel.apartmentFor(this.providerPlugin)
++                                    .enter(transactionId, true, path)) {
++                                    if (!fallbackScope.acquired()) {
++                                        throw new IllegalStateException(
++                                            "Strict fallback apartment handoff failed for service "
++                                                + this.service.getSimpleName()
++                                                + "#"
++                                                + method.getName()
++                                        );
++                                    }
++                                    try {
++                                        return invokeProvider(method, args);
++                                    } catch (final Throwable throwable) {
++                                        if (throwable instanceof Exception exception) {
++                                            throw exception;
++                                        }
++                                        throw new RuntimeException(throwable);
++                                    }
++                                }
++                            })
++                            .join();
++                    } catch (final CompletionException completionException) {
++                        throw unwrapCompletionException(completionException);
++                    } finally {
++                        compatibilityKernel.diagnostics().recordOwnerRpcWait(
++                            profile,
++                            "service-handoff:" + this.service.getSimpleName() + "#" + method.getName(),
++                            System.nanoTime() - start
++                        );
++                    }
++                }
++            } finally {
++                callGraph.exit();
++            }
++        }
++
++        private long currentTransactionId() {
++            final long contextTransactionId = CompatibilityRuntimeContext.currentTransactionId();
++            if (contextTransactionId >= 0L) {
++                return contextTransactionId;
++            }
++            return CompatibilityRuntimeContext.syntheticTransactionId();
++        }
++
++        private Object invokeProvider(final Method method, final Object[] args) throws Throwable {
++            try {
++                return method.invoke(this.provider, args);
++            } catch (final InvocationTargetException invocationTargetException) {
++                final Throwable cause = invocationTargetException.getCause();
++                throw cause == null ? invocationTargetException : cause;
++            }
++        }
++
++        private static Plugin resolveCallerPlugin() {
++            final Plugin current = CompatibilityRuntimeContext.currentPlugin();
++            if (current != null) {
++                return current;
++            }
++            return StackWalkerUtil.getFirstPluginCaller();
++        }
++
++        private static Throwable unwrapCompletionException(final CompletionException completionException) {
++            final Throwable cause = completionException.getCause();
++            return cause == null ? completionException : cause;
++        }
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransaction.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransaction.java
+index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..99cc1893429571e8d50cfaea297b11c0f6feee41 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransaction.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransaction.java
+@@ -6,12 +6,16 @@ import java.lang.reflect.Modifier;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Comparator;
++import java.util.LinkedHashMap;
+ import java.util.List;
++import java.util.Map;
+ import java.util.Objects;
+ import java.util.concurrent.atomic.AtomicLong;
++import java.util.function.Supplier;
+ import org.bukkit.event.Cancellable;
+ import org.bukkit.event.Event;
+ import org.bukkit.plugin.RegisteredListener;
++import org.jspecify.annotations.Nullable;
+ 
+ public final class CompatibilityTransaction {
+ 
+@@ -46,9 +50,18 @@ public final class CompatibilityTransaction {
+     ) {
+     }
+ 
++    public record PendingWrite(
++        String ownerDomain,
++        String operation,
++        Object key,
++        Object value
++    ) {
++    }
++
+     private static final AtomicLong NEXT_ID = new AtomicLong(1L);
+ 
+     private final long id;
++    private final long parentTransactionId;
+     private final long startedNanos;
+     private final Event event;
+     private final EventSemanticIndex.EventSemantics semantics;
+@@ -57,12 +70,16 @@ public final class CompatibilityTransaction {
+ 
+     private volatile State state = State.OPEN;
+     private volatile long finishedNanos;
++    private volatile @Nullable String abortReason;
+ 
+     private final List<MonitorMutation> monitorMutations = new ArrayList<>();
+     private final List<ListenerPass> listenerPasses = new ArrayList<>();
++    private final List<PendingWrite> pendingWrites = new ArrayList<>();
++    private final Map<Object, Object> overlay = new LinkedHashMap<>();
+ 
+     public CompatibilityTransaction(final Event event, final EventSemanticIndex.EventSemantics semantics) {
+         this.id = NEXT_ID.getAndIncrement();
++        this.parentTransactionId = CompatibilityRuntimeContext.currentTransactionId();
+         this.startedNanos = System.nanoTime();
+         this.event = Objects.requireNonNull(event, "event");
+         this.semantics = Objects.requireNonNull(semantics, "semantics");
+@@ -78,6 +95,10 @@ public final class CompatibilityTransaction {
+         return this.event;
+     }
+ 
++    public long parentTransactionId() {
++        return this.parentTransactionId;
++    }
++
+     public EventSemanticIndex.EventSemantics semantics() {
+         return this.semantics;
+     }
+@@ -94,6 +115,10 @@ public final class CompatibilityTransaction {
+         return this.state;
+     }
+ 
++    public @Nullable String abortReason() {
++        return this.abortReason;
++    }
++
+     public long durationNanos() {
+         final long end = this.finishedNanos == 0L ? System.nanoTime() : this.finishedNanos;
+         return Math.max(0L, end - this.startedNanos);
+@@ -136,10 +161,26 @@ public final class CompatibilityTransaction {
+             return;
+         }
+         if (this.cancellable && ((Cancellable)this.event).isCancelled()) {
+-            this.state = State.ABORTED;
+-        } else {
+-            this.state = State.COMMITTED;
++            this.abort("event cancelled");
++            return;
+         }
++        this.commit();
++    }
++
++    public void commit() {
++        if (this.state != State.OPEN) {
++            return;
++        }
++        this.state = State.COMMITTED;
++        this.finishedNanos = System.nanoTime();
++    }
++
++    public void abort(final String reason) {
++        if (this.state != State.OPEN) {
++            return;
++        }
++        this.state = State.ABORTED;
++        this.abortReason = reason;
+         this.finishedNanos = System.nanoTime();
+     }
+ 
+@@ -151,6 +192,44 @@ public final class CompatibilityTransaction {
+         return List.copyOf(this.listenerPasses);
+     }
+ 
++    public void overlayWrite(
++        final Object key,
++        final Object value,
++        final String ownerDomain,
++        final String operation
++    ) {
++        Objects.requireNonNull(key, "key");
++        Objects.requireNonNull(ownerDomain, "ownerDomain");
++        Objects.requireNonNull(operation, "operation");
++        this.overlay.put(key, value);
++        this.pendingWrites.add(new PendingWrite(ownerDomain, operation, key, value));
++    }
++
++    @SuppressWarnings("unchecked")
++    public <T> @Nullable T overlayRead(final Object key) {
++        return (T)this.overlay.get(key);
++    }
++
++    @SuppressWarnings("unchecked")
++    public <T> T overlayReadOrCompute(final Object key, final Supplier<T> liveRead) {
++        if (this.overlay.containsKey(key)) {
++            return (T)this.overlay.get(key);
++        }
++        return liveRead.get();
++    }
++
++    public boolean hasOverlay(final Object key) {
++        return this.overlay.containsKey(key);
++    }
++
++    public int pendingWriteCount() {
++        return this.pendingWrites.size();
++    }
++
++    public List<PendingWrite> pendingWrites() {
++        return List.copyOf(this.pendingWrites);
++    }
++
+     private static int eventDigest(final Event event) {
+         int hash = 1;
+         for (Class<?> current = event.getClass(); current != null && Event.class.isAssignableFrom(current); current = current.getSuperclass()) {
+@@ -212,4 +291,4 @@ public final class CompatibilityTransaction {
+         }
+         return hash;
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/EventSemanticIndex.java b/src/main/java/io/papermc/paper/plugin/manager/compat/EventSemanticIndex.java
+index 879a3b3c6c6266ab23288b4adaeb5eef2a80803b..2017f86f7206cdde736ee1a3c3988f03725643b4 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/EventSemanticIndex.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/EventSemanticIndex.java
+@@ -35,6 +35,7 @@ public final class EventSemanticIndex {
+         boolean cancellable,
+         boolean orderedDecision,
+         boolean monitorListeners,
++        boolean observerOnly,
+         List<ListenerSemantic> listeners
+     ) {
+     }
+@@ -77,7 +78,8 @@ public final class EventSemanticIndex {
+ 
+         // All Bukkit dispatches are ordered, but cancellable events are decision-critical.
+         final boolean orderedDecision = cancellable || listeners.length > 1;
+-        return new EventSemantics(event.getEventName(), cancellable, orderedDecision, hasMonitor, resolved);
++        final boolean observerOnly = !cancellable && !hasMonitor;
++        return new EventSemantics(event.getEventName(), cancellable, orderedDecision, hasMonitor, observerOnly, resolved);
+     }
+ 
+     public List<ListenerSemantic> snapshot(final Class<? extends Event> eventClass) {
+@@ -95,4 +97,4 @@ public final class EventSemanticIndex {
+             case MONITOR -> Lane.MONITOR;
+         };
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
+index 783a46529621a59437ceaf56f1a3ef6346f0e90b..35444bb7b6dadce125417f699310470a409e2941 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
+@@ -6,7 +6,9 @@ import java.util.ArrayList;
+ import java.util.Comparator;
+ import java.util.Deque;
+ import java.util.List;
++import java.util.Locale;
+ import java.util.Map;
++import java.util.Set;
+ import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.atomic.LongAdder;
+ import org.bukkit.plugin.Plugin;
+@@ -26,6 +28,14 @@ public final class PluginCompatibilityProfile {
+         }
+     }
+ 
++    public enum State {
++        NATIVE_FAST_PATH,
++        LEGACY_OBSERVED_SAFE,
++        LEGACY_DEGRADED,
++        FORCED_MAX_COMPAT,
++        REFUSED
++    }
++
+     public enum EscalationReason {
+         STATIC_INTERNAL_HINT,
+         ORDERED_EVENT_LANE,
+@@ -54,11 +64,14 @@ public final class PluginCompatibilityProfile {
+         long ownerRpcWaitNanos,
+         long barrierTimeNanos,
+         long orderedTransactions,
++        long snapshotDeliveries,
+         long monitorMutationAttempts,
+         long asyncBukkitViolations,
++        long unsafeInternalViolations,
+         long strictFallbacks,
+         long refusals,
+         long ownerDomainWaitViolations,
++        Map<String, Long> laneUsage,
+         List<Escalation> escalations,
+         List<EventCost> hotEvents
+     ) {
+@@ -68,6 +81,7 @@ public final class PluginCompatibilityProfile {
+     }
+ 
+     private static final int MAX_ESCALATIONS = 64;
++    private static final ConcurrentHashMap<String, Set<String>> STATIC_INTERNAL_HINTS = new ConcurrentHashMap<>();
+ 
+     private final Plugin plugin;
+     private final String pluginName;
+@@ -79,18 +93,40 @@ public final class PluginCompatibilityProfile {
+     private final LongAdder ownerRpcWaitNanos = new LongAdder();
+     private final LongAdder barrierTimeNanos = new LongAdder();
+     private final LongAdder orderedTransactions = new LongAdder();
++    private final LongAdder snapshotDeliveries = new LongAdder();
+     private final LongAdder monitorMutationAttempts = new LongAdder();
+     private final LongAdder asyncBukkitViolations = new LongAdder();
++    private final LongAdder unsafeInternalViolations = new LongAdder();
+     private final LongAdder strictFallbacks = new LongAdder();
+     private final LongAdder refusals = new LongAdder();
+     private final LongAdder ownerDomainWaitViolations = new LongAdder();
+ 
+     private final Map<String, LongAdder> callbackNanosByEvent = new ConcurrentHashMap<>();
++    private final Map<String, State> pathStates = new ConcurrentHashMap<>();
++    private final Map<CompatibilityKernel.ExecutionLane, LongAdder> laneUsage = new ConcurrentHashMap<>();
++    private final LongAdder degradedPaths = new LongAdder();
++    private final LongAdder forcedMaxCompatPaths = new LongAdder();
+ 
+     public PluginCompatibilityProfile(final Plugin plugin) {
+         this.plugin = plugin;
+         this.pluginName = plugin.getPluginMeta().getName();
+         this.mode = initialMode(plugin.getPluginMeta());
++
++        final List<String> staticHints = staticInternalHints(this.pluginName);
++        if (!staticHints.isEmpty()) {
++            this.escalate(
++                Mode.LEGACY_INTERNAL,
++                EscalationReason.STATIC_INTERNAL_HINT,
++                "static hint: " + staticHints.getFirst()
++            );
++            for (int i = 1; i < Math.min(staticHints.size(), 4); ++i) {
++                this.escalate(
++                    Mode.LEGACY_INTERNAL,
++                    EscalationReason.STATIC_INTERNAL_HINT,
++                    "static hint: " + staticHints.get(i)
++                );
++            }
++        }
+     }
+ 
+     public Plugin plugin() {
+@@ -105,16 +141,30 @@ public final class PluginCompatibilityProfile {
+         return this.mode;
+     }
+ 
++    public State stateForPath(final String path) {
++        return this.pathStates.getOrDefault(normalizePath(path), this.defaultState());
++    }
++
+     public void noteOrderedTransaction() {
+         this.orderedTransactions.increment();
+         this.escalate(Mode.LEGACY_ORDERED, EscalationReason.ORDERED_EVENT_LANE, "ordered event transaction");
+     }
+ 
+     public void noteUnsafeInternalAccess(final String detail) {
++        this.unsafeInternalViolations.increment();
+         this.escalate(Mode.LEGACY_INTERNAL, EscalationReason.UNSAFE_INTERNAL_ACCESS, detail);
++        if (this.unsafeInternalViolations.longValue() >= 3L) {
++            this.escalate(Mode.LEGACY_STRICT, EscalationReason.STRICT_FALLBACK, "repeated unsafe internal access");
++        }
++    }
++
++    public void noteUnsafeInternalAccess(final String path, final String detail) {
++        this.markPathState(path, State.LEGACY_DEGRADED);
++        this.noteUnsafeInternalAccess(detail);
+     }
+ 
+     public void noteMonitorMutation(final String detail) {
++        this.markPathState(CompatibilityRuntimeContext.currentPath(), State.LEGACY_DEGRADED);
+         this.monitorMutationAttempts.increment();
+         this.escalate(Mode.LEGACY_ORDERED, EscalationReason.MONITOR_MUTATION, detail);
+         if (this.monitorMutationAttempts.longValue() >= 3L) {
+@@ -123,6 +173,7 @@ public final class PluginCompatibilityProfile {
+     }
+ 
+     public void noteAsyncBukkitAccess(final String detail) {
++        this.markPathState(CompatibilityRuntimeContext.currentPath(), State.LEGACY_DEGRADED);
+         this.asyncBukkitViolations.increment();
+         this.escalate(Mode.LEGACY_INTERNAL, EscalationReason.ASYNC_BUKKIT_ACCESS, detail);
+         if (this.asyncBukkitViolations.longValue() >= 2L) {
+@@ -131,6 +182,7 @@ public final class PluginCompatibilityProfile {
+     }
+ 
+     public void noteOwnerDomainWaitViolation(final String detail) {
++        this.markPathState(CompatibilityRuntimeContext.currentPath(), State.FORCED_MAX_COMPAT);
+         this.ownerDomainWaitViolations.increment();
+         this.escalate(Mode.LEGACY_STRICT, EscalationReason.OWNER_BLOCKING_WAIT, detail);
+     }
+@@ -149,15 +201,29 @@ public final class PluginCompatibilityProfile {
+         this.escalate(Mode.REFUSED, EscalationReason.REFUSAL, detail);
+     }
+ 
++    public void noteForcedMaxCompat(final String path, final String detail) {
++        this.markPathState(path, State.FORCED_MAX_COMPAT);
++        this.noteStrictFallback("forced max compatibility: " + detail);
++    }
++
+     public void noteCallbackCost(final String eventName, final long nanos) {
+         this.callbackTimeNanos.add(Math.max(0L, nanos));
+         this.callbackNanosByEvent.computeIfAbsent(eventName, ignored -> new LongAdder()).add(Math.max(0L, nanos));
+     }
+ 
++    public void noteSnapshotDelivery(final String eventName) {
++        this.snapshotDeliveries.increment();
++        this.callbackNanosByEvent.computeIfAbsent(eventName, ignored -> new LongAdder()).add(0L);
++    }
++
+     public void noteOwnerRpcWaitNanos(final long nanos) {
+         this.ownerRpcWaitNanos.add(Math.max(0L, nanos));
+     }
+ 
++    public void noteLaneUsage(final CompatibilityKernel.ExecutionLane lane) {
++        this.laneUsage.computeIfAbsent(lane, ignored -> new LongAdder()).increment();
++    }
++
+     public void noteBarrierTimeNanos(final long nanos) {
+         this.barrierTimeNanos.add(Math.max(0L, nanos));
+     }
+@@ -174,16 +240,37 @@ public final class PluginCompatibilityProfile {
+             this.ownerRpcWaitNanos.longValue(),
+             this.barrierTimeNanos.longValue(),
+             this.orderedTransactions.longValue(),
++            this.snapshotDeliveries.longValue(),
+             this.monitorMutationAttempts.longValue(),
+             this.asyncBukkitViolations.longValue(),
++            this.unsafeInternalViolations.longValue(),
+             this.strictFallbacks.longValue(),
+             this.refusals.longValue(),
+             this.ownerDomainWaitViolations.longValue(),
++            this.laneUsageSnapshot(),
+             history,
+             this.hotEvents(5)
+         );
+     }
+ 
++    public String classificationReport() {
++        final Snapshot snapshot = this.snapshot();
++        final Escalation firstEscalation = snapshot.escalations().isEmpty() ? null : snapshot.escalations().getFirst();
++        return "plugin=" + snapshot.plugin()
++            + ", mode=" + snapshot.mode()
++            + ", degradedPaths=" + this.degradedPaths.longValue()
++            + ", forcedMaxCompatPaths=" + this.forcedMaxCompatPaths.longValue()
++            + ", ordered=" + snapshot.orderedTransactions()
++            + ", snapshots=" + snapshot.snapshotDeliveries()
++            + ", monitorMutations=" + snapshot.monitorMutationAttempts()
++            + ", asyncViolations=" + snapshot.asyncBukkitViolations()
++            + ", unsafeInternals=" + snapshot.unsafeInternalViolations()
++            + ", strictFallbacks=" + snapshot.strictFallbacks()
++            + ", refusals=" + snapshot.refusals()
++            + ", laneUsage=" + snapshot.laneUsage()
++            + ", firstEscalation=" + (firstEscalation == null ? "none" : firstEscalation.reason() + ":" + firstEscalation.detail());
++    }
++
+     private List<EventCost> hotEvents(final int limit) {
+         final List<EventCost> eventCosts = new ArrayList<>(this.callbackNanosByEvent.size());
+         for (final Map.Entry<String, LongAdder> entry : this.callbackNanosByEvent.entrySet()) {
+@@ -209,11 +296,50 @@ public final class PluginCompatibilityProfile {
+                 this.escalations.removeFirst();
+             }
+         }
++        if (to == Mode.REFUSED) {
++            this.pathStates.replaceAll((ignored, existing) -> existing == State.FORCED_MAX_COMPAT ? existing : State.REFUSED);
++        }
++    }
++
++    private void markPathState(final String path, final State desiredState) {
++        final String normalized = normalizePath(path);
++        this.pathStates.compute(normalized, (ignored, existing) -> {
++            if (existing == State.REFUSED) {
++                return State.REFUSED;
++            }
++            if (existing == State.FORCED_MAX_COMPAT && desiredState != State.REFUSED) {
++                return existing;
++            }
++            if (desiredState == State.LEGACY_DEGRADED && existing == State.LEGACY_DEGRADED) {
++                return existing;
++            }
++            return desiredState;
++        });
++        if (desiredState == State.LEGACY_DEGRADED) {
++            this.degradedPaths.increment();
++        } else if (desiredState == State.FORCED_MAX_COMPAT) {
++            this.forcedMaxCompatPaths.increment();
++        }
++    }
++
++    private State defaultState() {
++        return switch (this.mode) {
++            case NATIVE_LOOM_AWARE -> State.NATIVE_FAST_PATH;
++            case REFUSED -> State.REFUSED;
++            default -> State.LEGACY_OBSERVED_SAFE;
++        };
++    }
++
++    private static String normalizePath(final String path) {
++        if (path == null || path.isBlank()) {
++            return "<unknown-path>";
++        }
++        return path.trim();
+     }
+ 
+     private static Mode initialMode(final PluginMeta meta) {
+-        final String name = meta.getName().toLowerCase(java.util.Locale.ROOT);
+-        final String mainClass = meta.getMainClass().toLowerCase(java.util.Locale.ROOT);
++        final String name = meta.getName().toLowerCase(Locale.ROOT);
++        final String mainClass = meta.getMainClass().toLowerCase(Locale.ROOT);
+ 
+         if (name.contains("loom") || mainClass.contains("loom")) {
+             return Mode.NATIVE_LOOM_AWARE;
+@@ -231,13 +357,28 @@ public final class PluginCompatibilityProfile {
+ 
+     private static boolean containsInternalDependency(final List<String> dependencies) {
+         for (final String dependency : dependencies) {
+-            if (containsInternalHint(dependency.toLowerCase(java.util.Locale.ROOT))) {
++            if (containsInternalHint(dependency.toLowerCase(Locale.ROOT))) {
+                 return true;
+             }
+         }
+         return false;
+     }
+ 
++    public static void recordStaticInternalHint(final String pluginName, final String hint) {
++        if (pluginName == null || pluginName.isBlank() || hint == null || hint.isBlank()) {
++            return;
++        }
++        STATIC_INTERNAL_HINTS.computeIfAbsent(pluginName.toLowerCase(Locale.ROOT), ignored -> ConcurrentHashMap.newKeySet()).add(hint);
++    }
++
++    private static List<String> staticInternalHints(final String pluginName) {
++        final Set<String> hints = STATIC_INTERNAL_HINTS.get(pluginName.toLowerCase(Locale.ROOT));
++        if (hints == null || hints.isEmpty()) {
++            return List.of();
++        }
++        return hints.stream().sorted().toList();
++    }
++
+     private static boolean containsInternalHint(final String text) {
+         return text.contains("protocol")
+             || text.contains("packet")
+@@ -248,4 +389,12 @@ public final class PluginCompatibilityProfile {
+             || text.contains("anticheat")
+             || text.contains("npc");
+     }
+-}
+\ No newline at end of file
++
++    private Map<String, Long> laneUsageSnapshot() {
++        final Map<String, Long> snapshot = new ConcurrentHashMap<>();
++        for (final Map.Entry<CompatibilityKernel.ExecutionLane, LongAdder> entry : this.laneUsage.entrySet()) {
++            snapshot.put(entry.getKey().name(), entry.getValue().longValue());
++        }
++        return snapshot;
++    }
++}
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index e0cd28970dcd610313504d726dd2b7522a1c7f6d..5815523c21ae1a0b204a7766a5bb6872cc9a1985 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -245,7 +245,6 @@ import org.bukkit.plugin.PluginLoadOrder;
+ import org.bukkit.plugin.PluginManager;
+ import org.bukkit.plugin.ServicesManager;
+ import org.bukkit.plugin.SimplePluginManager;
+-import org.bukkit.plugin.SimpleServicesManager;
+ import org.bukkit.plugin.messaging.Messenger;
+ import org.bukkit.plugin.messaging.StandardMessenger;
+ import org.bukkit.profile.PlayerProfile;
+@@ -265,7 +264,7 @@ public final class CraftServer implements Server {
+     private final String serverVersion;
+     private final String bukkitVersion = Versioning.getBukkitVersion();
+     private final Logger logger = Logger.getLogger("Minecraft");
+-    private final ServicesManager servicesManager = new SimpleServicesManager();
++    private final ServicesManager servicesManager;
+     private final CraftScheduler scheduler = new CraftScheduler();
+     private final CraftCommandMap commandMap; // Paper - Move down
+     private final SimpleHelpMap helpMap = new SimpleHelpMap(this);
+@@ -413,6 +412,7 @@ public final class CraftServer implements Server {
+         this.commandMap = new CraftCommandMap(this);
+         this.pluginManager = new SimplePluginManager(this, commandMap);
+         this.paperPluginManager = new io.papermc.paper.plugin.manager.PaperPluginManagerImpl(this, this.commandMap, pluginManager);
++        this.servicesManager = new io.papermc.paper.plugin.manager.compat.CompatibilityServicesManager(this.paperPluginManager.compatibilityKernel());
+         this.pluginManager.paperPluginManager = this.paperPluginManager;
+          // Paper end
+ 
+diff --git a/src/main/java/org/spigotmc/AsyncCatcher.java b/src/main/java/org/spigotmc/AsyncCatcher.java
+index 832fe50a45be55712e2ee92cd54ec927ac421a85..cd05cc077c61fea77d344710b37c9a533700fe72 100644
+--- a/src/main/java/org/spigotmc/AsyncCatcher.java
++++ b/src/main/java/org/spigotmc/AsyncCatcher.java
+@@ -1,11 +1,19 @@
+ package org.spigotmc;
+ 
++import io.papermc.paper.plugin.manager.compat.CompatibilityDiagnostics;
++import net.minecraft.core.BlockPos;
+ import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.entity.Entity;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
+ 
+ public class AsyncCatcher {
+ 
+     public static void catchOp(String reason) {
+         if (!ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) { // Paper - chunk system
++            CompatibilityDiagnostics.global().recordAsyncViolation("off-tick-thread: " + reason);
+             MinecraftServer.LOGGER.error("Thread {} failed main thread check: {}", Thread.currentThread().getName(), reason, new Throwable()); // Paper
+             throw new IllegalStateException("Asynchronous " + reason + "!");
+         }
+@@ -13,5 +21,81 @@ public class AsyncCatcher {
+ 
+     public static void catchOp(final String reason, final Object... context) {
+         catchOp(reason);
++        if (context == null || context.length == 0 || isOwnerForContext(context)) {
++            return;
++        }
++        CompatibilityDiagnostics.global().recordAsyncViolation("owner-mismatch: " + reason);
++        final String message = "Owner-domain violation for " + reason + ", context=" + describeContext(context);
++        MinecraftServer.LOGGER.error(message, new Throwable());
++        throw new IllegalStateException("Asynchronous " + reason + " (owner mismatch)!");
++    }
++
++    private static boolean isOwnerForContext(final Object... context) {
++        final MinecraftServer server = MinecraftServer.getServer();
++        if (server != null && OwnerDomainExecutor.isGlobalOwner(server)) {
++            return true;
++        }
++
++        for (final Object entry : context) {
++            if (entry instanceof Entity entity && OwnerDomainExecutor.isOwner(OwnerDomainExecutor.entity(entity, "async-catcher-entity"))) {
++                return true;
++            }
++        }
++
++        ServerLevel level = null;
++        BlockPos blockPos = null;
++        ChunkPos chunkPos = null;
++        Integer chunkX = null;
++        Integer chunkZ = null;
++
++        for (final Object entry : context) {
++            if (entry instanceof ServerLevel serverLevel) {
++                level = serverLevel;
++            } else if (entry instanceof Level anyLevel && anyLevel instanceof ServerLevel serverLevel) {
++                level = serverLevel;
++            } else if (entry instanceof BlockPos pos) {
++                blockPos = pos;
++            } else if (entry instanceof ChunkPos chunk) {
++                chunkPos = chunk;
++            } else if (entry instanceof Integer integer) {
++                if (chunkX == null) {
++                    chunkX = integer;
++                } else if (chunkZ == null) {
++                    chunkZ = integer;
++                }
++            }
++        }
++
++        if (level == null) {
++            return false;
++        }
++        if (chunkPos != null) {
++            return OwnerDomainExecutor.isOwner(OwnerDomainExecutor.region(level, chunkPos.x(), chunkPos.z(), "async-catcher-chunk-pos"));
++        }
++        if (blockPos != null) {
++            return OwnerDomainExecutor.isOwner(OwnerDomainExecutor.region(level, blockPos.getX() >> 4, blockPos.getZ() >> 4, "async-catcher-block-pos"));
++        }
++        if (chunkX != null && chunkZ != null) {
++            return OwnerDomainExecutor.isOwner(OwnerDomainExecutor.region(level, chunkX, chunkZ, "async-catcher-chunk-coordinates"));
++        }
++
++        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.currentOwner();
++        return owner != null && owner.domain() == OwnerDomainExecutor.Domain.REGION && owner.level() == level;
++    }
++
++    private static String describeContext(final Object... context) {
++        final StringBuilder builder = new StringBuilder("[");
++        for (int i = 0; i < context.length; ++i) {
++            if (i > 0) {
++                builder.append(", ");
++            }
++            final Object value = context[i];
++            if (value == null) {
++                builder.append("null");
++                continue;
++            }
++            builder.append(value.getClass().getSimpleName()).append(":").append(value);
++        }
++        return builder.append(']').toString();
+     }
+ }
+diff --git a/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java b/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
+index 3e89574757a44e506c5ce8c856806768d87f527f..7c05be6a5450ce4a56dc8ffd117e0ac78cb0b14e 100644
+--- a/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
++++ b/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
+@@ -1,5 +1,6 @@
+ package org.spigotmc;
+ 
++import io.papermc.paper.plugin.manager.compat.CompatibilityDiagnostics;
+ import net.kyori.adventure.text.Component;
+ import net.kyori.adventure.text.JoinConfiguration;
+ import net.kyori.adventure.text.TextComponent;
+@@ -27,8 +28,8 @@ public class LoomTicksPerSecondCommand extends Command {
+ 
+     public LoomTicksPerSecondCommand(final String name) {
+         super(name);
+-        this.description = "Gets threaded runtime diagnostics";
+-        this.usageMessage = "/loom:tps";
++        this.description = "Gets Loom runtime and compatibility diagnostics";
++        this.usageMessage = "/loom <tps|compatibility [json]>";
+         this.setPermission("bukkit.command.tps");
+     }
+ 
+@@ -38,6 +39,16 @@ public class LoomTicksPerSecondCommand extends Command {
+             return true;
+         }
+ 
++        if (args.length > 0 && args[0].equalsIgnoreCase("compatibility")) {
++            this.sendCompatibilitySummary(sender, args);
++            return true;
++        }
++
++        if (args.length > 0 && !args[0].equalsIgnoreCase("tps")) {
++            sender.sendMessage(text("Usage: " + this.usageMessage, NamedTextColor.RED));
++            return false;
++        }
++
+         final double[] tps = Bukkit.getTPS();
+         final Component[] tpsAvg = new Component[tps.length];
+         for (int i = 0; i < tps.length; ++i) {
+@@ -54,6 +65,19 @@ public class LoomTicksPerSecondCommand extends Command {
+         return true;
+     }
+ 
++    private void sendCompatibilitySummary(final CommandSender sender, final String[] args) {
++        final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
++        if (args.length > 1 && args[1].equalsIgnoreCase("json")) {
++            sender.sendMessage(text(diagnostics.renderStructuredJson(), NamedTextColor.GRAY));
++            return;
++        }
++
++        sender.sendMessage(text("Compatibility kernel report:", SOFT));
++        for (final String line : diagnostics.renderHumanReadable(12, 10)) {
++            sender.sendMessage(text(line, NamedTextColor.WHITE));
++        }
++    }
++
+     private void sendThreadedRuntimeSummary(final CommandSender sender) {
+         final TickRegions.RuntimeDiagnostics snapshot = TickRegions.snapshotDiagnostics();
+         final TickRegions.RuntimeDiagnostics previous = this.lastThreadedSnapshot;
+@@ -229,4 +253,4 @@ public class LoomTicksPerSecondCommand extends Command {
+         final String amount = ONE_DECIMAL_PLACES.get().format(tps);
+         return text(amount, color);
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/main/java/org/spigotmc/SpigotConfig.java b/src/main/java/org/spigotmc/SpigotConfig.java
+index 025ec3f3e84a3367b4d709c8c3ecd98f6dfecab4..bcabc539a8742587e8ee43a15eb2c05c8a4f552f 100644
+--- a/src/main/java/org/spigotmc/SpigotConfig.java
++++ b/src/main/java/org/spigotmc/SpigotConfig.java
+@@ -232,6 +232,10 @@ public class SpigotConfig {
+         SpigotConfig.commands.put("tps", new TicksPerSecondCommand("tps"));
+     }
+ 
++    private static void loomCommand() {
++        SpigotConfig.commands.put("loom", new LoomTicksPerSecondCommand("loom"));
++    }
++
+     public static int playerSample;
+     private static void playerSample() {
+         SpigotConfig.playerSample = Math.max(SpigotConfig.getInt("settings.sample-count", 12), 0); // Paper - Avoid negative counts
+diff --git a/src/test/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifierTest.java b/src/test/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifierTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb5d5e45fab930e31bab10cf91144c06ae2e39c2
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifierTest.java
+@@ -0,0 +1,132 @@
++package io.papermc.paper.plugin.entrypoint.classloader;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import io.papermc.paper.plugin.manager.compat.PluginCompatibilityProfile;
++import java.util.List;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++import org.objectweb.asm.ClassReader;
++import org.objectweb.asm.ClassWriter;
++import org.objectweb.asm.MethodVisitor;
++import org.objectweb.asm.Opcodes;
++import org.objectweb.asm.tree.AbstractInsnNode;
++import org.objectweb.asm.tree.ClassNode;
++import org.objectweb.asm.tree.MethodInsnNode;
++import org.objectweb.asm.tree.MethodNode;
++
++@Normal
++class PaperClassloaderBytecodeModifierTest {
++
++    @Test
++    void modifierRewritesSchedulerCallsAndInjectsBlockingWaitGuard() {
++        final byte[] original = samplePluginClass();
++        final PluginMeta meta = mockMeta("BytecodePlugin", "com.example.BytecodePlugin");
++
++        final byte[] modified = new PaperClassloaderBytecodeModifier().modify(meta, original);
++
++        final ClassNode node = new ClassNode();
++        new ClassReader(modified).accept(node, 0);
++
++        boolean sawSchedulerBridge = false;
++        boolean sawBlockingGuard = false;
++        boolean sawOriginalSchedulerInvoke = false;
++
++        for (final MethodNode method : node.methods) {
++            for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null; instruction = instruction.getNext()) {
++                if (instruction instanceof MethodInsnNode call) {
++                    if (call.owner.equals("io/papermc/paper/plugin/manager/compat/CompatibilitySchedulerBridge")
++                        && call.name.equals("runTaskAsynchronously")) {
++                        sawSchedulerBridge = true;
++                    }
++                    if (call.owner.equals("io/papermc/paper/plugin/manager/compat/CompatibilityBytecodeBridge")
++                        && call.name.equals("beforeBlockingWait")) {
++                        sawBlockingGuard = true;
++                    }
++                    if (call.owner.equals("org/bukkit/scheduler/BukkitScheduler")
++                        && call.name.equals("runTaskAsynchronously")) {
++                        sawOriginalSchedulerInvoke = true;
++                    }
++                }
++            }
++        }
++
++        Assertions.assertTrue(sawSchedulerBridge, "Expected scheduler bridge rewrite");
++        Assertions.assertTrue(sawBlockingGuard, "Expected blocking wait guard injection");
++        Assertions.assertFalse(sawOriginalSchedulerInvoke, "Expected original scheduler call to be replaced");
++    }
++
++    @Test
++    void staticHintsEscalateProfileToInternalMode() {
++        PluginCompatibilityProfile.recordStaticInternalHint("HintedPlugin", "owner:nms");
++
++        final PluginMeta meta = mockMeta("HintedPlugin", "com.example.HintedPlugin");
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++
++        final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_INTERNAL, profile.mode());
++        Assertions.assertFalse(profile.snapshot().escalations().isEmpty());
++    }
++
++    private static byte[] samplePluginClass() {
++        final ClassWriter writer = new ClassWriter(0);
++        writer.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, "com/example/TestPluginClass", null, "java/lang/Object", null);
++
++        MethodVisitor method = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
++        method.visitCode();
++        method.visitVarInsn(Opcodes.ALOAD, 0);
++        method.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
++        method.visitInsn(Opcodes.RETURN);
++        method.visitMaxs(1, 1);
++        method.visitEnd();
++
++        method = writer.visitMethod(
++            Opcodes.ACC_PUBLIC,
++            "run",
++            "(Lorg/bukkit/scheduler/BukkitScheduler;Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;Ljava/util/concurrent/CompletableFuture;)V",
++            null,
++            null
++        );
++        method.visitCode();
++        method.visitVarInsn(Opcodes.ALOAD, 1);
++        method.visitVarInsn(Opcodes.ALOAD, 2);
++        method.visitVarInsn(Opcodes.ALOAD, 3);
++        method.visitMethodInsn(
++            Opcodes.INVOKEINTERFACE,
++            "org/bukkit/scheduler/BukkitScheduler",
++            "runTaskAsynchronously",
++            "(Lorg/bukkit/plugin/Plugin;Ljava/lang/Runnable;)Lorg/bukkit/scheduler/BukkitTask;",
++            true
++        );
++        method.visitInsn(Opcodes.POP);
++
++        method.visitVarInsn(Opcodes.ALOAD, 4);
++        method.visitMethodInsn(
++            Opcodes.INVOKEVIRTUAL,
++            "java/util/concurrent/CompletableFuture",
++            "join",
++            "()Ljava/lang/Object;",
++            false
++        );
++        method.visitInsn(Opcodes.POP);
++        method.visitInsn(Opcodes.RETURN);
++        method.visitMaxs(3, 5);
++        method.visitEnd();
++
++        writer.visitEnd();
++        return writer.toByteArray();
++    }
++
++    private static PluginMeta mockMeta(final String name, final String mainClass) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn(mainClass);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++        return meta;
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/BukkitFacadeRegistryTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/BukkitFacadeRegistryTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ccc1b6e51b1719f8ae134960ce6f5360c2f02e31
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/BukkitFacadeRegistryTest.java
+@@ -0,0 +1,88 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.List;
++import java.util.UUID;
++import java.util.logging.Logger;
++import org.bukkit.NamespacedKey;
++import org.bukkit.World;
++import org.bukkit.event.Event;
++import org.bukkit.event.HandlerList;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.RegisteredListener;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class BukkitFacadeRegistryTest {
++
++    @Test
++    void registryInternsByLogicalIdentityAndSupportsOverlayReads() {
++        final Plugin plugin = mockPlugin("FacadePlugin");
++        final CompatibilityTransaction transaction = transactionFor(plugin);
++        final BukkitFacadeRegistry registry = new BukkitFacadeRegistry();
++
++        final UUID worldId = UUID.randomUUID();
++        final World worldA = Mockito.mock(World.class);
++        Mockito.when(worldA.getUID()).thenReturn(worldId);
++        Mockito.when(worldA.getKey()).thenReturn(NamespacedKey.minecraft("overworld"));
++
++        final World worldB = Mockito.mock(World.class);
++        Mockito.when(worldB.getUID()).thenReturn(worldId);
++        Mockito.when(worldB.getKey()).thenReturn(NamespacedKey.minecraft("overworld"));
++
++        final World first = registry.intern(worldA);
++        final World second = registry.intern(worldB);
++        Assertions.assertSame(first, second, "global facade identity should be stable");
++
++        try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, transaction, false)) {
++            final World scopedFirst = registry.intern(worldA);
++            final World scopedSecond = registry.intern(worldB);
++            Assertions.assertSame(scopedFirst, scopedSecond, "scope lookup should reuse same facade instance");
++        }
++
++        registry.writeOverlay(transaction, worldA, "spawn", "x:100,z:100", "GLOBAL_CONTROL", "setSpawnLocation");
++        final String overlayValue = registry.readOverlay(transaction, worldB, "spawn", () -> "x:0,z:0");
++        final String liveValue = registry.readOverlay(transaction, worldB, "weather", () -> "clear");
++
++        Assertions.assertEquals("x:100,z:100", overlayValue);
++        Assertions.assertEquals("clear", liveValue);
++    }
++
++    private static CompatibilityTransaction transactionFor(final Plugin plugin) {
++        final DummyEvent event = new DummyEvent();
++        final RegisteredListener[] listeners = new RegisteredListener[0];
++        final EventSemanticIndex.EventSemantics semantics = new EventSemanticIndex().resolve(event, listeners);
++        return new CompatibilityTransaction(event, semantics);
++    }
++
++    private static Plugin mockPlugin(final String name) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn("com.example." + name);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
++
++    private static final class DummyEvent extends Event {
++        private static final HandlerList HANDLERS = new HandlerList();
++
++        @Override
++        public HandlerList getHandlers() {
++            return HANDLERS;
++        }
++
++        public static HandlerList getHandlerList() {
++            return HANDLERS;
++        }
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
+index 35921cbece41b00a1261ea48437020a886653b5d..ed1d500b0398b32135926e234045cbdafccf6422 100644
+--- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
+@@ -39,6 +39,15 @@ class CompatibilityApartmentTest {
+         }
+     }
+ 
++    @Test
++    void strictFallbackExecutorRunsSerializedTasks() {
++        final Plugin plugin = mockPlugin("LegacyPlugin");
++        final CompatibilityApartment apartment = new CompatibilityApartment(plugin);
++
++        final String value = apartment.submitStrictFallback(() -> "ok").join();
++        Assertions.assertEquals("ok", value);
++    }
++
+     private static CompatibilityTransaction transactionFor(final Plugin plugin) {
+         final DummyEvent event = new DummyEvent();
+         final RegisteredListener[] listeners = new RegisteredListener[0];
+@@ -73,4 +82,4 @@ class CompatibilityApartmentTest {
+             return HANDLERS;
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnosticsTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnosticsTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..179481e9a9a28aefe74b48130fc230beb605dab4
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnosticsTest.java
+@@ -0,0 +1,90 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.List;
++import java.util.UUID;
++import java.util.logging.Logger;
++import org.bukkit.event.Cancellable;
++import org.bukkit.event.Event;
++import org.bukkit.event.HandlerList;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.RegisteredListener;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class CompatibilityDiagnosticsTest {
++
++    @Test
++    void diagnosticsTracksBarrierOwnerRpcAndMutationCommitFailures() {
++        final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
++        final CompatibilityDiagnostics.Snapshot before = diagnostics.snapshot();
++
++        final Plugin plugin = mockPlugin("DiagnosticsPlugin");
++        final PluginCompatibilityProfile profile = diagnostics.profileFor(plugin);
++
++        diagnostics.recordOwnerRpcWait(profile, "owner-rpc-test", 10_000_000L);
++        diagnostics.recordBarrierWait(profile, "GLOBAL_STRICT", "barrier-test", 12_000_000L);
++
++        final CompatibilityTransaction transaction = transactionFor();
++        transaction.overlayWrite("block:0,64,0", "STONE", "REGION", "setType");
++        transaction.abort("forced-abort");
++        diagnostics.recordTransaction(transaction);
++
++        final CompatibilityDiagnostics.Snapshot after = diagnostics.snapshot();
++
++        Assertions.assertTrue(after.ownerRpcWaitNanos() >= before.ownerRpcWaitNanos() + 10_000_000L);
++        Assertions.assertTrue(after.barrierWaitNanos() >= before.barrierWaitNanos() + 12_000_000L);
++        Assertions.assertTrue(after.mutationCommitFailures() >= before.mutationCommitFailures() + 1L);
++        Assertions.assertTrue(after.barriers().containsKey("GLOBAL_STRICT"));
++    }
++
++    private static CompatibilityTransaction transactionFor() {
++        final TestEvent event = new TestEvent();
++        final EventSemanticIndex.EventSemantics semantics = new EventSemanticIndex().resolve(event, new RegisteredListener[0]);
++        return new CompatibilityTransaction(event, semantics);
++    }
++
++    private static Plugin mockPlugin(final String name) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn("com.example." + name);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
++
++    private static final class TestEvent extends Event implements Cancellable {
++        private static final HandlerList HANDLERS = new HandlerList();
++
++        private boolean cancelled;
++        private UUID marker = UUID.randomUUID();
++
++        @Override
++        public boolean isCancelled() {
++            return this.cancelled;
++        }
++
++        @Override
++        public void setCancelled(final boolean cancel) {
++            this.cancelled = cancel;
++        }
++
++        @Override
++        public HandlerList getHandlers() {
++            return HANDLERS;
++        }
++
++        public static HandlerList getHandlerList() {
++            return HANDLERS;
++        }
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..0521fd22f4dd6b434634f313ed54d3f3181a2815
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java
+@@ -0,0 +1,82 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.List;
++import java.util.logging.Logger;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class CompatibilityPluginMatrixTest {
++
++    enum ExpectedOutcome {
++        SHOULD_WORK,
++        SHOULD_DEGRADE,
++        SHOULD_NOT_WORK
++    }
++
++    record MatrixEntry(String pluginName, String mainClass, List<String> dependencies, ExpectedOutcome expectedOutcome) {
++    }
++
++    @Test
++    void matrixContainsAllCompatibilityOutcomes() {
++        final List<MatrixEntry> matrix = List.of(
++            new MatrixEntry("LoomNativeTools", "com.example.loom.NativeTools", List.of(), ExpectedOutcome.SHOULD_WORK),
++            new MatrixEntry("OldClaims", "com.example.claims.OldClaims", List.of("Vault"), ExpectedOutcome.SHOULD_DEGRADE),
++            new MatrixEntry("PacketBridge", "com.example.packet.PacketBridge", List.of("ProtocolLib"), ExpectedOutcome.SHOULD_DEGRADE),
++            new MatrixEntry("UnsafeNativeMutator", "com.example.native.UnsafeNativeMutator", List.of(), ExpectedOutcome.SHOULD_NOT_WORK)
++        );
++
++        boolean sawWork = false;
++        boolean sawDegrade = false;
++        boolean sawNotWork = false;
++
++        for (final MatrixEntry entry : matrix) {
++            final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(
++                mockPlugin(entry.pluginName(), entry.mainClass(), entry.dependencies())
++            );
++
++            if (entry.expectedOutcome() == ExpectedOutcome.SHOULD_NOT_WORK) {
++                profile.noteRefusal("unsafe native mutation");
++                Assertions.assertEquals(PluginCompatibilityProfile.Mode.REFUSED, profile.mode());
++                sawNotWork = true;
++                continue;
++            }
++
++            if (entry.expectedOutcome() == ExpectedOutcome.SHOULD_WORK) {
++                Assertions.assertEquals(PluginCompatibilityProfile.Mode.NATIVE_LOOM_AWARE, profile.mode());
++                sawWork = true;
++                continue;
++            }
++
++            Assertions.assertTrue(
++                profile.mode() == PluginCompatibilityProfile.Mode.LEGACY_NORMAL
++                    || profile.mode() == PluginCompatibilityProfile.Mode.LEGACY_INTERNAL,
++                "Expected degradable legacy profile for " + entry.pluginName()
++            );
++            sawDegrade = true;
++        }
++
++        Assertions.assertTrue(sawWork, "Matrix should include should-work plugin");
++        Assertions.assertTrue(sawDegrade, "Matrix should include should-degrade plugin");
++        Assertions.assertTrue(sawNotWork, "Matrix should include should-NOT-work plugin");
++    }
++
++    private static Plugin mockPlugin(final String name, final String mainClass, final List<String> dependencies) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn(mainClass);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(dependencies);
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManagerTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManagerTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce3b9405cee5829c593e7c15f113c6e9aa50468e
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManagerTest.java
+@@ -0,0 +1,85 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.lang.reflect.Proxy;
++import java.util.List;
++import java.util.logging.Logger;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.ServicePriority;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class CompatibilityServicesManagerTest {
++
++    @Test
++    void serviceProviderIsWrappedAndInvokedThroughCompatibilityProxy() {
++        final CompatibilityKernel kernel = new CompatibilityKernel();
++        final CompatibilityServicesManager manager = new CompatibilityServicesManager(kernel);
++
++        final Plugin providerPlugin = mockPlugin("ServiceProvider");
++        final EchoService provider = value -> "echo:" + value;
++
++        manager.register(EchoService.class, provider, providerPlugin, ServicePriority.Normal);
++
++        final EchoService resolved = manager.load(EchoService.class);
++        Assertions.assertNotNull(resolved);
++        Assertions.assertNotSame(provider, resolved);
++        Assertions.assertTrue(Proxy.isProxyClass(resolved.getClass()));
++        Assertions.assertEquals("echo:ok", resolved.echo("ok"));
++    }
++
++    @Test
++    void crossApartmentServiceCycleFailsFast() {
++        final CompatibilityKernel kernel = new CompatibilityKernel();
++        final CompatibilityServicesManager manager = new CompatibilityServicesManager(kernel);
++
++        final Plugin pluginA = mockPlugin("PluginA");
++        final Plugin pluginB = mockPlugin("PluginB");
++
++        final FirstService firstService = () -> manager.load(SecondService.class).second();
++        final SecondService secondService = () -> manager.load(FirstService.class).first();
++
++        manager.register(FirstService.class, firstService, pluginA, ServicePriority.Normal);
++        manager.register(SecondService.class, secondService, pluginB, ServicePriority.Normal);
++
++        final IllegalStateException exception = Assertions.assertThrows(
++            IllegalStateException.class,
++            () -> manager.load(FirstService.class).first()
++        );
++
++        Assertions.assertTrue(exception.getMessage().contains("cycle"));
++    }
++
++    private static Plugin mockPlugin(final String name) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn("com.example." + name);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
++
++    @FunctionalInterface
++    interface EchoService {
++        String echo(String value);
++    }
++
++    @FunctionalInterface
++    interface FirstService {
++        String first();
++    }
++
++    @FunctionalInterface
++    interface SecondService {
++        String second();
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransactionTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransactionTest.java
+index a1e3974ac242e1ed63f27c98ba5bfd686e2b0c81..9b47fc7a948e01faa780a7e25892d3bc12069275 100644
+--- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransactionTest.java
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransactionTest.java
+@@ -54,6 +54,23 @@ class CompatibilityTransactionTest {
+         Assertions.assertEquals("OldClaims", mutation.plugin());
+     }
+ 
++    @Test
++    void overlayWritesAreVisibleAndTrackedAsPendingWrites() {
++        final TestCancellableEvent event = new TestCancellableEvent();
++        final EventSemanticIndex.EventSemantics semantics = new EventSemanticIndex().resolve(event, new RegisteredListener[0]);
++        final CompatibilityTransaction transaction = new CompatibilityTransaction(event, semantics);
++
++        transaction.overlayWrite("block:0,64,0", "STONE", "REGION", "setType");
++
++        Assertions.assertEquals("STONE", transaction.overlayRead("block:0,64,0"));
++        Assertions.assertEquals(1, transaction.pendingWriteCount());
++        Assertions.assertEquals(CompatibilityTransaction.State.OPEN, transaction.state());
++
++        transaction.abort("cancelled");
++        Assertions.assertEquals(CompatibilityTransaction.State.ABORTED, transaction.state());
++        Assertions.assertEquals("cancelled", transaction.abortReason());
++    }
++
+     private static Plugin mockPlugin(final String name) {
+         final PluginMeta meta = Mockito.mock(PluginMeta.class);
+         Mockito.when(meta.getName()).thenReturn(name);
+@@ -102,4 +119,4 @@ class CompatibilityTransactionTest {
+             return HANDLERS;
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
+index a8638b2b507cecac8ea0808651d2b864bf30d31e..e320bc4229ff63a1485870f233aa7e6794765e20 100644
+--- a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
+@@ -47,6 +47,19 @@ class PluginCompatibilityProfileTest {
+         Assertions.assertEquals(1L, profile.snapshot().refusals());
+     }
+ 
++    @Test
++    void repeatedUnsafeInternalAccessEscalatesToStrict() {
++        final Plugin plugin = mockPlugin("PacketMagic", "com.example.PacketMagic", List.of(), List.of());
++        final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
++
++        profile.noteUnsafeInternalAccess("reflection target #1");
++        profile.noteUnsafeInternalAccess("reflection target #2");
++        profile.noteUnsafeInternalAccess("reflection target #3");
++
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_STRICT, profile.mode());
++        Assertions.assertTrue(profile.snapshot().unsafeInternalViolations() >= 3L);
++    }
++
+     private static Plugin mockPlugin(
+         final String name,
+         final String mainClass,
+@@ -66,4 +79,4 @@ class PluginCompatibilityProfileTest {
+         Mockito.when(plugin.isEnabled()).thenReturn(true);
+         return plugin;
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/test/java/org/bukkit/OwnershipRouterCompatibilityTest.java b/src/test/java/org/bukkit/OwnershipRouterCompatibilityTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d04e5eba398c297985c5417e873175c018a5420d
+--- /dev/null
++++ b/src/test/java/org/bukkit/OwnershipRouterCompatibilityTest.java
+@@ -0,0 +1,88 @@
++package org.bukkit;
++
++import ca.spottedleaf.concurrentutil.util.Priority;
++import java.util.UUID;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.server.threading.runtime.OwnershipRouter;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class OwnershipRouterCompatibilityTest {
++
++    @Test
++    void canRunSynchronousCallbacksDependsOnOwnerDomain() {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++
++        Assertions.assertFalse(OwnerDomainExecutor.canRunSynchronousCallbacks(), "Default domain should not allow synchronous callbacks");
++
++        try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enter(OwnerDomainExecutor.global(server, "test-global"))) {
++            Assertions.assertTrue(OwnerDomainExecutor.canRunSynchronousCallbacks(), "Global domain should allow synchronous callbacks");
++        }
++
++        try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enter(OwnerDomainExecutor.region(level, 1, 2, 3, 4, "test-region"))) {
++            Assertions.assertTrue(OwnerDomainExecutor.canRunSynchronousCallbacks(), "Region domain should allow synchronous callbacks");
++        }
++
++        final OwnerDomainExecutor.Owner playerOwner = new OwnerDomainExecutor.Owner(
++            OwnerDomainExecutor.Domain.PLAYER,
++            server,
++            level,
++            1,
++            2,
++            1,
++            2,
++            UUID.randomUUID(),
++            null,
++            "test-player"
++        );
++        try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enter(playerOwner)) {
++            Assertions.assertTrue(OwnerDomainExecutor.canRunSynchronousCallbacks(), "Player domain should allow synchronous callbacks");
++        }
++
++        try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enter(OwnerDomainExecutor.login(server, "test-login"))) {
++            Assertions.assertFalse(OwnerDomainExecutor.canRunSynchronousCallbacks(), "Login domain should not allow synchronous callbacks");
++        }
++
++        try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enter(OwnerDomainExecutor.asyncIo(server, "test-async"))) {
++            Assertions.assertFalse(OwnerDomainExecutor.canRunSynchronousCallbacks(), "Async IO domain should not allow synchronous callbacks");
++        }
++    }
++
++    @Test
++    void runWhenChunksReadyRejectsInvalidBounds() {
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++
++        final IllegalArgumentException exception = Assertions.assertThrows(
++            IllegalArgumentException.class,
++            () -> OwnershipRouter.runWhenChunksReady(level, 4, 7, 3, 7, Priority.HIGHER, "invalid-bounds", chunks -> {
++            })
++        );
++
++        Assertions.assertTrue(exception.getMessage().contains("Invalid chunk bounds"));
++    }
++
++    @Test
++    void runWhenMoveChunksReadyRejectsNullOperation() {
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        final NullPointerException exception = Assertions.assertThrows(
++            NullPointerException.class,
++            () -> OwnershipRouter.runWhenMoveChunksReady(
++                level,
++                new net.minecraft.world.phys.AABB(0.0, 0.0, 0.0, 1.0, 2.0, 1.0),
++                Priority.HIGHER,
++                null,
++                chunks -> {
++                }
++            )
++        );
++
++        Assertions.assertTrue(exception.getMessage().contains("operation"));
++    }
++}

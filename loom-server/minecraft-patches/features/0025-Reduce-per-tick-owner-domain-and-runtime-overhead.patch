@@ -1,0 +1,454 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 10 Jun 2026 14:50:00 +0000
+Subject: [PATCH] Reduce per-tick owner-domain and runtime overhead
+
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index ad9e062e2bd74dc36cda2ab65a11f7cf753605a6..591511d4b2ea65425c8ed64cac087dad6f7b1ad1 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -544,7 +544,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     @Override
+     public final void moonrise$markChunkForPlayerTicking(final LevelChunk chunk) {
+         final ChunkPos pos = chunk.getPos();
+-        if (!this.playerTickingRequests.containsKey(ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkKey(pos))) {
++        if (this.playerTickingRequests.get(ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkKey(pos)) <= 0) {
+             return;
+         }
+ 
+@@ -585,6 +585,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         final int val = this.playerTickingRequests.addTo(chunkKey, -1);
+ 
+         if (val <= 0) {
++            this.playerTickingRequests.remove(chunkKey);
+             throw new IllegalStateException("Negative counter");
+         }
+ 
+@@ -593,6 +594,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             return;
+         }
+ 
++        this.playerTickingRequests.remove(chunkKey);
++
+         final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder chunkHolder = ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)(ServerLevel)(Object)this).moonrise$getChunkTaskScheduler()
+             .chunkHolderManager.getChunkHolder(chunkKey);
+ 
+@@ -941,6 +944,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+                 loomDiagnostics.record(LoomTickSectionDiagnostics.BLOCK_ENTITIES, System.nanoTime() - loomBlockEntitiesStart);
+             }
+             profiler.pop();
++            this.spigotConfig.currentPrimedTnt = 0; // Spigot
+         }
+ 
+         loomSectionStart = loomDiagnostics == null ? 0L : System.nanoTime();
+diff --git a/net/minecraft/server/threading/RegionRuntime.java b/net/minecraft/server/threading/RegionRuntime.java
+index 67ef35a877fa5c418d65d446c397093f5906f10f..6acf234a7d52822bb9df4b41667eeee7ad6083d2 100644
+--- a/net/minecraft/server/threading/RegionRuntime.java
++++ b/net/minecraft/server/threading/RegionRuntime.java
+@@ -252,12 +252,39 @@ public class RegionRuntime {
+         ) {
+             this.lock.lock();
+             try {
+-                final Lease conflictingLease = this.findConflictingLease(minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread.threadId());
++                final long ownerThreadId = ownerThread.threadId();
++                final String ownerThreadName = ownerThread.getName();
++                if (this.leases.isEmpty()) {
++                    final long regionId = nextRegionId.getAndIncrement();
++                    ++this.createdRegions;
++                    this.regions.put(
++                        regionId,
++                        new RegionDescriptor(regionId, minChunkX, minChunkZ, maxChunkX, maxChunkZ, RegionLifecycleEvent.CREATED, List.of())
++                    );
++                    final Lease lease = new Lease(
++                        leaseId,
++                        minChunkX,
++                        minChunkZ,
++                        maxChunkX,
++                        maxChunkZ,
++                        ownerThreadId,
++                        ownerThreadName,
++                        regionId
++                    );
++                    final Lease prev = this.leases.put(lease.id, lease);
++                    if (prev != null) {
++                        throw new IllegalStateException("Duplicate lease id: " + lease.id);
++                    }
++                    this.regionReferenceCounts.put(regionId, 1);
++                    return;
++                }
++
++                final Lease conflictingLease = this.findConflictingLease(minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThreadId);
+                 if (conflictingLease != null) {
+                     conflictCounter.getAndIncrement();
+                     throw new IllegalStateException(
+                         "Region lease conflict: new lease [" + minChunkX + "," + minChunkZ + " -> " + maxChunkX + "," + maxChunkZ + "]"
+-                            + " by thread " + ownerThread.getName() + "[" + ownerThread.threadId() + "] overlaps existing lease "
++                            + " by thread " + ownerThreadName + "[" + ownerThreadId + "] overlaps existing lease "
+                             + conflictingLease.describeBounds() + " by thread "
+                             + conflictingLease.ownerThreadName + "[" + conflictingLease.ownerThreadId + "]"
+                     );
+@@ -270,8 +297,8 @@ public class RegionRuntime {
+                     minChunkZ,
+                     maxChunkX,
+                     maxChunkZ,
+-                    ownerThread.threadId(),
+-                    ownerThread.getName(),
++                    ownerThreadId,
++                    ownerThreadName,
+                     regionId
+                 );
+                 final Lease prev = this.leases.put(lease.id, lease);
+@@ -649,4 +676,4 @@ public class RegionRuntime {
+             return new WorldDiagnostics(worldId, 0, 0, 0L, 0L, 0L, 0L, 0L);
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/net/minecraft/server/threading/runtime/DomainRandom.java b/net/minecraft/server/threading/runtime/DomainRandom.java
+index 07662ceab1f69ddc68029df0477ae88437b59b8e..4d4026f15d187ff70ef1c736b92a590887bfd4a7 100644
+--- a/net/minecraft/server/threading/runtime/DomainRandom.java
++++ b/net/minecraft/server/threading/runtime/DomainRandom.java
+@@ -27,14 +27,10 @@ public final class DomainRandom {
+     }
+ 
+     public static RandomSource forRuntimeLevel(final ServerLevel level, final RandomSource fallback) {
+-        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.currentOwner();
+-        if (owner == null) {
++        final String key = OwnerDomainExecutor.currentRandomKey(level);
++        if (key == null) {
+             return fallback;
+         }
+-        final String key = level.dimension().identifier() + "|" + owner.domain()
+-            + "|" + owner.minChunkX() + "," + owner.minChunkZ()
+-            + "|" + owner.maxChunkX() + "," + owner.maxChunkZ()
+-            + "|" + owner.playerId();
+         return DOMAIN_RANDOMS.get().computeIfAbsent(key, ignored -> RandomSource.create(seed(level, BlockPos.ZERO, key)));
+     }
+ 
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index 58d6eb3e87ddc3e1473bcd76efe7e77c349c6bdc..846fa4072955da6853a1f9bb3711e7824b8ce4f8 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -126,6 +126,43 @@ public final class OwnerDomainExecutor {
+         return context == null ? null : context.owner();
+     }
+ 
++    static @Nullable String currentRandomKey(final ServerLevel level) {
++        final OwnerContext context = CURRENT_OWNER.get();
++        if (context == null) {
++            return null;
++        }
++        if (context.randomLevel == level) {
++            return context.randomUseFallback ? null : context.randomKey;
++        }
++
++        final Owner owner = context.owner();
++        if (isFullLevelRegion(owner, level)
++            && TickRegions.isCurrentThreadOwnerQuiet(level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
++            context.randomLevel = level;
++            context.randomKey = null;
++            context.randomUseFallback = true;
++            return null;
++        }
++
++        final String key = level.dimension().identifier() + "|" + owner.domain()
++            + "|" + owner.minChunkX() + "," + owner.minChunkZ()
++            + "|" + owner.maxChunkX() + "," + owner.maxChunkZ()
++            + "|" + owner.playerId();
++        context.randomLevel = level;
++        context.randomKey = key;
++        context.randomUseFallback = false;
++        return key;
++    }
++
++    private static boolean isFullLevelRegion(final Owner owner, final ServerLevel level) {
++        return owner.domain() == Domain.REGION
++            && owner.level() == level
++            && owner.minChunkX() == Integer.MIN_VALUE
++            && owner.minChunkZ() == Integer.MIN_VALUE
++            && owner.maxChunkX() == Integer.MAX_VALUE
++            && owner.maxChunkZ() == Integer.MAX_VALUE;
++    }
++
+     public static Domain currentDomain() {
+         final OwnerContext context = CURRENT_OWNER.get();
+         return context == null ? Domain.ASYNC_IO : context.owner().domain();
+@@ -146,7 +183,60 @@ public final class OwnerDomainExecutor {
+     }
+ 
+     public static boolean isGlobalOwner(final MinecraftServer server) {
+-        return isOwner(global(server, "global-owner-check"));
++        for (OwnerContext context = CURRENT_OWNER.get(); context != null; context = context.previous()) {
++            final Owner owner = context.owner();
++            if (owner.domain() == Domain.GLOBAL_CONTROL && owner.server() == server) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    public static boolean isRegionOwner(final ServerLevel level, final int chunkX, final int chunkZ) {
++        for (OwnerContext context = CURRENT_OWNER.get(); context != null; context = context.previous()) {
++            final Owner owner = context.owner();
++            if (owner.domain() == Domain.REGION
++                && owner.level() == level
++                && chunkX >= owner.minChunkX()
++                && chunkX <= owner.maxChunkX()
++                && chunkZ >= owner.minChunkZ()
++                && chunkZ <= owner.maxChunkZ()) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    public static boolean isCurrentRegionOwnerForLevel(final ServerLevel level) {
++        final Owner owner = currentOwner();
++        return owner != null && owner.domain() == Domain.REGION && owner.level() == level;
++    }
++
++    public static boolean isEntityOwner(final Entity entity) {
++        Objects.requireNonNull(entity, "entity");
++        if (entity instanceof ServerPlayer player) {
++            return isPlayerOwner(player);
++        }
++
++        final Level level = entity.level();
++        if (level instanceof ServerLevel serverLevel) {
++            final net.minecraft.world.level.ChunkPos chunk = entity.chunkPosition();
++            return isRegionOwner(serverLevel, chunk.x(), chunk.z());
++        }
++
++        final MinecraftServer server = MinecraftServer.getServer();
++        return server != null && isGlobalOwner(server);
++    }
++
++    public static boolean isPlayerOwner(final ServerPlayer player) {
++        final UUID playerId = player.getUUID();
++        for (OwnerContext context = CURRENT_OWNER.get(); context != null; context = context.previous()) {
++            final Owner owner = context.owner();
++            if (owner.domain() == Domain.PLAYER && Objects.equals(owner.playerId(), playerId)) {
++                return true;
++            }
++        }
++        return false;
+     }
+ 
+     public static void assertOwner(final Owner owner, final String operation) {
+@@ -319,7 +409,25 @@ public final class OwnerDomainExecutor {
+     ) {
+     }
+ 
+-    private record OwnerContext(Owner owner, @Nullable OwnerContext previous) {
++    private static final class OwnerContext {
++        private final Owner owner;
++        private final @Nullable OwnerContext previous;
++        private @Nullable ServerLevel randomLevel;
++        private @Nullable String randomKey;
++        private boolean randomUseFallback;
++
++        private OwnerContext(final Owner owner, final @Nullable OwnerContext previous) {
++            this.owner = owner;
++            this.previous = previous;
++        }
++
++        private Owner owner() {
++            return this.owner;
++        }
++
++        private @Nullable OwnerContext previous() {
++            return this.previous;
++        }
+     }
+ 
+     public static final class Scope implements AutoCloseable {
+diff --git a/net/minecraft/server/waypoints/ServerWaypointManager.java b/net/minecraft/server/waypoints/ServerWaypointManager.java
+index 434f2870d64b1f5ba85338cbd9aff62feaea09f7..f34cc2f4130505f2b5213f14ab59da3679921cc3 100644
+--- a/net/minecraft/server/waypoints/ServerWaypointManager.java
++++ b/net/minecraft/server/waypoints/ServerWaypointManager.java
+@@ -1,12 +1,13 @@
+ package net.minecraft.server.waypoints;
+ 
+ import com.google.common.collect.HashBasedTable;
+-import com.google.common.collect.ImmutableSet;
+ import com.google.common.collect.Sets;
+ import com.google.common.collect.Table;
+ import com.google.common.collect.Tables;
+ import com.google.common.collect.Sets.SetView;
++import java.util.ArrayList;
+ import java.util.HashSet;
++import java.util.List;
+ import java.util.Map;
+ import java.util.Set;
+ import java.util.Map.Entry;
+@@ -41,15 +42,39 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     public void updateWaypoint(final WaypointTransmitter waypoint) {
+         if (!this.locatorBarEnabled) return; // Paper - optimize ServerWaypointManager with locator bar disabled
+         if (this.waypoints.contains(waypoint)) {
+-            Map<ServerPlayer, WaypointTransmitter.Connection> playerConnection = Tables.transpose(this.connections).row(waypoint);
+-            SetView<ServerPlayer> potentialPlayers = Sets.difference(this.players, playerConnection.keySet());
+-
+-            for (Entry<ServerPlayer, WaypointTransmitter.Connection> waypointConnection : ImmutableSet.copyOf(playerConnection.entrySet())) {
+-                this.updateConnection(waypointConnection.getKey(), waypoint, waypointConnection.getValue());
++            Map<ServerPlayer, WaypointTransmitter.Connection> playerConnection = this.connections.column(waypoint);
++
++            List<BrokenPlayerConnection> brokenConnections = null;
++            for (Entry<ServerPlayer, WaypointTransmitter.Connection> waypointConnection : playerConnection.entrySet()) {
++                final ServerPlayer player = waypointConnection.getKey();
++                final WaypointTransmitter.Connection connection = waypointConnection.getValue();
++                if (player == waypoint || !this.isLocatorBarEnabledFor(player)) {
++                    continue;
++                }
++                if (!connection.isBroken()) {
++                    connection.update();
++                } else {
++                    if (brokenConnections == null) {
++                        brokenConnections = new ArrayList<>();
++                    }
++                    brokenConnections.add(new BrokenPlayerConnection(player, connection));
++                }
++            }
++            if (brokenConnections != null) {
++                for (BrokenPlayerConnection brokenConnection : brokenConnections) {
++                    this.replaceBrokenConnection(brokenConnection.player(), waypoint, brokenConnection.connection());
++                }
+             }
+ 
+-            for (ServerPlayer player : potentialPlayers) {
+-                this.createConnection(player, waypoint);
++            int expectedConnections = this.players.size();
++            if (waypoint instanceof ServerPlayer waypointPlayer && this.players.contains(waypointPlayer)) {
++                --expectedConnections;
++            }
++            if (playerConnection.size() < expectedConnections) {
++                SetView<ServerPlayer> potentialPlayers = Sets.difference(this.players, playerConnection.keySet());
++                for (ServerPlayer player : potentialPlayers) {
++                    this.createConnection(player, waypoint);
++                }
+             }
+         }
+     }
+@@ -78,14 +103,38 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     public void updatePlayer(final ServerPlayer player) {
+         if (!this.locatorBarEnabled) return; // Paper - optimize ServerWaypointManager with locator bar disabled
+         Map<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnections = this.connections.row(player);
+-        SetView<WaypointTransmitter> potentialWaypoints = Sets.difference(this.waypoints, waypointConnections.keySet());
+ 
+-        for (Entry<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnection : ImmutableSet.copyOf(waypointConnections.entrySet())) {
+-            this.updateConnection(player, waypointConnection.getKey(), waypointConnection.getValue());
++        List<BrokenWaypointConnection> brokenConnections = null;
++        for (Entry<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnection : waypointConnections.entrySet()) {
++            final WaypointTransmitter waypoint = waypointConnection.getKey();
++            final WaypointTransmitter.Connection connection = waypointConnection.getValue();
++            if (player == waypoint || !this.isLocatorBarEnabledFor(player)) {
++                continue;
++            }
++            if (!connection.isBroken()) {
++                connection.update();
++            } else {
++                if (brokenConnections == null) {
++                    brokenConnections = new ArrayList<>();
++                }
++                brokenConnections.add(new BrokenWaypointConnection(waypoint, connection));
++            }
++        }
++        if (brokenConnections != null) {
++            for (BrokenWaypointConnection brokenConnection : brokenConnections) {
++                this.replaceBrokenConnection(player, brokenConnection.waypoint(), brokenConnection.connection());
++            }
+         }
+ 
+-        for (WaypointTransmitter waypoint : potentialWaypoints) {
+-            this.createConnection(player, waypoint);
++        int expectedConnections = this.waypoints.size();
++        if (this.waypoints.contains((WaypointTransmitter)player)) {
++            --expectedConnections;
++        }
++        if (waypointConnections.size() < expectedConnections) {
++            SetView<WaypointTransmitter> potentialWaypoints = Sets.difference(this.waypoints, waypointConnections.keySet());
++            for (WaypointTransmitter waypoint : potentialWaypoints) {
++                this.createConnection(player, waypoint);
++            }
+         }
+     }
+ 
+@@ -143,15 +192,25 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+                 if (!connection.isBroken()) {
+                     connection.update();
+                 } else {
+-                    waypoint.makeWaypointConnectionWith(player).ifPresentOrElse(newConnection -> {
+-                        newConnection.connect();
+-                        this.connections.put(player, waypoint, newConnection);
+-                    }, () -> {
+-                        connection.disconnect();
+-                        this.connections.remove(player, waypoint);
+-                    });
++                    this.replaceBrokenConnection(player, waypoint, connection);
+                 }
+             }
+         }
+     }
++
++    private void replaceBrokenConnection(final ServerPlayer player, final WaypointTransmitter waypoint, final WaypointTransmitter.Connection connection) {
++        waypoint.makeWaypointConnectionWith(player).ifPresentOrElse(newConnection -> {
++            newConnection.connect();
++            this.connections.put(player, waypoint, newConnection);
++        }, () -> {
++            connection.disconnect();
++            this.connections.remove(player, waypoint);
++        });
++    }
++
++    private record BrokenPlayerConnection(ServerPlayer player, WaypointTransmitter.Connection connection) {
++    }
++
++    private record BrokenWaypointConnection(WaypointTransmitter waypoint, WaypointTransmitter.Connection connection) {
++    }
+ }
+diff --git a/net/minecraft/world/level/NaturalSpawner.java b/net/minecraft/world/level/NaturalSpawner.java
+index 88a9ab44f6044c7e15a8f2d0541afa60d17a85c1..acebc44f1f1aa4f1d2e1bb0107b4c5fcb26d9e19 100644
+--- a/net/minecraft/world/level/NaturalSpawner.java
++++ b/net/minecraft/world/level/NaturalSpawner.java
+@@ -311,7 +311,7 @@ public final class NaturalSpawner {
+                             }
+ 
+                             // Paper start - PreCreatureSpawnEvent
+-                            PreSpawnStatus doSpawning = isValidSpawnPostitionForType(level, mobCategory, structureManager, generator, currentSpawnData, pos, nearestPlayerDistanceSqr);
++                            PreSpawnStatus doSpawning = isValidSpawnPostitionForType(level, mobCategory, structureManager, generator, currentSpawnData, pos, nearestPlayerDistanceSqr, random);
+                             // Paper start - per player mob count backoff
+                             if (doSpawning == PreSpawnStatus.ABORT || doSpawning == PreSpawnStatus.CANCELLED) {
+                                 level.getChunkSource().chunkMap.updateFailurePlayerMobTypeMap(pos.getX() >> 4, pos.getZ() >> 4, mobCategory);
+@@ -395,7 +395,8 @@ public final class NaturalSpawner {
+         final ChunkGenerator generator,
+         final MobSpawnSettings.SpawnerData currentSpawnData,
+         final BlockPos.MutableBlockPos pos,
+-        final double nearestPlayerDistanceSqr
++        final double nearestPlayerDistanceSqr,
++        final RandomSource random
+     ) {
+         // Paper start - PreCreatureSpawnEvent
+         EntityType<?> type = currentSpawnData.type();
+@@ -415,7 +416,7 @@ public final class NaturalSpawner {
+             && type.canSummon()
+             && canSpawnMobAt(level, structureManager, generator, mobCategory, currentSpawnData, pos)
+             && SpawnPlacements.isSpawnPositionOk(type, level, pos)
+-            && SpawnPlacements.checkSpawnRules(type, level, EntitySpawnReason.NATURAL, pos, level.getRandom())
++            && SpawnPlacements.checkSpawnRules(type, level, EntitySpawnReason.NATURAL, pos, random)
+             && level.noCollision(type.getSpawnAABB(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5));
+         return success ? PreSpawnStatus.SUCCESS : PreSpawnStatus.FAIL; // Paper - PreCreatureSpawnEvent
+     }
+@@ -494,8 +495,11 @@ public final class NaturalSpawner {
+     }
+ 
+     private static BlockPos getRandomPosWithin(final Level level, final LevelChunk chunk) {
++        return getRandomPosWithin(level, chunk, level.getRandom());
++    }
++
++    private static BlockPos getRandomPosWithin(final Level level, final LevelChunk chunk, final RandomSource random) {
+         ChunkPos pos = chunk.getPos();
+-        final RandomSource random = level.getRandom();
+         int x = pos.getMinBlockX() + random.nextInt(16);
+         int z = pos.getMinBlockZ() + random.nextInt(16);
+         int topEmptyY = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, x, z) + 1;

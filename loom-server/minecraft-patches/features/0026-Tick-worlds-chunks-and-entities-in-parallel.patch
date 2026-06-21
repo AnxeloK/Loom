@@ -1,0 +1,1405 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 17 Jun 2026 17:56:06 +0000
+Subject: [PATCH] Tick worlds, chunks, and entities in parallel
+
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
+index 56e71bf01f22579c294c6b33450bd282e082f6ae..7b88008f0a69bd522530abe9db96825ae4a2b510 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
+@@ -954,7 +954,9 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+         }
+     }
+ 
+-    protected final class EntityCallback implements EntityInLevelCallback {
++    // Loom - public (was protected) so RegionTickStaging in net.minecraft.server.threading can hold the
++    // callback as a staged-op handle and re-invoke applyMove()/applyRemove() on the owning thread.
++    public final class EntityCallback implements EntityInLevelCallback {
+ 
+         public final Entity entity;
+ 
+@@ -964,6 +966,23 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+ 
+         @Override
+         public void onMove() {
++            // Loom start - stage cross-section/cross-region entity moves to the owner thread under parallel
++            // entity ticking. moveEntity()/entityStatusChange() mutate shared per-world entity-tracking state
++            // and Moonrise's per-region "off-main" thread checks would trip if run on a region worker. When
++            // staging (parallel phase active on this worker), defer to the per-dispatch session; the deferred
++            // op is replayed verbatim by applyMove() on the world-owning thread. When NOT staging
++            // (serial/default path), stageEntityMove returns false and the original body runs inline, byte-
++            // identical to upstream.
++            if (net.minecraft.server.threading.RegionTickStaging.stageEntityMove(this, this.entity)) {
++                return;
++            }
++            this.applyMove();
++            // Loom end
++        }
++
++        // Loom - original Moonrise onMove() body, factored out so the staged replay re-invokes it verbatim on
++        // the world-owning thread. Package-visible so RegionTickStaging.applyAndClear can call it.
++        public void applyMove() {
+             final Entity entity = this.entity;
+             final Visibility oldVisibility = getEntityStatus(entity);
+             final ChunkEntitySlices newSlices = EntityLookup.this.moveEntity(this.entity);
+@@ -979,6 +998,21 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+ 
+         @Override
+         public void onRemove(final Entity.RemovalReason reason) {
++            // Loom start - stage entity removals (despawn/death) to the owner thread under parallel entity
++            // ticking, for the same reason as onMove above: removeEntity() unmaps the entity from shared
++            // per-world tracking tables and trips Moonrise's per-region thread check off-main. When staging,
++            // defer to the per-dispatch session and replay via applyRemove() on the owning thread; otherwise
++            // the original body runs inline, byte-identical to upstream.
++            if (net.minecraft.server.threading.RegionTickStaging.stageEntityRemove(this, this.entity, reason)) {
++                return;
++            }
++            this.applyRemove(reason);
++            // Loom end
++        }
++
++        // Loom - original Moonrise onRemove() body, factored out so the staged replay re-invokes it verbatim
++        // on the world-owning thread. Package-visible so RegionTickStaging.applyAndClear can call it.
++        public void applyRemove(final Entity.RemovalReason reason) {
+             final Entity entity = this.entity;
+             EntityLookup.this.checkThread(entity, "Cannot remove entity off-main");
+             final Visibility tickingState = EntityLookup.getEntityStatus(entity);
+@@ -991,6 +1025,18 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+ 
+             this.entity.setLevelCallback(NoOpCallback.INSTANCE);
+         }
++
++        // Loom - de-dup / staleness guard for the staged replay. An entity can be discarded more than once in
++        // a single tick (e.g. checkDespawn followed by guardEntityTick's removal path), each scheduling a
++        // staged remove; and a staged move may be queued for an entity that is removed later in the same tick.
++        // Once applyRemove() has run for this entity, removeEntity() has unmapped it from entityById (and set
++        // its section coords to Integer.MIN_VALUE). Detect that here so applyAndClear can skip a second remove
++        // or a move whose entity is already gone. Reference-equality lookup: a freshly-spawned entity that
++        // reused this id would not be == this.entity.
++        public boolean isStale() {
++            final Entity entity = this.entity;
++            return EntityLookup.this.entityById.get((long) entity.getId()) != entity;
++        }
+     }
+ 
+     protected static final class NoOpCallback implements EntityInLevelCallback {
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index a7aa7bd36b2fc47242fe9a3d6b3d6a5b3cead034..3276f99480dcc9864fe8c8faa7c3ba94bfe2994f 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -480,6 +480,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         // if we execute too many tasks, that's fine - we have logic to correctly handle overuse of allocated time.
+         boolean executed = false;
+         for (final ServerLevel world : this.getAllLevels()) {
++            // Loom - worlds tick in parallel, so only drain mid-tick chunk tasks for worlds this thread
++            // owns; polling another world's chunk source would claim its full-level lease and conflict with
++            // that world's own tick thread.
++            if (!net.minecraft.server.threading.runtime.OwnerDomainExecutor.isCurrentRegionOwnerForLevel(world)) {
++                continue;
++            }
+             long currTime = System.nanoTime();
+             if (currTime - ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)world).moonrise$getLastMidTickFailure() <= TASK_EXECUTION_FAILURE_BACKOFF) {
+                 continue;
+@@ -2031,32 +2037,35 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         this.updateEffectiveRespawnData();
+ 
+         this.isIteratingOverLevels = true; // Paper - Throw exception on world create while being ticked
++        // Loom - independent worlds (overworld/nether/end and any others) tick concurrently on the region
++        // pool, each on a single thread holding its own full-level lease; each world stays internally serial.
++        // The per-level latches below read shared, global handler lists, so they are set serially on the main
++        // thread before any world ticks. Per-world profiler scoping is skipped because the profiler is
++        // main-thread only; each world's own tick still records into its thread-local profiler.
++        final java.util.List<ServerLevel> parallelLevels = new java.util.ArrayList<>();
+         for (ServerLevel level : this.getAllLevels()) {
+             level.hasPhysicsEvent = org.bukkit.event.block.BlockPhysicsEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - BlockPhysicsEvent
+             level.hasEntityMoveEvent = io.papermc.paper.event.entity.EntityMoveEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - Add EntityMoveEvent
+             level.updateLagCompensationTick(); // Paper - lag compensation
+             net.minecraft.world.level.block.entity.HopperBlockEntity.skipHopperEvents = level.paperConfig().hopper.disableMoveEvent || org.bukkit.event.inventory.InventoryMoveItemEvent.getHandlerList().getRegisteredListeners().length == 0; // Paper - Perf: Optimize Hoppers
+-            profiler.push(() -> level + " " + level.dimension().identifier());
+-            profiler.push("tick");
++            parallelLevels.add(level);
++        }
++        net.minecraft.server.threading.TickRegions.tickWorldsInParallel(parallelLevels, level -> {
+             net.minecraft.server.threading.TickRegions.tickWorld(level);
+             final net.minecraft.server.threading.TickRegions.RegionContext tickRegionContext =
+                 net.minecraft.server.threading.TickRegions.pushLevelContext(level);
+-
+             try {
+                 level.tick(haveTime);
+-            } catch (Throwable var7) {
+-                CrashReport report = CrashReport.forThrowable(var7, "Exception ticking world");
++            } catch (Throwable throwable) {
++                CrashReport report = CrashReport.forThrowable(throwable, "Exception ticking world");
+                 level.fillReportDetails(report);
+                 throw new ReportedException(report);
+             } finally {
+                 net.minecraft.server.threading.TickRegions.popContext(tickRegionContext);
+             }
+             net.minecraft.server.threading.TickRegions.postWorldTick(level);
+-
+-            profiler.pop();
+-            profiler.pop();
+             level.explosionDensityCache.clear(); // Paper - Optimize explosions
+-        }
++        });
+         this.isIteratingOverLevels = false; // Paper - Throw exception on world create while being ticked
+ 
+         profiler.popPush("connection");
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index c0c5d5f8f26e910274a5be116eddd02c6dc404af..55b1da8af2637207725ce993c6ed585154d6da84 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -174,6 +174,54 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         final int size = entityTickingChunks.size();
+ 
+         java.util.Objects.checkFromToIndex(0, size, raw.length);
++        // Loom start - intra-world parallel chunk ticking: dispatch per-region tasks when there is more than
++        // one ticking chunk; a single chunk stays on the serial fast path below.
++        if (size > 1) {
++            // Group the entity-ticking chunks by region and dispatch ONE task per region (each ticking all of
++            // its chunks under a single staging buffer), instead of one task per chunk. This keeps the per-tick
++            // dispatch/staging overhead proportional to the (small) number of regions, not the chunk count.
++            final int shift = net.minecraft.server.threading.TickRegions.getRegionChunkShift();
++            final it.unimi.dsi.fastutil.longs.Long2ObjectMap<java.util.List<net.minecraft.world.level.chunk.LevelChunk>> byRegion =
++                new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
++            for (int i = 0; i < size; ++i) {
++                final net.minecraft.world.level.chunk.LevelChunk chunk = raw[i];
++                final net.minecraft.world.level.ChunkPos pos = chunk.getPos();
++                final long key = (((long) (pos.x() >> shift)) << 32) | ((pos.z() >> shift) & 0xFFFFFFFFL);
++                byRegion.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(chunk);
++            }
++            // One staging session per dispatch: workers register their buffers into THIS session only, so the
++            // serial replay below drains only this world's buffers — never another world ticking in parallel.
++            final net.minecraft.server.threading.RegionTickStaging.Session stagingSession =
++                net.minecraft.server.threading.RegionTickStaging.newSession();
++            final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(byRegion.size());
++            for (final java.util.List<net.minecraft.world.level.chunk.LevelChunk> regionChunks : byRegion.values()) {
++                int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
++                for (int j = 0, n = regionChunks.size(); j < n; ++j) {
++                    final net.minecraft.world.level.ChunkPos p = regionChunks.get(j).getPos();
++                    if (p.x() < minX) { minX = p.x(); }
++                    if (p.x() > maxX) { maxX = p.x(); }
++                    if (p.z() < minZ) { minZ = p.z(); }
++                    if (p.z() > maxZ) { maxZ = p.z(); }
++                }
++                final int fMinX = minX, fMinZ = minZ, fMaxX = maxX, fMaxZ = maxZ;
++                tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(fMinX, fMinZ, fMinX, fMinZ, fMaxX, fMaxZ, () -> {
++                    // Buffer this region's side effects on the worker; they are replayed serially below.
++                    net.minecraft.server.threading.RegionTickStaging.begin(stagingSession);
++                    try {
++                        for (int j = 0, n = regionChunks.size(); j < n; ++j) {
++                            world.tickChunk(regionChunks.get(j), randomTickSpeed);
++                        }
++                    } finally {
++                        net.minecraft.server.threading.RegionTickStaging.end();
++                    }
++                }));
++            }
++            // The engine suspends this world's full-level lease, buckets the tasks by region (with the
++            // non-adjacency buffer), and ticks non-adjacent regions concurrently, then restores the lease.
++            net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(world, tasks, "chunkTick");
++            // Apply this session's staged side effects serially on this (the owning) thread, with the full-level lease restored.
++            net.minecraft.server.threading.RegionTickStaging.applyAndClear(stagingSession, world);
++        } else {
+         for (int i = 0; i < size; ++i) {
+             world.tickChunk(raw[i], randomTickSpeed);
+ 
+@@ -183,6 +231,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+                 continue;
+             }
+         }
++        }
++        // Loom end
+     }
+     // Paper end - chunk tick iteration optimisations
+ 
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 591511d4b2ea65425c8ed64cac087dad6f7b1ad1..6f21f4ac035a67c715776b9f584fba8e42d95c8a 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -903,40 +903,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+                 loomDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_ACTIVATION, now - loomEntitySectionStart);
+                 loomEntitySectionStart = now;
+             }
+-            this.entityTickList
+-                .forEach(
+-                    entity -> {
+-                        if (!entity.isRemoved()) {
+-                            if (!tickRateManager.isEntityFrozen(entity)) {
+-                                profiler.push("checkDespawn");
+-                                final long loomDespawnStart = loomDiagnostics == null ? 0L : System.nanoTime();
+-                                entity.checkDespawn();
+-                                if (loomDiagnostics != null) {
+-                                    loomDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_DESPAWN, System.nanoTime() - loomDespawnStart);
+-                                }
+-                                profiler.pop();
+-                                if (true) { // Paper - rewrite chunk system
+-                                    Entity vehicle = entity.getVehicle();
+-                                    if (vehicle != null) {
+-                                        if (!vehicle.isRemoved() && vehicle.hasPassenger(entity)) {
+-                                            return;
+-                                        }
+-
+-                                        entity.stopRiding();
+-                                    }
+-
+-                                    profiler.push("tick");
+-                                    final long loomEntityTickStart = loomDiagnostics == null ? 0L : System.nanoTime();
+-                                    this.guardEntityTick(this::tickNonPassenger, entity);
+-                                    if (loomDiagnostics != null) {
+-                                        loomDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_TICK, System.nanoTime() - loomEntityTickStart);
+-                                    }
+-                                    profiler.pop();
+-                                }
+-                            }
+-                        }
+-                    }
+-                );
++            // Loom - intra-world parallel entity ticking: bucket the entity list by region and tick
++            // non-adjacent regions concurrently, applying staged moves/removals on the owner afterwards.
++            this.tickEntitiesInParallel();
+             profiler.popPush("blockEntities");
+             final long loomBlockEntitiesStart = loomDiagnostics == null ? 0L : System.nanoTime();
+             this.tickBlockEntities();
+@@ -1011,7 +980,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     private void optimiseRandomTick(final LevelChunk chunk, final int tickSpeed) {
+         final LevelChunkSection[] sections = chunk.getSections();
+         final int minSection = ca.spottedleaf.moonrise.common.util.WorldUtil.getMinSection((ServerLevel)(Object)this);
+-        final ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom simpleRandom = this.simpleRandom;
++        // Loom - route the random-tick RNG through the per-domain random so each parallel region
++        // gets its own deterministic stream instead of sharing one thread-unsafe instance (torn
++        // seed). Falls back to this.simpleRandom when not in a sub-region context, so the serial
++        // path is unchanged.
++        final net.minecraft.util.RandomSource simpleRandom = net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom);
+         final boolean doubleTickFluids = !ca.spottedleaf.moonrise.common.PlatformHooks.get().configFixMC224294();
+ 
+         final ChunkPos cpos = chunk.getPos();
+@@ -1058,7 +1031,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     // Paper end - optimise random ticking
+ 
+     public void tickChunk(final LevelChunk chunk, final int tickSpeed) {
+-        final ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom simpleRandom = this.simpleRandom; // Paper - optimise random ticking
++        final net.minecraft.util.RandomSource simpleRandom = net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom); // Loom - per-domain RNG (was this.simpleRandom; torn seed under parallel ticking)
+         ChunkPos chunkPos = chunk.getPos();
+         int minX = chunkPos.getMinBlockX();
+         int minZ = chunkPos.getMinBlockZ();
+@@ -1431,6 +1404,115 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     }
+     // Paper end - log detailed entity tick information
+ 
++    // Loom start - shared per-entity tick body + experimental parallel entity ticking (Stage 3)
++    private void tickOneEntity(final Entity entity) {
++        if (entity.isRemoved() || this.tickRateManager().isEntityFrozen(entity)) {
++            return;
++        }
++        entity.checkDespawn();
++        final Entity vehicle = entity.getVehicle();
++        if (vehicle != null) {
++            if (!vehicle.isRemoved() && vehicle.hasPassenger(entity)) {
++                return;
++            }
++            entity.stopRiding();
++        }
++        this.guardEntityTick(this::tickNonPassenger, entity);
++    }
++
++    // Multipart/boss entities (e.g. the Ender Dragon and its EnderDragonPart sub-entities) move and remove
++    // across region boundaries within a single tick, which violates Moonrise's per-region "off-main" thread
++    // check when ticked in a parallel region bucket. Such entities must be ticked on the world-owning thread,
++    // which holds the full-level lease, so their cross-region move/remove always passes the thread check.
++    private static boolean mustTickOnRegionOwner(final Entity entity) {
++        return entity instanceof net.minecraft.world.entity.boss.enderdragon.EnderDragon
++            || entity instanceof net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
++    }
++
++    // Tick entities bucketed by region, running non-adjacent regions concurrently. The non-adjacency
++    // buffer keeps parallel regions far enough apart that an entity's bounded per-tick movement and its
++    // interaction range stay inside its own region; cross-region side effects (block writes, scheduled
++    // ticks, spawns) are staged and replayed serially after the parallel phase. Entities that are unsafe to
++    // tick off-main (see mustTickOnRegionOwner) are excluded from the parallel buckets and ticked serially on
++    // the world-owning thread after the parallel phase joins.
++    private void tickEntitiesInParallel() {
++        final java.util.List<Entity> toTick = new java.util.ArrayList<>();
++        this.entityTickList.forEach(toTick::add);
++        final int count = toTick.size();
++        final int shift = net.minecraft.server.threading.TickRegions.getRegionChunkShift();
++        final it.unimi.dsi.fastutil.longs.Long2ObjectMap<java.util.List<Entity>> byRegion =
++            new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
++        java.util.List<Entity> ownerTick = null;
++        for (int i = 0; i < count; ++i) {
++            final Entity e = toTick.get(i);
++            if (mustTickOnRegionOwner(e)) {
++                if (ownerTick == null) {
++                    ownerTick = new java.util.ArrayList<>();
++                }
++                ownerTick.add(e);
++                continue;
++            }
++            final ChunkPos cp = e.chunkPosition();
++            final long key = (((long) (cp.x() >> shift)) << 32) | ((cp.z() >> shift) & 0xFFFFFFFFL);
++            byRegion.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(e);
++        }
++        if (byRegion.size() <= 1) {
++            // Only one parallel region (or none): no parallelism to gain, so tick everything — including the
++            // owner-bound entities — serially on this (the world-owning) thread.
++            for (int i = 0; i < count; ++i) {
++                this.tickOneEntity(toTick.get(i));
++            }
++            return;
++        }
++        // One staging session per dispatch: workers register their buffers into THIS session only, so the
++        // serial replay below drains only this world's buffers — never another world ticking in parallel.
++        final net.minecraft.server.threading.RegionTickStaging.Session stagingSession =
++            net.minecraft.server.threading.RegionTickStaging.newSession();
++        final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(byRegion.size());
++        final int regionChunks = 1 << shift;
++        for (final it.unimi.dsi.fastutil.longs.Long2ObjectMap.Entry<java.util.List<Entity>> regionEntry :
++            byRegion.long2ObjectEntrySet()) {
++            final java.util.List<Entity> regionEntities = regionEntry.getValue();
++            // Snap the bucket's lease bounds to the fixed region-grid cell this region key maps to, exactly like
++            // parallel chunk ticking. Entities were bucketed by (chunk >> shift), so every entity here has its
++            // home chunk inside this one cell; claiming the whole cell makes concurrently-dispatched entity
++            // buckets disjoint by construction, instead of deriving (possibly overlapping) bounds from the
++            // entities' aggregated chunk positions. Cross-cell reads are handled by staging + the non-adjacency
++            // buffer. This changes only the claimed lease bounds, not which entities a bucket ticks.
++            final long key = regionEntry.getLongKey();
++            final int regionX = (int) (key >> 32);
++            final int regionZ = (int) key;
++            final int fMinX = regionX << shift;
++            final int fMinZ = regionZ << shift;
++            final int fMaxX = fMinX + regionChunks - 1;
++            final int fMaxZ = fMinZ + regionChunks - 1;
++            // Dispatch chunk: an actual occupied chunk inside the cell (used for bounds validation only).
++            final ChunkPos dispatchPos = regionEntities.get(0).chunkPosition();
++            final int dispatchX = dispatchPos.x();
++            final int dispatchZ = dispatchPos.z();
++            tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(dispatchX, dispatchZ, fMinX, fMinZ, fMaxX, fMaxZ, () -> {
++                net.minecraft.server.threading.RegionTickStaging.begin(stagingSession);
++                try {
++                    for (int i = 0, n = regionEntities.size(); i < n; ++i) {
++                        this.tickOneEntity(regionEntities.get(i));
++                    }
++                } finally {
++                    net.minecraft.server.threading.RegionTickStaging.end();
++                }
++            }));
++        }
++        net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(this, tasks, "entityTick");
++        net.minecraft.server.threading.RegionTickStaging.applyAndClear(stagingSession, this);
++        // The parallel phase has joined; we are back on the world-owning thread holding the full-level lease.
++        // Tick the owner-bound (multipart/boss) entities here so their cross-region move/remove is on-owner.
++        if (ownerTick != null) {
++            for (int i = 0, n = ownerTick.size(); i < n; ++i) {
++                this.tickOneEntity(ownerTick.get(i));
++            }
++        }
++    }
++    // Loom end
++
+     public void tickNonPassenger(final Entity entity) {
+         // Paper start - log detailed entity tick information
+         ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(entity, "Cannot tick an entity off-main");
+@@ -1624,6 +1706,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+ 
+     @Override
+     public boolean addFreshEntity(final Entity entity, final org.bukkit.event.entity.CreatureSpawnEvent.@Nullable SpawnReason reason) {
++        // Loom - during parallel chunk ticking, buffer the spawn and add (link + track) it serially after the
++        // parallel phase, so an entity is never left half-linked by an off-thread add.
++        if (net.minecraft.server.threading.RegionTickStaging.stageSpawn(this, entity, reason)) {
++            return true;
++        }
+         return this.addEntity(entity, reason);
+         // CraftBukkit end
+     }
+@@ -2282,8 +2369,15 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         } else {
+             for (ServerLevel otherLevel : this.getServer().getAllLevels()) {
+                 if (otherLevel != this) {
++                    final boolean ownsOther = net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(otherLevel, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE);
++                    // Loom - another world may be ticking on its own thread and hold its lease. Claiming it
++                    // here for a cross-dimension read would conflict (or risk an owner deadlock), so skip that
++                    // dimension - best-effort and non-corrupting.
++                    if (!ownsOther) {
++                        continue;
++                    }
+                     final Entity otherEntity;
+-                    if (net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(otherLevel, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
++                    if (ownsOther) {
+                         otherEntity = otherLevel.getEntity(uuid);
+                     } else {
+                         final net.minecraft.server.threading.TickRegions.RegionContext otherLevelContext =
+diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..56de9e0ec3ef2dd8d2df8d780fcd89f5accbafb9
+--- /dev/null
++++ b/net/minecraft/server/threading/RegionTickStaging.java
+@@ -0,0 +1,411 @@
++package net.minecraft.server.threading;
++
++import ca.spottedleaf.moonrise.patches.chunk_system.level.entity.EntityLookup;
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Set;
++import java.util.concurrent.ConcurrentHashMap;
++import net.minecraft.core.BlockPos;
++import net.minecraft.core.SectionPos;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.world.entity.Entity;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.level.block.state.BlockState;
++import net.minecraft.world.ticks.LevelTicks;
++import net.minecraft.world.ticks.ScheduledTick;
++
++// Loom - per-region tick staging for parallel chunk ticking (Stage 3).
++//
++// During the parallel chunk-tick phase, region workers run on separate threads. If they applied side
++// effects directly they would write into chunks outside their region's lease and race on shared per-world
++// state (the scheduled-tick scheduler, neighbour updater, broadcast set, etc.). Instead, each worker
++// BUFFERS its side effects per-thread; after the parallel phase joins, the buffers are replayed serially
++// on the owning thread, reusing the normal single-threaded machinery unchanged.
++//
++// Block writes are buffered (which also defers the neighbour updates, broadcasts and navigation recompute
++// they trigger). Scheduled (block/fluid) ticks are buffered and re-scheduled serially. Reads during the
++// parallel phase therefore see pre-mutation state; for random ticks this is an acceptable, non-corrupting
++// behavioural divergence, because every actual mutation happens serially.
++//
++// Buffers are owned by a per-dispatch {@link Session}, NOT a process-global set. Each dispatch site (one
++// world's parallel chunk-tick or entity-tick phase) creates its own Session, threads it into the worker
++// closures (which register their buffer into that Session), and drains ONLY that Session in applyAndClear.
++// This is what lets two worlds tick in parallel safely: world A's applyAndClear can never see — and never
++// replays — world B's staged writes, even though their workers run concurrently.
++public final class RegionTickStaging {
++
++    private RegionTickStaging() {
++    }
++
++    private record StagedWrite(Level level, BlockPos pos, BlockState state, int flags, int updateLimit) {
++    }
++
++    @SuppressWarnings("rawtypes")
++    private record StagedTick(LevelTicks ticks, ScheduledTick tick) {
++    }
++
++    private record StagedSpawn(ServerLevel level, Entity entity, org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason) {
++    }
++
++    // A deferred entity removal. Stores the Moonrise EntityLookup$EntityCallback (which carries the entity and
++    // the back-reference to its owning lookup) and the RemovalReason, so the replay re-invokes the original
++    // onRemove logic verbatim on the owning thread.
++    private record StagedRemove(EntityLookup.EntityCallback callback, Entity.RemovalReason reason) {
++    }
++
++    private static final class Buffer {
++        final List<StagedWrite> writes = new ArrayList<>();
++        final List<StagedTick> ticks = new ArrayList<>();
++        final List<StagedSpawn> spawns = new ArrayList<>();
++        final List<org.bukkit.event.Event> events = new ArrayList<>();
++        // Deferred entity moves, COALESCED per entity: an entity may setPos() many times in one tick, but a
++        // single applyMove() at replay reads its current (final) position and re-sections it once. The map is
++        // keyed by the EntityCallback instance (one per live entity, reference identity — Entity.equals is
++        // id-based, so the callback, not the entity, is the identity key) and is a LinkedHashMap to preserve
++        // first-seen insertion order across distinct entities within this buffer (the order in which a
++        // vehicle and its passengers were ticked on this one worker thread).
++        final LinkedHashMap<EntityLookup.EntityCallback, EntityLookup.EntityCallback> moves = new LinkedHashMap<>();
++        // Deferred entity removals, kept in insertion order. An entity may be discarded more than once in a
++        // tick (checkDespawn + guardEntityTick), so duplicates can appear here; applyAndClear's de-dup guard
++        // skips the redundant ones.
++        final List<StagedRemove> removes = new ArrayList<>();
++    }
++
++    // A single parallel dispatch's staging scope. Owns the set of per-worker buffers produced during that
++    // dispatch and nothing else; drained exactly once by the owning thread in applyAndClear.
++    public static final class Session {
++        private final Set<Buffer> active = ConcurrentHashMap.newKeySet();
++
++        private Session() {
++        }
++    }
++
++    private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger("Loom/RegionTickStaging");
++    private static final boolean VETO_DEBUG = Boolean.getBoolean("loom.debugVeto");
++
++    // Points to the buffer for whatever staged task the current worker thread is presently running. A worker
++    // only runs one task (hence one Session's buffer) at a time, so this stays correct even when several
++    // Sessions are alive across different worlds at once.
++    private static final ThreadLocal<Buffer> CURRENT = new ThreadLocal<>();
++
++    // Set true while a previously-deferred event is being re-dispatched on the owner thread (see
++    // deferEventToOwner). The re-dispatch must run the listeners INLINE — never defer again — or it would
++    // loop forever. The owner-domain re-entry restores a REGION owner context, so without this guard
++    // deferEventToOwner could wrongly re-classify the replay as "off-owner" and re-enqueue it.
++    private static final ThreadLocal<Boolean> REPLAYING_DEFERRED_EVENT = ThreadLocal.withInitial(() -> Boolean.FALSE);
++
++    private static final boolean DEFER_DEBUG = Boolean.getBoolean("loom.debugDefer");
++    private static final java.util.concurrent.atomic.AtomicLong DEFERRED_EVENTS = new java.util.concurrent.atomic.AtomicLong();
++
++    public static Session newSession() {
++        return new Session();
++    }
++
++    public static boolean isStaging() {
++        return CURRENT.get() != null;
++    }
++
++    // Begin staging on the current worker thread for the given dispatch session (idempotent within a thread).
++    public static void begin(final Session session) {
++        if (CURRENT.get() == null) {
++            final Buffer buffer = new Buffer();
++            CURRENT.set(buffer);
++            session.active.add(buffer);
++        }
++    }
++
++    // Stop intercepting on the current worker thread; the buffer stays registered in its Session for the
++    // serial replay.
++    public static void end() {
++        CURRENT.remove();
++    }
++
++    // Returns true if buffered; false if not staging (caller applies normally).
++    public static boolean stageSetBlock(final Level level, final BlockPos pos, final BlockState state, final int flags, final int updateLimit) {
++        final Buffer buffer = CURRENT.get();
++        if (buffer == null) {
++            return false;
++        }
++        buffer.writes.add(new StagedWrite(level, pos.immutable(), state, flags, updateLimit));
++        return true;
++    }
++
++    @SuppressWarnings("rawtypes")
++    public static boolean stageScheduledTick(final LevelTicks ticks, final ScheduledTick tick) {
++        final Buffer buffer = CURRENT.get();
++        if (buffer == null) {
++            return false;
++        }
++        buffer.ticks.add(new StagedTick(ticks, tick));
++        return true;
++    }
++
++    // Buffer an entity spawn so it is added (and tracked) serially, never half-linked off-thread.
++    public static boolean stageSpawn(final ServerLevel level, final Entity entity, final org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason) {
++        final Buffer buffer = CURRENT.get();
++        if (buffer == null) {
++            return false;
++        }
++        buffer.spawns.add(new StagedSpawn(level, entity, reason));
++        return true;
++    }
++
++    // Buffer an entity move (cross-section / cross-region re-sectioning) so the shared per-world entity
++    // tracking tables are mutated serially on the owning thread, never off-main on a region worker. Coalesced
++    // per entity: re-registering the same callback keeps only the first insertion slot, because a single
++    // applyMove() reads the entity's current position at replay time and re-sections it once regardless of how
++    // many setPos() calls happened this tick. Returns false (caller runs onMove inline) when not staging.
++    public static boolean stageEntityMove(final EntityLookup.EntityCallback callback, final Entity entity) {
++        final Buffer buffer = CURRENT.get();
++        if (buffer == null) {
++            return false;
++        }
++        buffer.moves.putIfAbsent(callback, callback);
++        return true;
++    }
++
++    // Buffer an entity removal (despawn/death) so it is unmapped from the shared per-world tracking tables
++    // serially on the owning thread. Removals are kept ordered (and may legitimately duplicate within a tick;
++    // applyAndClear de-dups them). Returns false (caller runs onRemove inline) when not staging.
++    public static boolean stageEntityRemove(final EntityLookup.EntityCallback callback, final Entity entity, final Entity.RemovalReason reason) {
++        final Buffer buffer = CURRENT.get();
++        if (buffer == null) {
++            return false;
++        }
++        buffer.removes.add(new StagedRemove(callback, reason));
++        return true;
++    }
++
++    // Buffer a Bukkit event fired during the parallel phase so its plugin listeners are dispatched on the
++    // owning (main) thread during the serial replay — exactly where serial ticking fires them — instead of
++    // running plugin handlers on a region worker thread. This keeps legacy (main-thread-only) plugins safe
++    // with the parallel flags on. Returns false (caller fires normally) when not staging.
++    public static boolean stageEvent(final org.bukkit.event.Event event) {
++        final Buffer buffer = CURRENT.get();
++        if (buffer == null) {
++            return false;
++        }
++        buffer.events.add(event);
++        return true;
++    }
++
++    // Fix 1c — route a non-async event fired on a genuinely OFF-OWNER region worker thread (but OUTSIDE any
++    // staging window, so stageEvent did not catch it) back to the owning thread, where its plugin listeners
++    // run single-threaded exactly as under serial ticking. Chunk-system events such as ChunkLoadEvent /
++    // ChunkUnloadEvent fire on region workers in the chunk pipeline, not inside the random-tick/entity-tick
++    // begin/end window, so CURRENT is null and they would otherwise run inline on a worker thread (and the
++    // legacy compat layer then refuses them on apartment contention). We hand the whole event off to the
++    // current region's mailbox via OwnerDomainExecutor.execute — a FIRE-AND-FORGET enqueue, drained by the
++    // owner in postWorldTick(world).drainMailbox() once the parallel phase joins. It must be fire-and-forget:
++    // the owner is hard-blocked in futures.join() during the parallel phase, so a synchronous round-trip
++    // would deadlock.
++    //
++    // Returns true if the event was deferred (caller must return without dispatching inline); false if the
++    // caller should dispatch the event inline on the current thread (the serial / on-owner / replay case).
++    //
++    // Conditions to defer (ALL must hold):
++    //   - we are NOT already replaying a previously-deferred event (else infinite loop),
++    //   - the current thread is inside a REGION owner context whose world is a real ServerLevel, AND
++    //   - the current thread does NOT already own (hold the lease for) the full extent of that world's
++    //     tick — i.e. it is a sub-region worker running in the parallel phase, not the owning thread that
++    //     suspended its full-level lease to dispatch the workers.
++    // On the owning/main thread under serial ticking the current owner is GLOBAL_CONTROL or the full-level
++    // REGION owner, so this returns false and dispatch stays byte-identical to today.
++    public static boolean deferEventToOwner(final org.bukkit.event.Event event) {
++        if (REPLAYING_DEFERRED_EVENT.get()) {
++            return false;
++        }
++        // Do NOT defer the STAGED-VETO class — events whose cancellation must SYNCHRONOUSLY suppress a side
++        // effect at the firing site (block physics, fluid spread, pre-spawn, block change by an entity).
++        // Deferring them would run the plugin's veto AFTER the side effect already happened, silently losing
++        // the cancellation. Correctly handling those requires the firing site itself to stage its side effect
++        // and honour a replayed veto (the 0029/0044 random-tick mechanism, generalized) — out of scope here.
++        // Returning false leaves them on the existing (now non-latching) path so they never silently mis-fire
++        // and never poison the plugin for the post-facto events this method DOES handle.
++        if (isStagedVetoClass(event)) {
++            return false;
++        }
++        final net.minecraft.server.threading.runtime.OwnerDomainExecutor.Owner owner =
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.currentOwner();
++        if (owner == null
++            || owner.domain() != net.minecraft.server.threading.runtime.OwnerDomainExecutor.Domain.REGION
++            || !(owner.level() instanceof ServerLevel level)) {
++            // Not a region worker (global owner / player / async / login / no context) — dispatch inline.
++            return false;
++        }
++        // A full-level region owner ([MIN..MAX]) is the world's own tick thread, even when it has suspended
++        // that lease to fan out sub-region workers; events it fires must run inline on it (it IS the owner).
++        // Only a bounded sub-region owner is an off-owner parallel worker that must hand back.
++        final boolean fullLevel = owner.minChunkX() == Integer.MIN_VALUE
++            && owner.minChunkZ() == Integer.MIN_VALUE
++            && owner.maxChunkX() == Integer.MAX_VALUE
++            && owner.maxChunkZ() == Integer.MAX_VALUE;
++        if (fullLevel) {
++            return false;
++        }
++        // Hand the event to the GLOBAL server queue (the main/Server thread), not the current sub-region:
++        // OwnerDomainExecutor.execute runs INLINE when the caller already owns the target, and a sub-region
++        // worker DOES own its own sub-region — so enqueuing to that region would just run on the worker,
++        // defeating the hand-off. The Server thread is never the current worker, so the global enqueue is a
++        // true cross-thread hand-off; it is drained by the main thread in its normal task loop (runAllTasks /
++        // pollTask), which is exactly where serial ticking would have fired these notifications.
++        final net.minecraft.server.MinecraftServer server = level.getServer();
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(server, "deferred-event:" + event.getEventName()),
++            () -> {
++                final Boolean previous = REPLAYING_DEFERRED_EVENT.get();
++                REPLAYING_DEFERRED_EVENT.set(Boolean.TRUE);
++                try {
++                    org.bukkit.Bukkit.getPluginManager().callEvent(event);
++                } catch (final Throwable t) {
++                    LOGGER.error("Deferred (off-owner) event dispatch failed for {}", event.getEventName(), t);
++                } finally {
++                    REPLAYING_DEFERRED_EVENT.set(previous);
++                }
++            });
++        if (DEFER_DEBUG) {
++            final long n = DEFERRED_EVENTS.incrementAndGet();
++            if ((n & 0x3FF) == 0L) {
++                LOGGER.info("Loom off-owner event deferral: {} events routed to owner so far (latest {})", n, event.getEventName());
++            }
++        }
++        return true;
++    }
++
++    // The staged-veto class: cancellable events whose cancellation must synchronously suppress a side effect
++    // at the point they fire. These cannot be deferred (the side effect would already be applied). They are
++    // the documented remaining follow-up; handling them needs the firing site to stage its side effect and
++    // honour a replayed veto.
++    public static boolean isStagedVetoClass(final org.bukkit.event.Event event) {
++        return event instanceof org.bukkit.event.block.BlockPhysicsEvent
++            || event instanceof org.bukkit.event.block.BlockFromToEvent
++            || event instanceof org.bukkit.event.entity.EntityChangeBlockEvent
++            || event instanceof org.bukkit.event.entity.CreatureSpawnEvent
++            || event instanceof org.bukkit.event.entity.EntitySpawnEvent;
++    }
++
++    // Apply every side effect staged in the given dispatch session serially on the calling (owning) thread,
++    // then clear it. Must be called after that session's parallel phase has joined and with staging disabled
++    // on this thread. {@code owningWorld} is the world this dispatch ticked; it is the world whose full-level
++    // lease the calling thread holds, and the world whose regions own the staged writes.
++    @SuppressWarnings("unchecked")
++    public static void applyAndClear(final Session session, final ServerLevel owningWorld) {
++        final Set<Buffer> active = session.active;
++        if (active.isEmpty()) {
++            return;
++        }
++        final List<Buffer> buffers = new ArrayList<>(active);
++        active.clear();
++        final int blen = buffers.size();
++        // Dispatch deferred Bukkit events first, on this (the owning/main) thread, now that the workers have
++        // joined — so plugin handlers run single-threaded exactly as under serial ticking. A handler that
++        // throws must not abort the rest of the replay. If a handler cancels a block event, record the target
++        // position so the staged write it gated is skipped below — honouring the plugin's veto.
++        final java.util.Set<Long> vetoed = new java.util.HashSet<>();
++        for (int b = 0; b < blen; ++b) {
++            final List<org.bukkit.event.Event> events = buffers.get(b).events;
++            for (int i = 0, len = events.size(); i < len; ++i) {
++                final org.bukkit.event.Event event = events.get(i);
++                try {
++                    org.bukkit.Bukkit.getPluginManager().callEvent(event);
++                } catch (final Throwable t) {
++                    LOGGER.error("Deferred event dispatch failed", t);
++                }
++                if (event instanceof org.bukkit.event.Cancellable cancellable && cancellable.isCancelled()) {
++                    org.bukkit.block.Block block = null;
++                    if (event instanceof org.bukkit.event.block.BlockFromToEvent fromTo) {
++                        block = fromTo.getToBlock();
++                    } else if (event instanceof org.bukkit.event.block.BlockEvent blockEvent) {
++                        block = blockEvent.getBlock();
++                    }
++                    if (block != null) {
++                        vetoed.add(BlockPos.asLong(block.getX(), block.getY(), block.getZ()));
++                    }
++                }
++            }
++        }
++        int vetoedWrites = 0;
++        for (int b = 0; b < blen; ++b) {
++            final List<StagedWrite> writes = buffers.get(b).writes;
++            for (int i = 0, len = writes.size(); i < len; ++i) {
++                final StagedWrite w = writes.get(i);
++                if (vetoed.isEmpty() || !vetoed.contains(w.pos().asLong())) {
++                    applyStagedWrite(w);
++                } else {
++                    vetoedWrites++;
++                }
++            }
++        }
++        if (VETO_DEBUG && vetoedWrites > 0) {
++            LOGGER.info("Loom parallel veto: skipped {} staged writes from cancelled events this phase", vetoedWrites);
++        }
++        for (int b = 0; b < blen; ++b) {
++            final List<StagedTick> ticks = buffers.get(b).ticks;
++            for (int i = 0, len = ticks.size(); i < len; ++i) {
++                final StagedTick t = ticks.get(i);
++                t.ticks().schedule(t.tick());
++            }
++        }
++        // (4) MOVES — strictly BEFORE removes. moveEntity() reads the entity's CURRENT section coords (the
++        // ones recorded when the entity entered its section this tick); applying a remove first would unmap
++        // the entity and corrupt a later move of the same/related entity. We replay one applyMove() per
++        // coalesced entity, in this buffer's first-seen order, then across buffers in buffer-discovery order.
++        // MOVE guard: skip if the entity has already been removed (a remove staged later in the same tick that
++        // applyAndClear has not reached yet cannot have run, but an entity removed inline earlier — e.g. during
++        // a not-staged path — would be stale; the guard is belt-and-suspenders and matches the design).
++        for (int b = 0; b < blen; ++b) {
++            for (final EntityLookup.EntityCallback callback : buffers.get(b).moves.keySet()) {
++                if (callback.isStale()) {
++                    continue;
++                }
++                callback.applyMove();
++            }
++        }
++        // (5) REMOVES — after moves, before spawns. REMOVE DE-DUP GUARD: an entity can be discarded twice in a
++        // single tick (checkDespawn followed by guardEntityTick's removal path), staging two removes for the
++        // same entity. applyRemove() unmaps the entity from entityById; isStale() then reports it as gone, so
++        // the redundant second remove is skipped — no double-remove.
++        for (int b = 0; b < blen; ++b) {
++            final List<StagedRemove> removes = buffers.get(b).removes;
++            for (int i = 0, len = removes.size(); i < len; ++i) {
++                final StagedRemove r = removes.get(i);
++                if (r.callback().isStale()) {
++                    continue;
++                }
++                r.callback().applyRemove(r.reason());
++            }
++        }
++        // (6) spawns — last, so a freshly added entity is never observed mid-replay while moves/removes of the
++        // pre-existing population are still settling.
++        for (int b = 0; b < blen; ++b) {
++            final List<StagedSpawn> spawns = buffers.get(b).spawns;
++            for (int i = 0, len = spawns.size(); i < len; ++i) {
++                final StagedSpawn s = spawns.get(i);
++                s.level().addFreshEntity(s.entity(), s.reason());
++            }
++        }
++    }
++
++    // Replay one staged block write on the thread that owns the target chunk's region. The calling thread
++    // holds the owning world's full-level lease, so for a write into this world it already owns the target
++    // region and takes the inline fast path. The cross-region routing is a defensive fallback: if a write's
++    // target chunk is somehow not owned by the calling thread (e.g. a cross-region edge write into a region
++    // this thread does not currently lease), hand it to the owning region's mailbox so the mutation lands on
++    // the lease-holder instead of tripping the AsyncCatcher owner-domain guard.
++    private static void applyStagedWrite(final StagedWrite w) {
++        final Level level = w.level();
++        final int chunkX = SectionPos.blockToSectionCoord(w.pos().getX());
++        final int chunkZ = SectionPos.blockToSectionCoord(w.pos().getZ());
++        if (!(level instanceof ServerLevel serverLevel)
++            || net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(serverLevel, chunkX, chunkZ)) {
++            // Inline fast path: thread already owns the target region (the common case during replay), or the
++            // level is not a ServerLevel and has no region domain to route through.
++            level.setBlock(w.pos(), w.state(), w.flags(), w.updateLimit());
++            return;
++        }
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.region(serverLevel, chunkX, chunkZ, "staged-setBlock"),
++            () -> serverLevel.setBlock(w.pos(), w.state(), w.flags(), w.updateLimit()));
++    }
++}
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index 2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791..a8ff6c10f3e04ee120364ff0c6557c981a8b973d 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -25,7 +25,9 @@ import java.util.concurrent.Executors;
+ import java.util.concurrent.ThreadFactory;
+ import java.util.concurrent.atomic.AtomicLong;
+ import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
+ import java.util.function.Consumer;
++import java.util.function.IntConsumer;
+ 
+ /**
+  * Runtime region ownership state used by thread checks.
+@@ -110,6 +112,11 @@ public class TickRegions {
+         1,
+         Integer.getInteger("paper.threadedregions.parallelSimulation.targetTasksPerWorker", 4)
+     );
++    // Loom - non-adjacency buffer (in chunks) between region-task buckets that run in parallel. A block
++    // update fans out at most ~1 chunk, so buckets within this many chunks of each other are merged to tick
++    // together, guaranteeing parallel buckets cannot race on a shared edge chunk. This is the load-bearing
++    // safety primitive for intra-world parallel ticking. Higher = safer but coarser (less parallelism).
++    static final int REGION_TASK_BUFFER_CHUNKS = Math.max(0, Integer.getInteger("loom.regionTaskBufferChunks", 1));
+     private static final int DIAGNOSTIC_EVENT_LIMIT = Math.max(
+         64,
+         Integer.getInteger("paper.threadedregions.diagnostics.eventLimit", 512)
+@@ -718,39 +725,7 @@ public class TickRegions {
+             : bucketRegionBoundTasksByDispatchChunk(world, tasks);
+ 
+         if (PARALLEL_SIMULATION_ENABLED && buckets.size() > 1) {
+-            final List<CompletableFuture<Void>> futures = new ArrayList<>(buckets.size());
+-            for (int i = 0, len = buckets.size(); i < len; ++i) {
+-                final RegionBoundBucket bucket = buckets.get(i);
+-                futures.add(CompletableFuture.runAsync(() -> bucket.run(stageName), REGION_SCHEDULER_EXECUTOR));
+-            }
+-            RuntimeException firstFailure = null;
+-            Error firstError = null;
+-            for (int i = 0, len = futures.size(); i < len; ++i) {
+-                try {
+-                    futures.get(i).join();
+-                } catch (final java.util.concurrent.CompletionException ex) {
+-                    final Throwable cause = unwrapParallelStageFailure(ex);
+-                    if (cause instanceof Error error) {
+-                        if (firstError == null) {
+-                            firstError = error;
+-                        }
+-                        continue;
+-                    }
+-                    if (cause instanceof RuntimeException runtimeException) {
+-                        if (firstFailure == null) {
+-                            firstFailure = runtimeException;
+-                        }
+-                    } else if (firstFailure == null) {
+-                        firstFailure = new RuntimeException("Parallel region task dispatch failed for " + stageName, cause);
+-                    }
+-                }
+-            }
+-            if (firstError != null) {
+-                throw firstError;
+-            }
+-            if (firstFailure != null) {
+-                throw firstFailure;
+-            }
++            dispatchBucketsParticipating(buckets.size(), i -> buckets.get(i).run(stageName), stageName);
+             return;
+         }
+ 
+@@ -759,6 +734,72 @@ public class TickRegions {
+         }
+     }
+ 
++    /**
++     * Run {@code count} independent buckets across the region pool with the dispatching thread
++     * helping instead of parking at the join. The caller and the submitted pool workers all pull
++     * the next bucket index from a shared cursor and run it, so every bucket runs exactly once -
++     * either on a pool thread or on the caller. The caller only blocks once the cursor is drained,
++     * waiting on whatever buckets other threads are still finishing. This is the work-pulling form
++     * of the same barrier: the phase is complete when this method returns, so nothing about the
++     * apply-serial commit model or the chunk/entity phase ordering changes.
++     *
++     * <p>The first {@link Error} (else the first {@link RuntimeException}) seen across all buckets is
++     * rethrown after every bucket has been attempted, matching the submit-all-then-join path which
++     * also runs every bucket before surfacing the first failure.
++     */
++    private static void dispatchBucketsParticipating(final int count, final IntConsumer runBucket, final String stageName) {
++        final AtomicInteger cursor = new AtomicInteger(0);
++        final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(count);
++        final AtomicReference<Error> firstError = new AtomicReference<>();
++        final AtomicReference<RuntimeException> firstFailure = new AtomicReference<>();
++        final Runnable worker = () -> {
++            int index;
++            while ((index = cursor.getAndIncrement()) < count) {
++                try {
++                    runBucket.accept(index);
++                } catch (final Error error) {
++                    firstError.compareAndSet(null, error);
++                } catch (final RuntimeException runtimeException) {
++                    firstFailure.compareAndSet(null, runtimeException);
++                } catch (final Throwable other) {
++                    firstFailure.compareAndSet(null, new RuntimeException("Parallel region task dispatch failed for " + stageName, other));
++                } finally {
++                    done.countDown();
++                }
++            }
++        };
++        // Submit at most one pool worker per bucket; the cursor stops extra workers immediately. This
++        // is never more tasks than the submit-all path queued, and usually fewer.
++        final int helpers = Math.min(REGION_WORKER_COUNT, count);
++        for (int i = 0; i < helpers; ++i) {
++            CompletableFuture.runAsync(worker, REGION_SCHEDULER_EXECUTOR);
++        }
++        // The dispatching thread participates only when it is itself a region tick thread (the world
++        // owner or the single-world server thread, both TickThreads). Any other caller just waits, so
++        // bucket compute never runs on a non-tick thread.
++        if (Thread.currentThread() instanceof TickThread) {
++            worker.run();
++        }
++        // Wait on bucket completion, not on the pool tasks. After a participating caller drains the
++        // cursor every remaining bucket is actively running on a pool thread and will finish, so this
++        // never blocks on a pool task that has not been scheduled yet (which is what makes a nested
++        // dispatch with more worlds than pool threads safe).
++        try {
++            done.await();
++        } catch (final InterruptedException ex) {
++            Thread.currentThread().interrupt();
++            throw new RuntimeException("Interrupted while waiting for parallel region tasks for " + stageName, ex);
++        }
++        final Error error = firstError.get();
++        if (error != null) {
++            throw error;
++        }
++        final RuntimeException failure = firstFailure.get();
++        if (failure != null) {
++            throw failure;
++        }
++    }
++
+     private static boolean containsMultiChunkRegionTasks(final List<RegionBoundTask> tasks) {
+         for (int i = 0, len = tasks.size(); i < len; ++i) {
+             final RegionBoundTask task = tasks.get(i);
+@@ -811,13 +852,22 @@ public class TickRegions {
+             }
+             target.add(task);
+ 
+-            for (int bucketIndex = buckets.size() - 1; bucketIndex >= 0; --bucketIndex) {
+-                final RegionBoundBucket bucket = buckets.get(bucketIndex);
+-                if (bucket == target || !target.intersects(bucket)) {
+-                    continue;
++            // Absorbing a bucket grows the target, which can bring it within the non-adjacency buffer of a bucket
++            // that did not previously overlap. Re-scan until no further bucket merges (fixed point); a single pass
++            // can otherwise leave two surviving buckets whose (raw) lease bounds overlap, which then races as a
++            // region-lease conflict when those buckets dispatch concurrently. Loom - correctness-critical.
++            boolean mergedAny = true;
++            while (mergedAny) {
++                mergedAny = false;
++                for (int bucketIndex = buckets.size() - 1; bucketIndex >= 0; --bucketIndex) {
++                    final RegionBoundBucket bucket = buckets.get(bucketIndex);
++                    if (bucket == target || !target.intersects(bucket)) {
++                        continue;
++                    }
++                    target.absorb(bucket);
++                    buckets.remove(bucketIndex);
++                    mergedAny = true;
+                 }
+-                target.absorb(bucket);
+-                buckets.remove(bucketIndex);
+             }
+         }
+ 
+@@ -1022,6 +1072,48 @@ public class TickRegions {
+         stateFor(world).drainMailbox();
+     }
+ 
++    // Loom - experimental parallel world ticking. Ticks each world on the region pool (one task per
++    // world, each holding its own full-level lease) and waits for all of them. A single world runs on
++    // the calling thread. The first failure is rethrown, mirroring the serial loop's crash behaviour.
++    public static void tickWorldsInParallel(final List<ServerLevel> worlds, final java.util.function.Consumer<ServerLevel> worldTick) {
++        if (worlds.size() <= 1) {
++            for (final ServerLevel world : worlds) {
++                worldTick.accept(world);
++            }
++            return;
++        }
++        final List<CompletableFuture<Void>> futures = new ArrayList<>(worlds.size());
++        for (final ServerLevel world : worlds) {
++            futures.add(CompletableFuture.runAsync(() -> worldTick.accept(world), REGION_SCHEDULER_EXECUTOR));
++        }
++        RuntimeException firstFailure = null;
++        Error firstError = null;
++        for (int i = 0, len = futures.size(); i < len; ++i) {
++            try {
++                futures.get(i).join();
++            } catch (final java.util.concurrent.CompletionException ex) {
++                final Throwable cause = unwrapParallelStageFailure(ex);
++                if (cause instanceof final Error error) {
++                    if (firstError == null) {
++                        firstError = error;
++                    }
++                } else if (cause instanceof final RuntimeException runtimeException) {
++                    if (firstFailure == null) {
++                        firstFailure = runtimeException;
++                    }
++                } else if (firstFailure == null) {
++                    firstFailure = new RuntimeException("Parallel world tick failed", cause);
++                }
++            }
++        }
++        if (firstError != null) {
++            throw firstError;
++        }
++        if (firstFailure != null) {
++            throw firstFailure;
++        }
++    }
++
+     public static void cancelTasks(final Plugin plugin) {
+         for (final WorldSchedulerState state : SCHEDULER_STATES.values()) {
+             state.cancelTasks(plugin);
+@@ -1322,11 +1414,7 @@ public class TickRegions {
+ 
+             if (PARALLEL_SCHEDULER_ENABLED && buckets.size() > 1) {
+                 this.recordParallelDispatch(buckets.size());
+-                final List<CompletableFuture<Void>> futures = new ArrayList<>(buckets.size());
+-                for (final TaskBucket bucket : buckets) {
+-                    futures.add(CompletableFuture.runAsync(bucket::run, REGION_SCHEDULER_EXECUTOR));
+-                }
+-                CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
++                dispatchBucketsParticipating(buckets.size(), i -> buckets.get(i).run(), "scheduler");
+                 return;
+             }
+ 
+@@ -1405,11 +1493,7 @@ public class TickRegions {
+ 
+             if (PARALLEL_MAILBOX_ENABLED && toDeliver.size() >= PARALLEL_MAILBOX_MIN_MESSAGES && buckets.size() > 1) {
+                 this.recordParallelMailboxDrain(buckets.size());
+-                final List<CompletableFuture<Void>> futures = new ArrayList<>(buckets.size());
+-                for (final MessageBucket bucket : buckets) {
+-                    futures.add(CompletableFuture.runAsync(bucket::run, REGION_SCHEDULER_EXECUTOR));
+-                }
+-                CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
++                dispatchBucketsParticipating(buckets.size(), i -> buckets.get(i).run(), "mailbox");
+                 return;
+             }
+ 
+@@ -1429,13 +1513,7 @@ public class TickRegions {
+             }
+ 
+             this.recordParallelMailboxDrain(buckets.size());
+-
+-            final List<CompletableFuture<Void>> futures = new ArrayList<>(buckets.size());
+-            for (final MessageBucket bucket : buckets) {
+-                futures.add(CompletableFuture.runAsync(bucket::run, REGION_SCHEDULER_EXECUTOR));
+-            }
+-
+-            CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
++            dispatchBucketsParticipating(buckets.size(), i -> buckets.get(i).run(), "mailbox");
+             return true;
+         }
+ 
+@@ -1450,13 +1528,7 @@ public class TickRegions {
+             }
+ 
+             this.recordParallelDispatch(buckets.size());
+-
+-            final List<CompletableFuture<Void>> futures = new ArrayList<>(buckets.size());
+-            for (final TaskBucket bucket : buckets) {
+-                futures.add(CompletableFuture.runAsync(bucket::run, REGION_SCHEDULER_EXECUTOR));
+-            }
+-
+-            CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
++            dispatchBucketsParticipating(buckets.size(), i -> buckets.get(i).run(), "scheduler");
+             return true;
+         }
+ 
+@@ -2126,17 +2198,21 @@ public class TickRegions {
+         }
+ 
+         private boolean intersects(final RegionBoundTask task) {
+-            return this.minChunkX <= task.maxChunkX()
+-                && this.maxChunkX >= task.minChunkX()
+-                && this.minChunkZ <= task.maxChunkZ()
+-                && this.maxChunkZ >= task.minChunkZ();
++            // Loom - expand by the non-adjacency buffer so buckets within REGION_TASK_BUFFER_CHUNKS of each
++            // other are treated as overlapping and merged; parallel buckets are then guaranteed a chunk gap.
++            final int b = REGION_TASK_BUFFER_CHUNKS;
++            return this.minChunkX - b <= task.maxChunkX()
++                && this.maxChunkX + b >= task.minChunkX()
++                && this.minChunkZ - b <= task.maxChunkZ()
++                && this.maxChunkZ + b >= task.minChunkZ();
+         }
+ 
+         private boolean intersects(final RegionBoundBucket other) {
+-            return this.minChunkX <= other.maxChunkX
+-                && this.maxChunkX >= other.minChunkX
+-                && this.minChunkZ <= other.maxChunkZ
+-                && this.maxChunkZ >= other.minChunkZ;
++            final int b = REGION_TASK_BUFFER_CHUNKS;
++            return this.minChunkX - b <= other.maxChunkX
++                && this.maxChunkX + b >= other.minChunkX
++                && this.minChunkZ - b <= other.maxChunkZ
++                && this.maxChunkZ + b >= other.minChunkZ;
+         }
+ 
+         private void absorb(final RegionBoundBucket other) {
+diff --git a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
+index 568c538a56589aeefa0d77e38d4bdd3bc187420c..d912b312127e979d261a5a1249ed4316d209dc2d 100644
+--- a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
++++ b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
+@@ -30,6 +30,16 @@ public final class ThreadedRegionsBlockingBarrier {
+             && server.getTickCount() == 0;
+     }
+ 
++    // Loom - true when the current thread can CLEANLY block for a synchronous chunk load right now without entering
++    // a degraded path. The only such case is the startup chunk-load barrier (managedBlock drains chunk tasks with
++    // no leases held). Note: a plugin compatibility context (CompatibilityChunkBridge) can also technically await a
++    // load, but that route is the emergency off-owner sync-wait lane that RECORDS an owner-domain-wait violation
++    // and is exactly what a plain block-state READ must avoid - so it is deliberately NOT treated as "can load"
++    // here. READ relaxations use this to decide between forcing a clean load and serving already-loaded data.
++    public static boolean canSynchronouslyLoadChunk(final ServerLevel level) {
++        return isStartupChunkLoadBarrier(level);
++    }
++
+     public static boolean isShutdownThread(final MinecraftServer server) {
+         return Thread.currentThread() == server.serverThread;
+     }
+diff --git a/net/minecraft/world/entity/ai/sensing/Sensor.java b/net/minecraft/world/entity/ai/sensing/Sensor.java
+index 8386e433dd1906bb45f8f5c9bfcd1425289ef91e..e0fecd726095a1fee1262d4c5359d3dc7f525910 100644
+--- a/net/minecraft/world/entity/ai/sensing/Sensor.java
++++ b/net/minecraft/world/entity/ai/sensing/Sensor.java
+@@ -13,19 +13,23 @@ import net.minecraft.world.entity.ai.targeting.TargetingConditions;
+ public abstract class Sensor<E extends LivingEntity> {
+     private static final int DEFAULT_SCAN_RATE = 20;
+     private static final int DEFAULT_TARGETING_RANGE = 16;
+-    private static final TargetingConditions TARGET_CONDITIONS = TargetingConditions.forNonCombat().range(16.0);
+-    private static final TargetingConditions TARGET_CONDITIONS_IGNORE_INVISIBILITY_TESTING = TargetingConditions.forNonCombat()
++    // Loom - per-thread targeting conditions. The shared mutable singletons here are range-mutated every
++    // sensor tick and read back during the same tick; under parallel world ticking, different worlds' tick
++    // threads would race on them. ThreadLocal gives each tick thread its own instances, so behaviour is
++    // identical under serial ticking and race-free under parallel ticking.
++    private static final ThreadLocal<TargetingConditions> TARGET_CONDITIONS = ThreadLocal.withInitial(() -> TargetingConditions.forNonCombat().range(16.0));
++    private static final ThreadLocal<TargetingConditions> TARGET_CONDITIONS_IGNORE_INVISIBILITY_TESTING = ThreadLocal.withInitial(() -> TargetingConditions.forNonCombat()
+         .range(16.0)
+-        .ignoreInvisibilityTesting();
+-    private static final TargetingConditions ATTACK_TARGET_CONDITIONS = TargetingConditions.forCombat().range(16.0);
+-    private static final TargetingConditions ATTACK_TARGET_CONDITIONS_IGNORE_INVISIBILITY_TESTING = TargetingConditions.forCombat()
++        .ignoreInvisibilityTesting());
++    private static final ThreadLocal<TargetingConditions> ATTACK_TARGET_CONDITIONS = ThreadLocal.withInitial(() -> TargetingConditions.forCombat().range(16.0));
++    private static final ThreadLocal<TargetingConditions> ATTACK_TARGET_CONDITIONS_IGNORE_INVISIBILITY_TESTING = ThreadLocal.withInitial(() -> TargetingConditions.forCombat()
+         .range(16.0)
+-        .ignoreInvisibilityTesting();
+-    private static final TargetingConditions ATTACK_TARGET_CONDITIONS_IGNORE_LINE_OF_SIGHT = TargetingConditions.forCombat().range(16.0).ignoreLineOfSight();
+-    private static final TargetingConditions ATTACK_TARGET_CONDITIONS_IGNORE_INVISIBILITY_AND_LINE_OF_SIGHT = TargetingConditions.forCombat()
++        .ignoreInvisibilityTesting());
++    private static final ThreadLocal<TargetingConditions> ATTACK_TARGET_CONDITIONS_IGNORE_LINE_OF_SIGHT = ThreadLocal.withInitial(() -> TargetingConditions.forCombat().range(16.0).ignoreLineOfSight());
++    private static final ThreadLocal<TargetingConditions> ATTACK_TARGET_CONDITIONS_IGNORE_INVISIBILITY_AND_LINE_OF_SIGHT = ThreadLocal.withInitial(() -> TargetingConditions.forCombat()
+         .range(16.0)
+         .ignoreLineOfSight()
+-        .ignoreInvisibilityTesting();
++        .ignoreInvisibilityTesting());
+     private final int scanRate;
+     private long timeToTick;
+     private final String configKey; // Paper - configurable sensor tick rate and timings
+@@ -60,12 +64,12 @@ public abstract class Sensor<E extends LivingEntity> {
+ 
+     private void updateTargetingConditionRanges(final E body) {
+         double followRange = body.getAttributeValue(Attributes.FOLLOW_RANGE);
+-        TARGET_CONDITIONS.range(followRange);
+-        TARGET_CONDITIONS_IGNORE_INVISIBILITY_TESTING.range(followRange);
+-        ATTACK_TARGET_CONDITIONS.range(followRange);
+-        ATTACK_TARGET_CONDITIONS_IGNORE_INVISIBILITY_TESTING.range(followRange);
+-        ATTACK_TARGET_CONDITIONS_IGNORE_LINE_OF_SIGHT.range(followRange);
+-        ATTACK_TARGET_CONDITIONS_IGNORE_INVISIBILITY_AND_LINE_OF_SIGHT.range(followRange);
++        TARGET_CONDITIONS.get().range(followRange);
++        TARGET_CONDITIONS_IGNORE_INVISIBILITY_TESTING.get().range(followRange);
++        ATTACK_TARGET_CONDITIONS.get().range(followRange);
++        ATTACK_TARGET_CONDITIONS_IGNORE_INVISIBILITY_TESTING.get().range(followRange);
++        ATTACK_TARGET_CONDITIONS_IGNORE_LINE_OF_SIGHT.get().range(followRange);
++        ATTACK_TARGET_CONDITIONS_IGNORE_INVISIBILITY_AND_LINE_OF_SIGHT.get().range(followRange);
+     }
+ 
+     protected abstract void doTick(final ServerLevel level, final E body);
+@@ -74,14 +78,14 @@ public abstract class Sensor<E extends LivingEntity> {
+ 
+     public static boolean isEntityTargetable(final ServerLevel level, final LivingEntity body, final LivingEntity entity) {
+         return body.getBrain().isMemoryValue(MemoryModuleType.ATTACK_TARGET, entity)
+-            ? TARGET_CONDITIONS_IGNORE_INVISIBILITY_TESTING.test(level, body, entity)
+-            : TARGET_CONDITIONS.test(level, body, entity);
++            ? TARGET_CONDITIONS_IGNORE_INVISIBILITY_TESTING.get().test(level, body, entity)
++            : TARGET_CONDITIONS.get().test(level, body, entity);
+     }
+ 
+     public static boolean isEntityAttackable(final ServerLevel level, final LivingEntity body, final LivingEntity target) {
+         return body.getBrain().isMemoryValue(MemoryModuleType.ATTACK_TARGET, target)
+-            ? ATTACK_TARGET_CONDITIONS_IGNORE_INVISIBILITY_TESTING.test(level, body, target)
+-            : ATTACK_TARGET_CONDITIONS.test(level, body, target);
++            ? ATTACK_TARGET_CONDITIONS_IGNORE_INVISIBILITY_TESTING.get().test(level, body, target)
++            : ATTACK_TARGET_CONDITIONS.get().test(level, body, target);
+     }
+ 
+     public static BiPredicate<ServerLevel, LivingEntity> wasEntityAttackableLastNTicks(final LivingEntity body, final int ticks) {
+@@ -90,8 +94,8 @@ public abstract class Sensor<E extends LivingEntity> {
+ 
+     public static boolean isEntityAttackableIgnoringLineOfSight(final ServerLevel level, final LivingEntity body, final LivingEntity target) {
+         return body.getBrain().isMemoryValue(MemoryModuleType.ATTACK_TARGET, target)
+-            ? ATTACK_TARGET_CONDITIONS_IGNORE_INVISIBILITY_AND_LINE_OF_SIGHT.test(level, body, target)
+-            : ATTACK_TARGET_CONDITIONS_IGNORE_LINE_OF_SIGHT.test(level, body, target);
++            ? ATTACK_TARGET_CONDITIONS_IGNORE_INVISIBILITY_AND_LINE_OF_SIGHT.get().test(level, body, target)
++            : ATTACK_TARGET_CONDITIONS_IGNORE_LINE_OF_SIGHT.get().test(level, body, target);
+     }
+ 
+     static <T, U> BiPredicate<T, U> rememberPositives(final int invocations, final BiPredicate<T, U> predicate) {
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index 49f828e1fdfd7fba8752c67c05cfc322332c3fa0..7946114fe520b3a5a7e1b9e1f113b7a1b9e5f174 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -1050,6 +1050,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+ 
+     @Override
+     public boolean setBlock(final BlockPos pos, final BlockState blockState, @Block.UpdateFlags final int updateFlags, final int updateLimit) {
++        // Loom - during parallel chunk ticking, buffer the write and apply it serially after the parallel
++        // phase instead of mutating another region's chunk / shared world state off-thread.
++        if (net.minecraft.server.threading.RegionTickStaging.stageSetBlock(this, pos, blockState, updateFlags, updateLimit)) {
++            return true;
++        }
+         // CraftBukkit start - tree generation
+         if (this.captureTreeGeneration) {
+             // Paper start - Protect Bedrock and End Portal/Frames from being destroyed
+@@ -1315,11 +1320,71 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+         if (!this.isInValidBounds(pos)) {
+             return Blocks.VOID_AIR.defaultBlockState();
+         } else {
++            // Loom start - allow cross-region block-state READS under parallel ticking.
++            // Block writes during the parallel compute phase are STAGED (see Level#setBlock ->
++            // RegionTickStaging) and only applied serially on the owner thread after the parallel join, so a
++            // section's PalettedContainer is frozen during the compute phase: reading another region's
++            // already-loaded block-state is a consistent, non-torn read. The only thing the owner-domain machinery
++            // legitimately blocks here is FORCING a synchronous chunk load/generate mid-tick (that cannot be
++            // synchronously awaited off the startup barrier, see ThreadedRegionsBlockingBarrier, and off-owner it
++            // would also claim a conflicting full-level lease) - so a cross-region/unloaded read serves the loaded
++            // chunk directly or the default state, and never forces a mid-tick load. With parallel execution
++            // disabled this returns null immediately and the serial path below is byte-identical.
++            final BlockState relaxed = this.loomRelaxedBlockStateRead(pos);
++            if (relaxed != null) {
++                return relaxed;
++            }
++            // Loom end
+             ChunkAccess chunk = this.getChunk(pos.getX() >> 4, pos.getZ() >> 4, ChunkStatus.FULL, true); // Paper - manually inline to reduce hops and avoid unnecessary null check to reduce total byte code size, this should never return null and if it does we will see it the next line but the real stack trace will matter in the chunk engine
+             return chunk.getBlockState(pos);
+         }
+     }
+ 
++    // Loom start - block-state READ relaxation under parallel ticking
++    // Returns a consistent (frozen) block state to serve the read directly, or null to signal "take the normal
++    // path below" (which may force a synchronous load). This NEVER stages, writes, or schedules a load: it only
++    // reads already-resident chunk data. The relaxation is strictly READ-only and only fires when the normal path
++    // would otherwise throw, so it converts a mid-tick crash into a consistent read - it never weakens a write
++    // guard or relaxes a load the engine can legitimately perform.
++    private @Nullable BlockState loomRelaxedBlockStateRead(final BlockPos pos) {
++        if (!((Object) this instanceof final ServerLevel serverLevel)) {
++            return null; // client/other level - no owner domain
++        }
++        if (!ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) {
++            return null; // genuinely async access (not a tick worker) - let the normal guard handle it loudly
++        }
++        final int chunkX = pos.getX() >> 4;
++        final int chunkZ = pos.getZ() >> 4;
++        final net.minecraft.world.level.chunk.LevelChunk loaded =
++            serverLevel.getChunkSource().getChunkAtIfLoadedImmediately(chunkX, chunkZ);
++        final boolean owner = net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(serverLevel.getServer())
++            || net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(serverLevel, chunkX, chunkZ);
++        if (owner) {
++            // The owner (region owner or the global-lease holder) reads its own data through the unchanged path
++            // whenever that path is correct: a LOADED chunk reads byte-identically, and an UNLOADED chunk that the
++            // engine can still CLEANLY synchronously load (only the startup chunk-load barrier) must keep forcing
++            // that load. We only intercept the one case the normal path cannot serve - an UNLOADED chunk mid-tick
++            // where a synchronous load would throw "Non-blocking runtime cannot synchronously wait..." or be routed
++            // through the degraded violation-recording sync-bridge - converting that into a consistent default read.
++            if (loaded != null
++                || net.minecraft.server.threading.runtime.ThreadedRegionsBlockingBarrier.canSynchronouslyLoadChunk(serverLevel)) {
++                return null;
++            }
++            return Blocks.VOID_AIR.defaultBlockState();
++        }
++        // Off-owner (cross-region) READ: serve the frozen, already-loaded block state directly. We deliberately do
++        // NOT force a load of an unloaded chunk off-owner (that would claim a conflicting full-level lease and
++        // could deadlock, and cannot be synchronously awaited mid-tick anyway); an unloaded cross-region read
++        // resolves to the default state rather than crashing the listener - matching the "if-loaded" read
++        // semantics plugins already rely on elsewhere, and the same answer the engine would surface for an
++        // out-of-bounds read.
++        if (loaded != null) {
++            return loaded.getBlockState(pos);
++        }
++        return Blocks.VOID_AIR.defaultBlockState();
++    }
++    // Loom end
++
+     @Override
+     public FluidState getFluidState(final BlockPos pos) {
+         if (!this.isInValidBounds(pos)) {
+@@ -1524,7 +1589,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+             entity.discard(org.bukkit.event.entity.EntityRemoveEvent.Cause.DISCARD);
+             // Paper end - Prevent block entity and entity crashes
+         }
+-        this.moonrise$midTickTasks(); // Paper - rewrite chunk system
++        // Loom - inside the parallel entity-tick phase a region worker only holds its region sub-lease;
++        // draining mid-tick tasks here would try to claim the full-level lease and conflict with the other
++        // workers. Skip it under staging; the owning thread drains these tasks after the parallel phase.
++        if (!net.minecraft.server.threading.RegionTickStaging.isStaging()) {
++            this.moonrise$midTickTasks(); // Paper - rewrite chunk system
++        }
+     }
+ 
+     // Paper start - Option to prevent armor stands from doing entity lookups
+diff --git a/net/minecraft/world/scores/Scoreboard.java b/net/minecraft/world/scores/Scoreboard.java
+index 34ad5e0784ee1d2ab1098c2248c7716e885aa790..fe1984ac2372ff8f207c31c3e322a7fd0913d9f7 100644
+--- a/net/minecraft/world/scores/Scoreboard.java
++++ b/net/minecraft/world/scores/Scoreboard.java
+@@ -355,6 +355,23 @@ public class Scoreboard {
+     }
+ 
+     public void entityRemoved(final Entity entity) {
++        // Loom - the scoreboard is global (server-wide) state. When an entity is removed off the global
++        // owner thread - e.g. during parallel world ticking, where the work runs on a region thread - route
++        // the cleanup to the global owner so scoreboard mutation stays serialized on the domain that owns it.
++        // It is slightly deferred but never racy; under serial ticking this runs inline as before.
++        final net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
++        if (server != null
++            && !net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(server)
++            && !ca.spottedleaf.moonrise.common.util.TickThread.isShutdownThread()) {
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(server, "scoreboard entity removed"),
++                () -> this.entityRemovedOnOwner(entity));
++            return;
++        }
++        this.entityRemovedOnOwner(entity);
++    }
++
++    private void entityRemovedOnOwner(final Entity entity) {
+         ScoreboardThreading.ensureThreadAccess("entity removed");
+         if (!(entity instanceof Player) && !entity.isAlive()) {
+             this.resetAllPlayerScores(entity);
+diff --git a/net/minecraft/world/ticks/LevelTicks.java b/net/minecraft/world/ticks/LevelTicks.java
+index d5e6f38a3cfab247acea785c4e34b6fddad3fd09..da1d73394343fdad8819aa7443b17acdb70b6402 100644
+--- a/net/minecraft/world/ticks/LevelTicks.java
++++ b/net/minecraft/world/ticks/LevelTicks.java
+@@ -77,6 +77,11 @@ public class LevelTicks<T> implements LevelTickAccess<T> {
+ 
+     @Override
+     public void schedule(final ScheduledTick<T> tick) {
++        // Loom - during parallel chunk ticking, buffer the scheduled tick and re-schedule it serially after
++        // the parallel phase instead of mutating this shared per-world scheduler off-thread.
++        if (net.minecraft.server.threading.RegionTickStaging.stageScheduledTick(this, tick)) {
++            return;
++        }
+         this.ensureOwner("level ticks operation");
+         long chunkKey = ChunkPos.pack(tick.pos());
+         LevelChunkTicks<T> tickContainer = this.allContainers.get(chunkKey);
