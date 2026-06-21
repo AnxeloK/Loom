@@ -5,7 +5,7 @@ Subject: [PATCH] Make /loom tps a styled parallel-tick readout
 
 
 diff --git a/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java b/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
-index e51d177a4e5fcb14543c6e60fb5b80c3338ff097..2d5a10caa24f2f37d0bbb4b12a43952376590126 100644
+index e51d177a4e5fcb14543c6e60fb5b80c3338ff097..b9adac0a54e18f7d662e6cd63403a729145b16a4 100644
 --- a/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
 +++ b/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
 @@ -1,19 +1,20 @@
@@ -54,7 +54,7 @@ index e51d177a4e5fcb14543c6e60fb5b80c3338ff097..2d5a10caa24f2f37d0bbb4b12a439523
          this.usageMessage = "/loom <tps|compatibility [json]>";
          this.setPermission("bukkit.command.tps");
      }
-@@ -42,30 +38,110 @@ public class LoomTicksPerSecondCommand extends Command {
+@@ -42,30 +38,103 @@ public class LoomTicksPerSecondCommand extends Command {
          if (!this.testPermission(sender)) {
              return true;
          }
@@ -86,8 +86,15 @@ index e51d177a4e5fcb14543c6e60fb5b80c3338ff097..2d5a10caa24f2f37d0bbb4b12a439523
 +                final int idx = Math.max(0, Math.min(sorted.length - 1, (int) Math.ceil(0.95D * sorted.length) - 1));
 +                msptP95 = sorted[idx] / 1_000_000.0D;
 +            }
-+        }
-+
+         }
+ 
+-        sender.sendMessage(text("Speed TPS from last 1m, 5m, 15m:", SOFT));
+-        final TextComponent.Builder tpsValues = text();
+-        tpsValues.append(text("  ", SUBTLE));
+-        tpsValues.append(Component.join(JoinConfiguration.commas(true), tpsAvg));
+-        sender.sendMessage(tpsValues.asComponent());
+-        sender.sendMessage(Component.empty());
+-        this.sendThreadedRuntimeSummary(sender);
 +        final int cores = Runtime.getRuntime().availableProcessors();
 +        double cpuLoad = -1.0D;
 +        try {
@@ -99,10 +106,6 @@ index e51d177a4e5fcb14543c6e60fb5b80c3338ff097..2d5a10caa24f2f37d0bbb4b12a439523
 +        final double coresUsed = cpuLoad < 0.0D ? -1.0D : cpuLoad * cores;
 +
 +        final TickRegions.RuntimeDiagnostics snap = TickRegions.snapshotDiagnostics();
-+        final long activeRegions = snap.regionRuntime().activeRegions();
-+        final int workerThreads = Math.max(1, Integer.getInteger(
-+            "paper.threadedregions.parallelScheduler.threads",
-+            Math.max(1, Runtime.getRuntime().availableProcessors() / 2)));
 +
 +        final CompatibilityDiagnostics.Snapshot compat = CompatibilityDiagnostics.global().snapshot();
 +        int fast = 0, degraded = 0, strict = 0, refused = 0;
@@ -126,7 +129,7 @@ index e51d177a4e5fcb14543c6e60fb5b80c3338ff097..2d5a10caa24f2f37d0bbb4b12a439523
 +        final double ramMax = rt.maxMemory() / 1.073741824E9D;
 +
 +        // ---- render: gauges ---------------------------------------------------
-+        sender.sendMessage(text("ʟᴏᴏᴍ", ACCENT).decorate(TextDecoration.BOLD));
++        sender.sendMessage(text("ʟᴏᴏᴍ", ACCENT));
 +
 +        sender.sendMessage(text().append(this.label("ᴛᴘꜱ"))
 +            .append(this.bar(tps1m / 20.0D, this.tpsColour(tps1m)))
@@ -141,11 +144,6 @@ index e51d177a4e5fcb14543c6e60fb5b80c3338ff097..2d5a10caa24f2f37d0bbb4b12a439523
 +            .append(this.bar(cpuLoad < 0.0D ? 0.0D : cpuLoad, ACCENT))
 +            .append(text(coresUsed < 0.0D ? "  n/a" : "  " + ONE_DP.get().format(coresUsed) + " / " + cores + " cores", SOFT)).build());
 +
-+        sender.sendMessage(text().append(this.label("ᴘᴀʀᴀʟʟᴇʟ"))
-+            .append(text(workerThreads + " worker threads", ACCENT))
-+            .append(text("  ·  ", SUBTLE))
-+            .append(text(activeRegions + (activeRegions == 1L ? " region active" : " regions active"), activeRegions > 0L ? ACCENT : SOFT)).build());
-+
 +        sender.sendMessage(text().append(this.label("ᴘʟᴜɢɪɴꜱ"))
 +            .append(this.bar(pluginHealthFrac, this.pluginColour(refused, strict, degraded)))
 +            .append(text("  " + fast + " fast", SOFT))
@@ -156,28 +154,23 @@ index e51d177a4e5fcb14543c6e60fb5b80c3338ff097..2d5a10caa24f2f37d0bbb4b12a439523
 +        final long safetyTotal = asyncViolations + refusedPaths + ownerViolations;
 +        if (safetyTotal > 0L) {
 +            sender.sendMessage(text().append(this.label("ꜱᴀꜰᴇᴛʏ"))
-+                .append(text("⚠ " + asyncViolations + " async violations · " + refusedPaths + " refused · " + ownerViolations + " owner", NamedTextColor.RED)).build());
++                .append(text("⚠ ", NamedTextColor.RED).decorate(TextDecoration.BOLD))
++                .append(text(asyncViolations + " async violations · " + refusedPaths + " refused · " + ownerViolations + " owner", NamedTextColor.RED)).build());
 +        } else {
 +            sender.sendMessage(text().append(this.label("ꜱᴀꜰᴇᴛʏ"))
-+                .append(text("✔ clean", NamedTextColor.GREEN)).build());
-         }
- 
--        sender.sendMessage(text("Speed TPS from last 1m, 5m, 15m:", SOFT));
--        final TextComponent.Builder tpsValues = text();
--        tpsValues.append(text("  ", SUBTLE));
--        tpsValues.append(Component.join(JoinConfiguration.commas(true), tpsAvg));
--        sender.sendMessage(tpsValues.asComponent());
--        sender.sendMessage(Component.empty());
--        this.sendThreadedRuntimeSummary(sender);
++                .append(text("✔ ", NamedTextColor.GREEN).decorate(TextDecoration.BOLD))
++                .append(text("clean", NamedTextColor.GREEN)).build());
++        }
++
 +        sender.sendMessage(text()
 +            .append(text("  ● ", this.tpsColour(tps1m)).decorate(TextDecoration.BOLD))
-+            .append(text(this.status(tps1m), this.tpsColour(tps1m)).decorate(TextDecoration.BOLD))
++            .append(text(this.status(tps1m), this.tpsColour(tps1m)))
 +            .append(text("  ·  " + Bukkit.getOnlinePlayers().size() + " players", SOFT))
 +            .append(text("  ·  " + ONE_DP.get().format(ramUsed) + "/" + ONE_DP.get().format(ramMax) + " GB", SOFT)).build());
          return true;
      }
  
-@@ -75,242 +151,49 @@ public class LoomTicksPerSecondCommand extends Command {
+@@ -75,242 +144,49 @@ public class LoomTicksPerSecondCommand extends Command {
              sender.sendMessage(text(diagnostics.renderStructuredJson(), NamedTextColor.GRAY));
              return;
          }
@@ -292,11 +285,7 @@ index e51d177a4e5fcb14543c6e60fb5b80c3338ff097..2d5a10caa24f2f37d0bbb4b12a439523
 -            safety.append(text(mailboxDropped, this.failureColor(mailboxDropped)));
 -        } else {
 -            safety.append(text("none", NamedTextColor.GREEN));
-+    private Component label(final String name) {
-+        final StringBuilder s = new StringBuilder("  ").append(name);
-+        while (s.length() < 11) {
-+            s.append(' ');
-         }
+-        }
 -        sender.sendMessage(safety.asComponent());
 -
 -        sender.sendMessage(text()
@@ -359,27 +348,24 @@ index e51d177a4e5fcb14543c6e60fb5b80c3338ff097..2d5a10caa24f2f37d0bbb4b12a439523
 -        this.lastPacketDrainSnapshot = packetSnapshot;
 -        this.lastOwnerDomainSnapshot = ownerSnapshot;
 -        this.lastThreadedSnapshotNanos = now;
-+        return text(s.toString(), SOFT).decorate(TextDecoration.BOLD);
-     }
- 
+-    }
+-
 -    private String runtimeState(final long alerts, final long queueSize, final double regionCreateRate) {
 -        if (alerts > 0L) {
 -            return "Attention";
 -        }
 -        if (queueSize >= 4096L || regionCreateRate >= 1200.0D) {
 -            return "Heavy";
--        }
++    private Component label(final String name) {
++        final StringBuilder s = new StringBuilder("  ").append(name);
++        while (s.length() < 11) {
++            s.append(' ');
+         }
 -        if (queueSize >= 512L || regionCreateRate >= 250.0D) {
 -            return "Active";
-+    private Component bar(final double fraction, final TextColor color) {
-+        final int segments = 10;
-+        final int filled = (int) Math.round(Math.max(0.0D, Math.min(1.0D, fraction)) * segments);
-+        final StringBuilder sb = new StringBuilder(segments);
-+        for (int i = 0; i < segments; i++) {
-+            sb.append(i < filled ? '▰' : '▱');
-         }
+-        }
 -        return "Smooth";
-+        return text(sb.toString(), color);
++        return text(s.toString(), SOFT);
      }
  
 -    private TextColor stateColor(final long alerts, final long queueSize, final double regionCreateRate) {
@@ -391,10 +377,15 @@ index e51d177a4e5fcb14543c6e60fb5b80c3338ff097..2d5a10caa24f2f37d0bbb4b12a439523
 -        }
 -        if (queueSize >= 512L || regionCreateRate >= 250.0D) {
 -            return ACCENT;
--        }
++    private Component bar(final double fraction, final TextColor color) {
++        final int segments = 10;
++        final int filled = (int) Math.round(Math.max(0.0D, Math.min(1.0D, fraction)) * segments);
++        final StringBuilder sb = new StringBuilder(segments);
++        for (int i = 0; i < segments; i++) {
++            sb.append(i < filled ? '▰' : '▱');
+         }
 -        return NamedTextColor.GREEN;
-+    private String status(final double tps) {
-+        return tps >= 19.0D ? "Smooth" : (tps >= 15.0D ? "Active" : "Heavy");
++        return text(sb.toString(), color).decorate(TextDecoration.BOLD);
      }
  
 -    private TextColor rateColor(final double rate) {
@@ -405,20 +396,22 @@ index e51d177a4e5fcb14543c6e60fb5b80c3338ff097..2d5a10caa24f2f37d0bbb4b12a439523
 -            return NamedTextColor.GREEN;
 -        }
 -        return NamedTextColor.WHITE;
-+    private TextColor tpsColour(final double tps) {
-+        return tps >= 19.0D ? NamedTextColor.GREEN : (tps >= 15.0D ? ACCENT : NamedTextColor.RED);
++    private String status(final double tps) {
++        return tps >= 19.0D ? "Smooth" : (tps >= 15.0D ? "Active" : "Heavy");
      }
  
 -    private double perSecond(final long current, final long previous, final double elapsedSeconds) {
 -        return Math.max(0.0D, (double)(current - previous) / elapsedSeconds);
-+    private TextColor msptColour(final double mspt) {
-+        return mspt < 35.0D ? NamedTextColor.GREEN : (mspt < 50.0D ? NamedTextColor.YELLOW : NamedTextColor.RED);
++    private TextColor tpsColour(final double tps) {
++        return tps >= 19.0D ? NamedTextColor.GREEN : (tps >= 15.0D ? ACCENT : NamedTextColor.RED);
      }
  
 -    private double nanosPerSecondAsMillis(final long current, final long previous, final double elapsedSeconds) {
 -        return this.perSecond(current, previous, elapsedSeconds) / 1_000_000.0D;
--    }
--
++    private TextColor msptColour(final double mspt) {
++        return mspt < 35.0D ? NamedTextColor.GREEN : (mspt < 50.0D ? NamedTextColor.YELLOW : NamedTextColor.RED);
+     }
+ 
 -    private TextColor pressureColor(final long queueSize) {
 -        if (queueSize >= 4096L) {
 +    private TextColor pluginColour(final int refused, final int strict, final int degraded) {
