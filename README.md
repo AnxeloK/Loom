@@ -20,6 +20,11 @@ On an ordinary server, being "on the main thread" is treated as safe. Loom repla
 
 Everything else — the region system, the compatibility layer that keeps plugins working, and the chunk loader — exists to enforce that rule efficiently. The [documentation](docs/README.md) explains how each piece fits together.
 
+## Requirements
+
+- **Java 25.** Loom is built and run on Java 25 — use a Java 25 (or newer) JDK to build and a Java 25 JRE to run. On an older Java the server won't start (`UnsupportedClassVersionError`).
+- **Your own JVM flags.** Loom does not set your heap size or garbage collector — like any Java server, those come from your launch command. Starting with just `-jar server.jar` gives you the JVM's small default heap and default GC, which perform poorly; use a proper startup line (see [Performance and Tuning](docs/performance.md)). Loom's own parallelism — the region and worker thread counts — scales to your CPU automatically, so that part needs no tuning.
+
 ## Build from source
 
 ```bash
@@ -65,3 +70,7 @@ Start with [docs/README.md](docs/README.md). A good reading order:
 - That every plugin works 100%.
 - That unsafe access to the server from async threads is always made safe.
 - That performance wins are kept if they come at the cost of plugin compatibility or safety.
+
+## License
+
+Loom is a fork of [Paper](https://papermc.io) and is licensed under the **GNU General Public License v3.0**. See [LICENSE](LICENSE).

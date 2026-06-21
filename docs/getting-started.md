@@ -4,7 +4,7 @@ This page is the practical entry point. It explains how to build Loom, run the b
 
 ## Prerequisites
 
-- Java toolchain `25`
+- Java `25` — a Java 25 JDK to build, and a Java 25 JRE to run the server
 - Bash or a compatible shell for `patch.sh` and `rb.sh`
 - The Gradle wrapper from this repository
 - Enough memory for a Paper-style server build
@@ -42,7 +42,7 @@ Run the required validation gates before treating the build as releasable:
 
 ## First Runtime Check
 
-Start a test server with the built jar and wait for:
+Start a test server with the built jar — launch it on Java 25 with a real heap and garbage collector (see [Performance and Tuning](performance.md)), not a bare `-jar`. Wait for:
 
 ```text
 Done (...)
