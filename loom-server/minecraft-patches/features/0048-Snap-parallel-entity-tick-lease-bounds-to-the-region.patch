@@ -18,7 +18,6 @@ bucket ticks. Additionally, iterate the bucket-overlap absorb to a fixed point s
 a bucket grown by an absorption that newly overlaps another bucket also merges;
 this protects the parallel chunk-tick path too.
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
 index 8085c43e442ef59c33a9b29eba62ea60ca6236e0..5618baa72f01592fdee0bff7c802ab0cea6b502a 100644

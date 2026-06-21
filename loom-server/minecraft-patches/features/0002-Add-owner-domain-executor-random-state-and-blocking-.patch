@@ -160,7 +160,7 @@ index 440e5d2c199c6e8cbab2d5c92256cccfd0c555fe..c5861671a73649e1445c0dafb8c66a54
              // Paper start
              LOGGER.info("Running delayed init tasks");
 -            new io.papermc.paper.threadedregions.RegionizedServerInitEvent().callEvent(); // Call Folia init event
-+            net.minecraft.server.threading.runtime.ThreadedRegionsCompatibility.fireRegionizedServerInitEvent(); // Call Folia init event
++            net.minecraft.server.threading.runtime.ThreadedRegionsCompatibility.fireRegionizedServerInitEvent(); // Fire the regionized server init event
              this.server.getScheduler().mainThreadHeartbeat(); // run all 1 tick delay tasks during init,
              // this is going to be the first thing the tick process does anyway, so move done and run it after
              // everything is init before watchdog tick.

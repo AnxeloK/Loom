@@ -19,7 +19,6 @@ single-threaded exactly as under serial ticking. The staged-veto class (events
 whose cancellation must synchronously suppress a side effect) is excluded and left
 on the existing path as documented follow-up.
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
 index 43110810c8c48367b0a30b4f5f45815990f53104..56de9e0ec3ef2dd8d2df8d780fcd89f5accbafb9 100644

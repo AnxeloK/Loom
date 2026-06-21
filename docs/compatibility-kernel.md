@@ -283,4 +283,4 @@ The honest target is:
 
 > Paper-level compatibility for well-behaved plugins, broad rescue behavior for many legacy mistakes, and explicit refusal for patterns that would deadlock or corrupt state.
 
-That target is intentionally different from Folia's plugin contract. Loom should not require ordinary plugin authors to become region-threading experts just to get basic compatibility.
+Loom should not require ordinary plugin authors to become region-threading experts just to get basic compatibility.

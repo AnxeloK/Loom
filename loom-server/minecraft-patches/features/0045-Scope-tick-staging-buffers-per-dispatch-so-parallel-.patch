@@ -21,7 +21,6 @@ veto-before-write cancellation gate are unchanged.
 
 Serial/default path (parallel flags off) is byte-identical; no new -D flag.
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
 index e00c6e45fcd6b695fa84c204634bd0e9bc59c6cc..6d99acf276e49a075e0a40ce79dbc77e66b4a239 100644

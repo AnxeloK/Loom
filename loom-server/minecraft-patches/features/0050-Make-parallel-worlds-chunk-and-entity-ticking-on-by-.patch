@@ -8,7 +8,6 @@ PARALLEL_ENTITY_TICK_ENABLED to default ON. Each can still be disabled
 explicitly with -Dloom.parallelX=false; any other value (or unset)
 leaves parallel ticking active.
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
 index 64a24a727e2097918ab28904356568e69db966e0..d495b50210396ee5f714c1cdaf3ba00fd80e75e2 100644

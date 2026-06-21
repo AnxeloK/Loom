@@ -4,9 +4,9 @@
 
 No. Loom changes the runtime safety model. Mutable work must run in the correct owner domain. Paper's simple "main thread is safe" rule is not enough for Loom.
 
-## Is Loom the same as Folia?
+## Do I need to change my plugins to use Loom?
 
-No. Folia exposes a region-threaded model to plugins. Loom's goal is different: keep broad Paper/Bukkit plugin compatibility as the default while routing execution through owner domains internally.
+No, and that is the whole point. Loom keeps normal Paper/Bukkit plugin behavior as the default and handles the threading internally, through owner domains. Ordinary plugins keep running without any changes.
 
 ## Are there runtime modes?
 

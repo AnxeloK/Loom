@@ -24,7 +24,6 @@ the owner thread instead of being refused.
 Serial / single-thread ticking is byte-identical: on the owner thread the apartment
 is never contended, so the changed BUSY branch is never entered.
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 index f19e7eab56f264b1cb7387c57da976bbe572b452..23fea5deafb8d19a27f989a457b477dd50baba9d 100644

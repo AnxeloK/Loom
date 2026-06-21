@@ -7,7 +7,7 @@ This page is the practical entry point. It explains how to build Loom, run the b
 - Java toolchain `25`
 - Bash or a compatible shell for `patch.sh` and `rb.sh`
 - The Gradle wrapper from this repository
-- Enough memory for a Paper/Folia-style server build
+- Enough memory for a Paper-style server build
 
 The repository uses a patch workflow. The patch directories are the source of truth:
 

@@ -10,7 +10,7 @@ Traditional Paper has one dominant safety assumption:
 sync Bukkit/server work runs on the main server thread
 ```
 
-That assumption is simple and compatible, but it serializes too much work. Folia moves toward region-threaded execution, but plugin authors must respect a different threading contract.
+That assumption is simple and compatible, but it serializes too much work. Other threaded approaches speed this up by splitting the server into independent regions, but they require plugin authors to learn and respect a new threading contract.
 
 Loom tries a different target:
 
@@ -263,4 +263,4 @@ The performance work should smooth those bursts without weakening plugin compati
 
 ## Design Principle
 
-Loom should improve performance only by doing the same safe work more intelligently. It should not improve by making plugins responsible for Folia-style region rules, and it should not improve by disabling ownership checks.
+Loom should improve performance only by doing the same safe work more intelligently. It should not improve by pushing region-threading rules onto plugin authors, and it should not improve by disabling ownership checks.

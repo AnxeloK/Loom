@@ -25,7 +25,6 @@ synchronous nested call. Safe (no data race) and correct (plugin re-entering
 itself); the cross-thread BUSY path (the apartment's actual cross-thread
 serialization purpose) is unchanged.
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
 index 8bd9acfc677a854a19bf3e5b88473f0ad27120ef..63009af5233851977b4bb84099b8de84e9e7a2e7 100644
