@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Sun, 21 Jun 2026 02:13:23 +0000
+Subject: [PATCH] Base the /loom tps runtime state on tick rate, not internal
+ region churn
+
+
+diff --git a/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java b/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
+index e51d177a4e5fcb14543c6e60fb5b80c3338ff097..6e4e3e47c3e8bb4b92834ad71f1d010d994eece8 100644
+--- a/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
++++ b/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
+@@ -65,7 +65,7 @@ public class LoomTicksPerSecondCommand extends Command {
+         tpsValues.append(Component.join(JoinConfiguration.commas(true), tpsAvg));
+         sender.sendMessage(tpsValues.asComponent());
+         sender.sendMessage(Component.empty());
+-        this.sendThreadedRuntimeSummary(sender);
++        this.sendThreadedRuntimeSummary(sender, tps.length > 0 ? tps[0] : 20.0D);
+         return true;
+     }
+ 
+@@ -82,7 +82,7 @@ public class LoomTicksPerSecondCommand extends Command {
+         }
+     }
+ 
+-    private void sendThreadedRuntimeSummary(final CommandSender sender) {
++    private void sendThreadedRuntimeSummary(final CommandSender sender, final double tps1m) {
+         final TickRegions.RuntimeDiagnostics snapshot = TickRegions.snapshotDiagnostics();
+         final TickRegions.RuntimeDiagnostics previous = this.lastThreadedSnapshot;
+         final PacketProcessor.TickStartDrainDiagnostics packetSnapshot = PacketProcessor.tickStartDrainDiagnostics();
+@@ -169,7 +169,7 @@ public class LoomTicksPerSecondCommand extends Command {
+         sender.sendMessage(text("Runtime overview:", SOFT));
+         sender.sendMessage(text()
+             .append(text("  State: ", SOFT))
+-            .append(text(this.runtimeState(totalAlerts, totalQueue, regionCreateRate), this.stateColor(totalAlerts, totalQueue, regionCreateRate)))
++            .append(text(this.runtimeState(totalAlerts, tps1m, totalQueue), this.stateColor(totalAlerts, tps1m, totalQueue)))
+             .append(text("  |  Alerts: ", SOFT))
+             .append(text(totalAlerts, this.failureColor(totalAlerts)))
+             .build());
+@@ -250,27 +250,30 @@ public class LoomTicksPerSecondCommand extends Command {
+         this.lastThreadedSnapshotNanos = now;
+     }
+ 
+-    private String runtimeState(final long alerts, final long queueSize, final double regionCreateRate) {
++    // State reflects whether the server is actually keeping up: tick rate first, then a genuine task
++    // backlog. Region churn (leases claimed per bucket per tick) is normal internal work, not load, so it
++    // is reported as an informational rate below and never drives this verdict.
++    private String runtimeState(final long alerts, final double tps, final long queueSize) {
+         if (alerts > 0L) {
+             return "Attention";
+         }
+-        if (queueSize >= 4096L || regionCreateRate >= 1200.0D) {
++        if (tps < 15.0D || queueSize >= 8192L) {
+             return "Heavy";
+         }
+-        if (queueSize >= 512L || regionCreateRate >= 250.0D) {
++        if (tps < 19.0D || queueSize >= 2048L) {
+             return "Active";
+         }
+         return "Smooth";
+     }
+ 
+-    private TextColor stateColor(final long alerts, final long queueSize, final double regionCreateRate) {
++    private TextColor stateColor(final long alerts, final double tps, final long queueSize) {
+         if (alerts > 0L) {
+             return NamedTextColor.RED;
+         }
+-        if (queueSize >= 4096L || regionCreateRate >= 1200.0D) {
++        if (tps < 15.0D || queueSize >= 8192L) {
+             return NamedTextColor.YELLOW;
+         }
+-        if (queueSize >= 512L || regionCreateRate >= 250.0D) {
++        if (tps < 19.0D || queueSize >= 2048L) {
+             return ACCENT;
+         }
+         return NamedTextColor.GREEN;
