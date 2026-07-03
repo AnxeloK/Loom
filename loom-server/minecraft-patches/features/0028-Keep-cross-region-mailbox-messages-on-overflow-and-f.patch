@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 3 Jul 2026 11:48:33 +0000
+Subject: [PATCH] Keep cross-region mailbox messages on overflow and fix
+ diagnostic races
+
+The mailbox previously evicted its oldest message once the queue cap
+was reached. The queue carries owner-domain handoffs such as entity
+transfers, teleports and submit/supply futures, so shedding one loses
+that work outright: a dropped future never completes and the caller
+hangs on it. Treat the cap as a backlog warning threshold instead and
+record a diagnostic once per overflow episode, rearming after the
+queue drains below half the cap. Plugin-disable and task-cancellation
+drops keep their existing semantics.
+
+Diagnostic events were also appended to a plain ArrayDeque from region
+workers without synchronization even though DIAGNOSTIC_LOCK existed
+for that purpose, which can corrupt the deque under parallel ticking.
+Record and snapshot under the lock.
+
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index a8ff6c10f3e04ee120364ff0c6557c981a8b973d..789be2c5ae3c8f8ef99a468661337d249560e148 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -510,7 +510,7 @@ public class TickRegions {
+     }
+ 
+     public static List<DiagnosticEvent> recentDiagnostics() {
+-        {
++        synchronized (DIAGNOSTIC_LOCK) {
+             return List.copyOf(DIAGNOSTIC_EVENTS);
+         }
+     }
+@@ -1019,7 +1019,7 @@ public class TickRegions {
+             detail
+         );
+ 
+-        {
++        synchronized (DIAGNOSTIC_LOCK) {
+             DIAGNOSTIC_EVENTS.addLast(event);
+             while (DIAGNOSTIC_EVENTS.size() > DIAGNOSTIC_EVENT_LIMIT) {
+                 DIAGNOSTIC_EVENTS.removeFirst();
+@@ -1326,6 +1326,7 @@ public class TickRegions {
+         private long droppedMessageCount;
+         private long parallelMailboxDrainCount;
+         private long mailboxBudgetSkipCount;
++        private boolean mailboxOverflowWarned;
+ 
+         private WorldSchedulerState(final ServerLevel world) {
+             this.world = world;
+@@ -1591,22 +1592,25 @@ public class TickRegions {
+         }
+ 
+         private void enqueueMailboxInternal(final CrossRegionMessage message, final boolean countAsPosted) {
+-            if (this.mailbox.size() >= MAILBOX_MAX_QUEUED_MESSAGES) {
+-                final CrossRegionMessage dropped = this.mailbox.pollFirst();
+-                ++this.droppedMessageCount;
+-                MAILBOX_MESSAGES_DROPPED.getAndIncrement();
+-                if (dropped != null) {
+-                    incrementTypeCounter(MAILBOX_DROPPED_BY_TYPE, dropped.messageType());
++            // Loom - never shed queued messages on overflow. The mailbox carries owner-domain handoffs
++            // (entity transfers, teleports, submit/supply futures) whose loss strands the work or hangs
++            // the future forever, so the cap is a backlog warning threshold, not an eviction bound.
++            final int queued = this.mailbox.size();
++            if (queued >= MAILBOX_MAX_QUEUED_MESSAGES) {
++                if (!this.mailboxOverflowWarned) {
++                    this.mailboxOverflowWarned = true;
++                    recordDiagnostic(
++                        DiagnosticType.MAILBOX_QUEUE_OVERFLOW,
++                        this.world,
++                        message.targetChunkX(),
++                        message.targetChunkZ(),
++                        message.targetChunkX(),
++                        message.targetChunkZ(),
++                        "Mailbox queue over capacity (" + queued + " queued), retaining all messages"
++                    );
+                 }
+-                recordDiagnostic(
+-                    DiagnosticType.MAILBOX_QUEUE_OVERFLOW,
+-                    this.world,
+-                    message.targetChunkX(),
+-                    message.targetChunkZ(),
+-                    message.targetChunkX(),
+-                    message.targetChunkZ(),
+-                    "Mailbox queue overflow, dropping oldest message"
+-                );
++            } else if (this.mailboxOverflowWarned && queued < MAILBOX_MAX_QUEUED_MESSAGES / 2) {
++                this.mailboxOverflowWarned = false;
+             }
+             this.mailbox.addLast(message);
+             if (countAsPosted) {
