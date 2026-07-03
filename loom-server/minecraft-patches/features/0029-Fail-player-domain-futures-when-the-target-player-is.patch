@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 3 Jul 2026 12:09:39 +0000
+Subject: [PATCH] Fail player-domain futures when the target player is gone
+
+A task handed to a player owner is dropped when that player has
+disconnected, matching the retirement semantics of per-entity
+scheduling. Futures built on top of that handoff never learned about
+the drop, so a submit or supply against a departing player could hang
+its caller forever.
+
+Thread an unreachable callback through the player handoff and complete
+such futures exceptionally. A rejected global enqueue during shutdown
+now also fails the future instead of throwing past it. Plain execute
+keeps the historic fire-and-forget drop.
+
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index 846fa4072955da6853a1f9bb3711e7824b8ce4f8..dc16a371aad05b261d82b93098a2685c2a462bff 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -272,6 +272,14 @@ public final class OwnerDomainExecutor {
+     }
+ 
+     public static void execute(final Owner owner, final Runnable task) {
++        executeInternal(owner, task, null);
++    }
++
++    // Loom - onUnreachable fires when the handoff target can no longer take the task (currently only a
++    // player owner whose player has disconnected). Fire-and-forget callers pass null and keep the historic
++    // drop semantics; future-returning callers use it to fail the future instead of leaving it pending
++    // forever.
++    private static void executeInternal(final Owner owner, final Runnable task, final @Nullable Runnable onUnreachable) {
+         Objects.requireNonNull(owner, "owner");
+         Objects.requireNonNull(task, "task");
+         if (isOwner(owner)) {
+@@ -284,7 +292,7 @@ public final class OwnerDomainExecutor {
+         switch (owner.domain()) {
+             case GLOBAL_CONTROL -> enqueueGlobal(owner, task);
+             case REGION -> enqueueRegion(owner, task);
+-            case PLAYER -> enqueuePlayer(owner, task);
++            case PLAYER -> enqueuePlayer(owner, task, onUnreachable);
+             case LOGIN -> LOGIN_EXECUTOR.execute(wrap(owner, task));
+             case ASYNC_IO -> Util.nonCriticalIoPool().execute(wrap(owner, task));
+         }
+@@ -310,13 +318,23 @@ public final class OwnerDomainExecutor {
+         }
+ 
+         final CompletableFuture<T> future = new CompletableFuture<>();
+-        execute(owner, () -> {
+-            try {
+-                future.complete(supplier.get());
+-            } catch (final Throwable throwable) {
+-                future.completeExceptionally(throwable);
+-            }
+-        });
++        try {
++            executeInternal(
++                owner,
++                () -> {
++                    try {
++                        future.complete(supplier.get());
++                    } catch (final Throwable throwable) {
++                        future.completeExceptionally(throwable);
++                    }
++                },
++                () -> future.completeExceptionally(
++                    new RejectedExecutionException("Owner is no longer reachable: " + owner.describe())
++                )
++            );
++        } catch (final RejectedExecutionException rejected) {
++            future.completeExceptionally(rejected);
++        }
+         return future;
+     }
+ 
+@@ -356,15 +374,20 @@ public final class OwnerDomainExecutor {
+         );
+     }
+ 
+-    private static void enqueuePlayer(final Owner owner, final Runnable task) {
++    private static void enqueuePlayer(final Owner owner, final Runnable task, final @Nullable Runnable onUnreachable) {
+         final ServerPlayer player = owner.player();
+         if (player == null || player.hasDisconnected()) {
++            if (onUnreachable != null) {
++                onUnreachable.run();
++            }
+             return;
+         }
+         final Owner currentLocation = player(player, owner.operation());
+         enqueueRegion(currentLocation, () -> {
+             if (!player.hasDisconnected() && player.getUUID().equals(owner.playerId())) {
+                 wrap(currentLocation, task).run();
++            } else if (onUnreachable != null) {
++                onUnreachable.run();
+             }
+         });
+     }
