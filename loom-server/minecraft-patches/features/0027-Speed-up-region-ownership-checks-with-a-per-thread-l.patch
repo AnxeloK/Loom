@@ -1,0 +1,141 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 3 Jul 2026 11:48:23 +0000
+Subject: [PATCH] Speed up region ownership checks with a per-thread lease
+ index
+
+Ownership checks previously took the per-world lease lock and scanned
+every active lease on each query. Under parallel ticking every worker
+funnels through that lock on the hottest path in the runtime, so the
+lock becomes a serialization point.
+
+Keep a copy-on-write array of leases per owner thread id, maintained
+under the existing lock on claim and release. Reads are self-queries
+(a thread asking about its own leases), so they now fetch their own
+array from a concurrent map and scan it without locking.
+
+diff --git a/net/minecraft/server/threading/RegionRuntime.java b/net/minecraft/server/threading/RegionRuntime.java
+index 6acf234a7d52822bb9df4b41667eeee7ad6083d2..463821f22568665845bfca3213f79775b9bdaebe 100644
+--- a/net/minecraft/server/threading/RegionRuntime.java
++++ b/net/minecraft/server/threading/RegionRuntime.java
+@@ -232,6 +232,11 @@ public class RegionRuntime {
+ 
+         private final java.util.concurrent.locks.ReentrantLock lock = new java.util.concurrent.locks.ReentrantLock();
+         private final Map<Long, Lease> leases = new HashMap<>();
++        // Loom - per-thread copy-on-write lease index for lock-free ownership reads. Ownership checks are
++        // the hottest path in the runtime and are always self-queries (a thread asking about its own
++        // leases), so reads scan a small immutable array fetched by thread id instead of taking the world
++        // lock that claim/release use. Mutated only while holding `lock`.
++        private final ConcurrentHashMap<Long, Lease[]> leasesByThread = new ConcurrentHashMap<>();
+         private final Map<Long, RegionDescriptor> regions = new HashMap<>();
+         private final Map<Long, Integer> regionReferenceCounts = new HashMap<>();
+         private long createdRegions;
+@@ -275,6 +280,7 @@ public class RegionRuntime {
+                     if (prev != null) {
+                         throw new IllegalStateException("Duplicate lease id: " + lease.id);
+                     }
++                    this.indexLease(lease);
+                     this.regionReferenceCounts.put(regionId, 1);
+                     return;
+                 }
+@@ -305,6 +311,7 @@ public class RegionRuntime {
+                 if (prev != null) {
+                     throw new IllegalStateException("Duplicate lease id: " + lease.id);
+                 }
++                this.indexLease(lease);
+                 this.regionReferenceCounts.merge(regionId, 1, Integer::sum);
+ 
+                 final RegionDescriptor regionDescriptor = this.regions.get(regionId);
+@@ -323,6 +330,7 @@ public class RegionRuntime {
+                 if (removed == null) {
+                     return;
+                 }
++                this.unindexLease(removed);
+                 final Integer refs = this.regionReferenceCounts.get(removed.regionId);
+                 if (refs == null || refs <= 1) {
+                     this.regionReferenceCounts.remove(removed.regionId);
+@@ -338,15 +346,14 @@ public class RegionRuntime {
+         }
+ 
+         private boolean isOwner(final int chunkX, final int chunkZ, final long threadId) {
+-            this.lock.lock();
+-            try {
+-                for (final Lease lease : this.leases.values()) {
+-                    if (lease.ownerThreadId == threadId && lease.contains(chunkX, chunkZ)) {
+-                        return true;
+-                    }
++            final Lease[] own = this.leasesByThread.get(threadId);
++            if (own == null) {
++                return false;
++            }
++            for (final Lease lease : own) {
++                if (lease.contains(chunkX, chunkZ)) {
++                    return true;
+                 }
+-            } finally {
+-                this.lock.unlock();
+             }
+             return false;
+         }
+@@ -358,21 +365,51 @@ public class RegionRuntime {
+             final int maxChunkZ,
+             final long threadId
+         ) {
+-            this.lock.lock();
+-            try {
+-                for (final Lease lease : this.leases.values()) {
+-                    if (lease.ownerThreadId == threadId
+-                        && lease.contains(minChunkX, minChunkZ)
+-                        && lease.contains(maxChunkX, maxChunkZ)) {
+-                        return true;
+-                    }
++            final Lease[] own = this.leasesByThread.get(threadId);
++            if (own == null) {
++                return false;
++            }
++            for (final Lease lease : own) {
++                if (lease.contains(minChunkX, minChunkZ) && lease.contains(maxChunkX, maxChunkZ)) {
++                    return true;
+                 }
+-            } finally {
+-                this.lock.unlock();
+             }
+             return false;
+         }
+ 
++        private void indexLease(final Lease lease) {
++            this.leasesByThread.compute(lease.ownerThreadId, (ignored, existing) -> {
++                if (existing == null) {
++                    return new Lease[] { lease };
++                }
++                final Lease[] next = java.util.Arrays.copyOf(existing, existing.length + 1);
++                next[existing.length] = lease;
++                return next;
++            });
++        }
++
++        private void unindexLease(final Lease lease) {
++            this.leasesByThread.computeIfPresent(lease.ownerThreadId, (ignored, existing) -> {
++                int index = -1;
++                for (int i = 0, len = existing.length; i < len; ++i) {
++                    if (existing[i].id == lease.id) {
++                        index = i;
++                        break;
++                    }
++                }
++                if (index < 0) {
++                    return existing;
++                }
++                if (existing.length == 1) {
++                    return null;
++                }
++                final Lease[] next = new Lease[existing.length - 1];
++                System.arraycopy(existing, 0, next, 0, index);
++                System.arraycopy(existing, index + 1, next, index, existing.length - 1 - index);
++                return next;
++            });
++        }
++
+         private boolean isEmpty() {
+             this.lock.lock();
+             try {
