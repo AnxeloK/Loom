@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sun, 5 Jul 2026 21:20:37 +0000
+Subject: [PATCH] Cache the per-domain random source on the owner context
+
+Level.getRandom routes through DomainRandom.forRuntimeLevel on every
+call, and the old path paid a thread-local map lookup plus a fresh
+capturing lambda for computeIfAbsent each time. Under load that lambda
+was the single largest allocation site in the server after arrays.
+
+Resolve the random source once per owner context and cache it next to
+the cached key. The per-thread map still backs the cache so a domain
+keeps its random sequence across context pushes; only the per-call
+overhead changes.
+
+diff --git a/net/minecraft/server/threading/runtime/DomainRandom.java b/net/minecraft/server/threading/runtime/DomainRandom.java
+index 4d4026f15d187ff70ef1c736b92a590887bfd4a7..3e3d181d4c2e3ab0765b4d7f52c114c104b6c3ea 100644
+--- a/net/minecraft/server/threading/runtime/DomainRandom.java
++++ b/net/minecraft/server/threading/runtime/DomainRandom.java
+@@ -27,11 +27,18 @@ public final class DomainRandom {
+     }
+ 
+     public static RandomSource forRuntimeLevel(final ServerLevel level, final RandomSource fallback) {
+-        final String key = OwnerDomainExecutor.currentRandomKey(level);
+-        if (key == null) {
+-            return fallback;
++        final RandomSource source = OwnerDomainExecutor.currentRandomSource(level);
++        return source == null ? fallback : source;
++    }
++
++    static RandomSource threadSourceForKey(final ServerLevel level, final String key) {
++        final Map<String, RandomSource> randoms = DOMAIN_RANDOMS.get();
++        RandomSource source = randoms.get(key);
++        if (source == null) {
++            source = RandomSource.create(seed(level, BlockPos.ZERO, key));
++            randoms.put(key, source);
+         }
+-        return DOMAIN_RANDOMS.get().computeIfAbsent(key, ignored -> RandomSource.create(seed(level, BlockPos.ZERO, key)));
++        return source;
+     }
+ 
+     private static long seed(final ServerLevel level, final BlockPos blockPos, final String salt) {
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index dc16a371aad05b261d82b93098a2685c2a462bff..9c6b2c44ef97cee2d7de8c94a5004e608b7dd966 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -16,6 +16,7 @@ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.server.level.ServerPlayer;
+ import net.minecraft.server.threading.TickRegions;
++import net.minecraft.util.RandomSource;
+ import net.minecraft.util.Util;
+ import net.minecraft.world.entity.Entity;
+ import net.minecraft.world.level.Level;
+@@ -126,20 +127,20 @@ public final class OwnerDomainExecutor {
+         return context == null ? null : context.owner();
+     }
+ 
+-    static @Nullable String currentRandomKey(final ServerLevel level) {
++    static @Nullable RandomSource currentRandomSource(final ServerLevel level) {
+         final OwnerContext context = CURRENT_OWNER.get();
+         if (context == null) {
+             return null;
+         }
+         if (context.randomLevel == level) {
+-            return context.randomUseFallback ? null : context.randomKey;
++            return context.randomUseFallback ? null : context.randomSource;
+         }
+ 
+         final Owner owner = context.owner();
+         if (isFullLevelRegion(owner, level)
+             && TickRegions.isCurrentThreadOwnerQuiet(level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
+             context.randomLevel = level;
+-            context.randomKey = null;
++            context.randomSource = null;
+             context.randomUseFallback = true;
+             return null;
+         }
+@@ -148,10 +149,11 @@ public final class OwnerDomainExecutor {
+             + "|" + owner.minChunkX() + "," + owner.minChunkZ()
+             + "|" + owner.maxChunkX() + "," + owner.maxChunkZ()
+             + "|" + owner.playerId();
++        final RandomSource source = DomainRandom.threadSourceForKey(level, key);
+         context.randomLevel = level;
+-        context.randomKey = key;
++        context.randomSource = source;
+         context.randomUseFallback = false;
+-        return key;
++        return source;
+     }
+ 
+     private static boolean isFullLevelRegion(final Owner owner, final ServerLevel level) {
+@@ -436,7 +438,7 @@ public final class OwnerDomainExecutor {
+         private final Owner owner;
+         private final @Nullable OwnerContext previous;
+         private @Nullable ServerLevel randomLevel;
+-        private @Nullable String randomKey;
++        private @Nullable RandomSource randomSource;
+         private boolean randomUseFallback;
+ 
+         private OwnerContext(final Owner owner, final @Nullable OwnerContext previous) {
