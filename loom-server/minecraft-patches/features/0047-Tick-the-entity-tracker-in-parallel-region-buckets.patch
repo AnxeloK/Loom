@@ -1,0 +1,227 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 6 Jul 2026 16:13:38 +0000
+Subject: [PATCH] Tick the entity tracker in parallel region buckets
+
+The tracker was the largest serial section left in the world tick:
+one flat loop running range math and dirty-data sync for every
+tracked entity times every nearby player. Bucket it by region cell
+exactly like parallel entity ticking. Workers evaluate visibility and
+send dirty data (packet sends are thread-safe enqueues); a pairing
+transition - the rare case - routes to the owning thread through the
+region mailbox, because pairing fires a cancellable event whose veto
+must gate the mutation synchronously, and because a worker must not
+push overlapping single-chunk leases. The steady state where a pair
+stays visible or stays hidden mutates nothing and is answered by the
+worker with pure math.
+
+The visibility decision is extracted unchanged into a helper shared
+by both paths, so serial behavior is byte-identical.
+
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+index 777211d28f12f134d7ec05f4553db221aa73622b..8ae2d277ee223dd1585238945a3a5b2c70f06b46 100644
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -1041,18 +1041,78 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+ 
+         final ca.spottedleaf.moonrise.common.list.ReferenceList<net.minecraft.world.entity.Entity> trackerEntities = entityLookup.trackerEntities;
+         final Entity[] trackerEntitiesRaw = trackerEntities.getRawDataUnchecked();
+-        for (int i = 0, len = trackerEntities.size(); i < len; ++i) {
+-            final Entity entity = trackerEntitiesRaw[i];
+-            final ChunkMap.TrackedEntity tracker = ((ca.spottedleaf.moonrise.patches.entity_tracker.EntityTrackerEntity)entity).moonrise$getTrackedEntity();
+-            if (tracker == null) {
+-                continue;
++        final int len = trackerEntities.size();
++        // Loom start - parallel entity tracker: bucket by region cell like entity ticking. Workers run the
++        // per-entity range math and dirty-data sync (packet sends are thread-safe enqueues); the rare pairing
++        // TRANSITIONS defer to the owning thread via the region mailbox, both because a worker must not push
++        // overlapping single-chunk leases and because pairing fires a cancellable Bukkit event whose veto
++        // must gate the mutation synchronously. Steady-state pairs (still visible / still hidden) do nothing.
++        if (len > 1 && net.minecraft.server.threading.TickRegions.currentContext() != null) {
++            final int shift = net.minecraft.server.threading.TickRegions.getRegionChunkShift();
++            final it.unimi.dsi.fastutil.longs.Long2ObjectMap<java.util.List<Entity>> byRegion =
++                new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
++            for (int i = 0; i < len; ++i) {
++                final Entity entity = trackerEntitiesRaw[i];
++                if (entity == null) {
++                    continue;
++                }
++                final net.minecraft.world.level.ChunkPos cp = entity.chunkPosition();
++                final long key = (((long) (cp.x() >> shift)) << 32) | ((cp.z() >> shift) & 0xFFFFFFFFL);
++                byRegion.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(entity);
+             }
+-            ((ca.spottedleaf.moonrise.patches.entity_tracker.EntityTrackerTrackedEntity)tracker).moonrise$tick(((ca.spottedleaf.moonrise.patches.chunk_system.entity.ChunkSystemEntity)entity).moonrise$getChunkData().nearbyPlayers);
+-            if (((ca.spottedleaf.moonrise.patches.entity_tracker.EntityTrackerTrackedEntity)tracker).moonrise$hasPlayers()
+-                || ((ca.spottedleaf.moonrise.patches.chunk_system.entity.ChunkSystemEntity)entity).moonrise$getChunkStatus().isOrAfter(FullChunkStatus.ENTITY_TICKING)) {
+-                tracker.serverEntity.sendChanges();
++            if (byRegion.size() > 1) {
++                final net.minecraft.server.threading.RegionTickStaging.Session session =
++                    net.minecraft.server.threading.RegionTickStaging.newSession();
++                final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks =
++                    new java.util.ArrayList<>(byRegion.size());
++                final int regionChunks = 1 << shift;
++                for (final it.unimi.dsi.fastutil.longs.Long2ObjectMap.Entry<java.util.List<Entity>> regionEntry
++                    : byRegion.long2ObjectEntrySet()) {
++                    final java.util.List<Entity> regionEntities = regionEntry.getValue();
++                    final long key = regionEntry.getLongKey();
++                    final int regionX = (int) (key >> 32);
++                    final int regionZ = (int) key;
++                    final int fMinX = regionX << shift;
++                    final int fMinZ = regionZ << shift;
++                    final int fMaxX = fMinX + regionChunks - 1;
++                    final int fMaxZ = fMinZ + regionChunks - 1;
++                    final net.minecraft.world.level.ChunkPos dispatchPos = regionEntities.get(0).chunkPosition();
++                    tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(
++                        dispatchPos.x(), dispatchPos.z(), fMinX, fMinZ, fMaxX, fMaxZ, () -> {
++                        net.minecraft.server.threading.RegionTickStaging.begin(session);
++                        try {
++                            for (int i = 0, n = regionEntities.size(); i < n; ++i) {
++                                this.trackOneEntity(regionEntities.get(i));
++                            }
++                        } finally {
++                            net.minecraft.server.threading.RegionTickStaging.end();
++                        }
++                    }));
++                }
++                net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(this.level, tasks, "entityTracker");
++                net.minecraft.server.threading.RegionTickStaging.applyAndClear(session, this.level);
++                return;
+             }
+         }
++        // Loom end
++        for (int i = 0; i < len; ++i) {
++            this.trackOneEntity(trackerEntitiesRaw[i]);
++        }
++    }
++
++    private void trackOneEntity(final Entity entity) {
++        if (entity == null) {
++            return;
++        }
++        final ChunkMap.TrackedEntity tracker = ((ca.spottedleaf.moonrise.patches.entity_tracker.EntityTrackerEntity)entity).moonrise$getTrackedEntity();
++        if (tracker == null) {
++            return;
++        }
++        ((ca.spottedleaf.moonrise.patches.entity_tracker.EntityTrackerTrackedEntity)tracker).moonrise$tick(((ca.spottedleaf.moonrise.patches.chunk_system.entity.ChunkSystemEntity)entity).moonrise$getChunkData().nearbyPlayers);
++        if (((ca.spottedleaf.moonrise.patches.entity_tracker.EntityTrackerTrackedEntity)tracker).moonrise$hasPlayers()
++            || ((ca.spottedleaf.moonrise.patches.chunk_system.entity.ChunkSystemEntity)entity).moonrise$getChunkStatus().isOrAfter(FullChunkStatus.ENTITY_TICKING)) {
++            tracker.serverEntity.sendChanges();
++        }
+     }
+     // Paper end - optimise entity tracker
+ 
+@@ -1349,6 +1409,19 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+         }
+ 
+         public void removePlayer(final ServerPlayer player) {
++            // Loom - parallel tracker phase: an actual un-pairing routes to the owning thread; a no-op
++            // remove (not currently paired) returns without deferring.
++            if (net.minecraft.server.threading.RegionTickStaging.isStaging()) {
++                if (!this.seenBy.contains(player.connection)) {
++                    return;
++                }
++                final ChunkPos entityChunk = this.entity.chunkPosition();
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                    net.minecraft.server.threading.runtime.OwnerDomainExecutor.region(
++                        ChunkMap.this.level, entityChunk.x(), entityChunk.z(), "tracker-unpairing"),
++                    () -> this.removePlayer(player));
++                return;
++            }
+             if (!this.isTrackerPlayerContextOwned(player)) {
+                 this.runWithTrackerPlayerContext(player, () -> this.removePlayer(player));
+                 return;
+@@ -1362,40 +1435,67 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+             }
+         }
+ 
++        // Loom - the visibility decision, extracted unchanged from updatePlayer so the parallel tracker
++        // workers can evaluate it without touching pairing state. Pure reads.
++        private boolean loomComputeVisibleTo(final ServerPlayer player) {
++            // Paper start - remove allocation of Vec3D here
++            // Vec3 deltaToPlayer = player.position().subtract(this.entity.position());
++            double deltaToPlayerX = player.getX() - this.entity.getX();
++            double deltaToPlayerZ = player.getZ() - this.entity.getZ();
++            // Paper end - remove allocation of Vec3D here
++            int playerViewDistance = ChunkMap.this.getPlayerViewDistance(player);
++            double visibleRange = Math.min(this.getEffectiveRange(), playerViewDistance * 16);
++            double distanceSquared = deltaToPlayerX * deltaToPlayerX + deltaToPlayerZ * deltaToPlayerZ; // Paper
++            double rangeSquared = visibleRange * visibleRange;
++            // Paper start - Configurable entity tracking range by Y
++            boolean visibleToPlayer = distanceSquared <= rangeSquared;
++            if (visibleToPlayer && level.paperConfig().entities.trackingRangeY.enabled) {
++                double rangeY = level.paperConfig().entities.trackingRangeY.get(this.entity, -1);
++                if (rangeY != -1) {
++                    double deltaToPlayerY = player.getY() - this.entity.getY();
++                    visibleToPlayer = deltaToPlayerY * deltaToPlayerY <= rangeY * rangeY;
++                }
++            }
++            visibleToPlayer = visibleToPlayer
++                && this.entity.broadcastToPlayer(player)
++                && ChunkMap.this.isChunkTracked(player, this.entity.chunkPosition().x(), this.entity.chunkPosition().z());
++            // Paper end - Configurable entity tracking range by Y
++            // CraftBukkit start - respect vanish API
++            if (visibleToPlayer && !player.getBukkitEntity().canSee(this.entity.getBukkitEntity())) { // Paper - only consider hits
++                visibleToPlayer = false;
++            }
++            // CraftBukkit end
++            return visibleToPlayer;
++        }
++
+         public void updatePlayer(final ServerPlayer player) {
++            // Loom start - parallel tracker phase: workers only evaluate visibility; a pairing TRANSITION
++            // routes to the owning thread (it fires a cancellable event and mutates pairing state), and the
++            // steady state - still visible or still hidden - needs no mutation at all, which is the
++            // overwhelmingly common case.
++            if (net.minecraft.server.threading.RegionTickStaging.isStaging()) {
++                if (player == this.entity) {
++                    return;
++                }
++                final boolean visible = player.level() == ChunkMap.this.level && this.loomComputeVisibleTo(player);
++                if (visible == this.seenBy.contains(player.connection)) {
++                    return;
++                }
++                final ChunkPos entityChunk = this.entity.chunkPosition();
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                    net.minecraft.server.threading.runtime.OwnerDomainExecutor.region(
++                        ChunkMap.this.level, entityChunk.x(), entityChunk.z(), "tracker-pairing"),
++                    () -> this.updatePlayer(player));
++                return;
++            }
++            // Loom end
+             if (!this.isTrackerPlayerContextOwned(player)) {
+                 this.runWithTrackerPlayerContext(player, () -> this.updatePlayer(player));
+                 return;
+             }
+             org.spigotmc.AsyncCatcher.catchOp("player tracker update", player); // Spigot
+             if (player != this.entity) {
+-                // Paper start - remove allocation of Vec3D here
+-                // Vec3 deltaToPlayer = player.position().subtract(this.entity.position());
+-                double deltaToPlayerX = player.getX() - this.entity.getX();
+-                double deltaToPlayerZ = player.getZ() - this.entity.getZ();
+-                // Paper end - remove allocation of Vec3D here
+-                int playerViewDistance = ChunkMap.this.getPlayerViewDistance(player);
+-                double visibleRange = Math.min(this.getEffectiveRange(), playerViewDistance * 16);
+-                double distanceSquared = deltaToPlayerX * deltaToPlayerX + deltaToPlayerZ * deltaToPlayerZ; // Paper
+-                double rangeSquared = visibleRange * visibleRange;
+-                // Paper start - Configurable entity tracking range by Y
+-                boolean visibleToPlayer = distanceSquared <= rangeSquared;
+-                if (visibleToPlayer && level.paperConfig().entities.trackingRangeY.enabled) {
+-                    double rangeY = level.paperConfig().entities.trackingRangeY.get(this.entity, -1);
+-                    if (rangeY != -1) {
+-                        double deltaToPlayerY = player.getY() - this.entity.getY();
+-                        visibleToPlayer = deltaToPlayerY * deltaToPlayerY <= rangeY * rangeY;
+-                    }
+-                }
+-                visibleToPlayer = visibleToPlayer
+-                    && this.entity.broadcastToPlayer(player)
+-                    && ChunkMap.this.isChunkTracked(player, this.entity.chunkPosition().x(), this.entity.chunkPosition().z());
+-                // Paper end - Configurable entity tracking range by Y
+-                // CraftBukkit start - respect vanish API
+-                if (visibleToPlayer && !player.getBukkitEntity().canSee(this.entity.getBukkitEntity())) { // Paper - only consider hits
+-                    visibleToPlayer = false;
+-                }
+-                // CraftBukkit end
++                boolean visibleToPlayer = this.loomComputeVisibleTo(player); // Loom - extracted, unchanged
+                 if (visibleToPlayer) {
+                     if (this.seenBy.add(player.connection)) {
+                         // Paper start - entity tracking events
