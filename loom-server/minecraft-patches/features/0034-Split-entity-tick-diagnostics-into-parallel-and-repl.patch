@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 6 Jul 2026 11:48:19 +0000
+Subject: [PATCH] Split entity tick diagnostics into parallel and replay phases
+
+The entity_tick section lumped bucket dispatch, the join and the
+serial staged-write replay together, so the serial tail could not be
+sized from the section log. Record the parallel phase and the replay
+separately when tick section diagnostics are enabled.
+
+diff --git a/net/minecraft/server/level/LoomTickSectionDiagnostics.java b/net/minecraft/server/level/LoomTickSectionDiagnostics.java
+index 85da845af413754031e7ebfb94e2f7bd20412a22..59646a42ece4492d027baa0c2c182dd2d4a5d57a 100644
+--- a/net/minecraft/server/level/LoomTickSectionDiagnostics.java
++++ b/net/minecraft/server/level/LoomTickSectionDiagnostics.java
+@@ -33,8 +33,10 @@ final class LoomTickSectionDiagnostics {
+     static final int CHUNK_BROADCAST = 22;
+     static final int CHUNK_TICKING_CHUNKS = 23;
+     static final int CHUNK_CUSTOM_SPAWNERS = 24;
++    static final int ENTITY_PARALLEL = 25;
++    static final int ENTITY_REPLAY = 26;
+ 
+-    private static final int SECTION_COUNT = 25;
++    private static final int SECTION_COUNT = 27;
+     private static final long LOG_INTERVAL_NANOS = Math.max(
+         1_000_000_000L, Long.getLong("Loom.TickSectionDiagnosticIntervalNanos", 5_000_000_000L)
+     );
+@@ -65,6 +67,8 @@ final class LoomTickSectionDiagnostics {
+         "chunk_broadcast",
+         "chunk_ticking_chunks",
+         "chunk_custom_spawners",
++        "entity_parallel",
++        "entity_replay",
+     };
+ 
+     private final long[] currentNanos = new long[SECTION_COUNT];
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 6f21f4ac035a67c715776b9f584fba8e42d95c8a..4954b3eb10d50afa7dce75b8ffafee7ec5f6f1d4 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1501,8 +1501,17 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+                 }
+             }));
+         }
++        final LoomTickSectionDiagnostics loomEntityDiagnostics = this.loomTickSectionDiagnostics;
++        final long loomParallelStart = loomEntityDiagnostics == null ? 0L : System.nanoTime();
+         net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(this, tasks, "entityTick");
++        final long loomReplayStart = loomEntityDiagnostics == null ? 0L : System.nanoTime();
++        if (loomEntityDiagnostics != null) {
++            loomEntityDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_PARALLEL, loomReplayStart - loomParallelStart);
++        }
+         net.minecraft.server.threading.RegionTickStaging.applyAndClear(stagingSession, this);
++        if (loomEntityDiagnostics != null) {
++            loomEntityDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_REPLAY, System.nanoTime() - loomReplayStart);
++        }
+         // The parallel phase has joined; we are back on the world-owning thread holding the full-level lease.
+         // Tick the owner-bound (multipart/boss) entities here so their cross-region move/remove is on-owner.
+         if (ownerTick != null) {
