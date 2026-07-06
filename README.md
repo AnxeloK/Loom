@@ -53,6 +53,15 @@ Start a test server with the built jar, wait for `Done (...)`, then:
 
 Any owner-domain violation, async access error, or repeated fallback for an ordinary plugin should be understood before you trust the build.
 
+## Performance tuning
+
+Loom ticks worlds, chunks, and entities in parallel, so it benefits from hardware and JVM settings that a serial server would waste.
+
+- **Region threads.** The parallel pool defaults to half the CPU cores (`-Dpaper.threadedregions.parallelScheduler.threads=N`). On a dedicated machine with 12 or more cores, setting it to `cores - 2` gives the tick pool more width on entity-heavy loads. Leave the default on shared hosts or small machines.
+- **Garbage collection.** Use the widely adopted tuned G1 flag set ("Aikar's flags") and give the heap room to breathe; an undersized heap makes G1's concurrent work compete with tick threads for CPU. In our testing the tuned flags mainly reduce tail latency (p99 tick spikes) rather than the average.
+- **Memory sizing.** Leave 2-3 GB for the JVM's native overhead and the OS beyond `-Xmx`. A pre-touched fixed heap (`-Xms` = `-Xmx` with `-XX:+AlwaysPreTouch`) avoids growth stalls, but only when the machine actually has the memory.
+- `/loom tps` shows CPU cores in use next to MSPT, which tells you whether you are compute-bound (add cores or reduce load) or have headroom.
+
 ## Learn how it works
 
 Start with [docs/README.md](docs/README.md). A good reading order:
