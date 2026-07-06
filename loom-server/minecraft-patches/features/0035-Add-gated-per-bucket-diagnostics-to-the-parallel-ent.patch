@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 6 Jul 2026 12:09:50 +0000
+Subject: [PATCH] Add gated per-bucket diagnostics to the parallel entity phase
+
+Logs each dispatch's bucket entity counts and task wall times under
+-Dloom.debugEntityBuckets, so a parallel-phase wall can be attributed
+to one dominant bucket versus even per-entity cost.
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 4954b3eb10d50afa7dce75b8ffafee7ec5f6f1d4..11c6eb40cccc442cf6c5d74079deceb3aceb9ec0 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1435,6 +1435,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     // ticks, spawns) are staged and replayed serially after the parallel phase. Entities that are unsafe to
+     // tick off-main (see mustTickOnRegionOwner) are excluded from the parallel buckets and ticked serially on
+     // the world-owning thread after the parallel phase joins.
++    private static final boolean LOOM_DEBUG_ENTITY_BUCKETS = Boolean.getBoolean("loom.debugEntityBuckets");
++
+     private void tickEntitiesInParallel() {
+         final java.util.List<Entity> toTick = new java.util.ArrayList<>();
+         this.entityTickList.forEach(toTick::add);
+@@ -1469,6 +1471,13 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         final net.minecraft.server.threading.RegionTickStaging.Session stagingSession =
+             net.minecraft.server.threading.RegionTickStaging.newSession();
+         final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(byRegion.size());
++        // Loom - gated bucket diagnostics: per-bucket entity counts and task wall times, to attribute the
++        // parallel-phase wall to imbalance (one dominant bucket) vs per-entity overhead.
++        final boolean loomBucketDebug = LOOM_DEBUG_ENTITY_BUCKETS;
++        final java.util.concurrent.atomic.AtomicLongArray loomBucketNanos =
++            loomBucketDebug ? new java.util.concurrent.atomic.AtomicLongArray(byRegion.size()) : null;
++        final int[] loomBucketSizes = loomBucketDebug ? new int[byRegion.size()] : null;
++        int loomBucketIndex = 0;
+         final int regionChunks = 1 << shift;
+         for (final it.unimi.dsi.fastutil.longs.Long2ObjectMap.Entry<java.util.List<Entity>> regionEntry :
+             byRegion.long2ObjectEntrySet()) {
+@@ -1490,7 +1499,12 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             final ChunkPos dispatchPos = regionEntities.get(0).chunkPosition();
+             final int dispatchX = dispatchPos.x();
+             final int dispatchZ = dispatchPos.z();
++            final int loomTaskIndex = loomBucketIndex++;
++            if (loomBucketDebug) {
++                loomBucketSizes[loomTaskIndex] = regionEntities.size();
++            }
+             tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(dispatchX, dispatchZ, fMinX, fMinZ, fMaxX, fMaxZ, () -> {
++                final long loomTaskStart = loomBucketDebug ? System.nanoTime() : 0L;
+                 net.minecraft.server.threading.RegionTickStaging.begin(stagingSession);
+                 try {
+                     for (int i = 0, n = regionEntities.size(); i < n; ++i) {
+@@ -1498,12 +1512,36 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+                     }
+                 } finally {
+                     net.minecraft.server.threading.RegionTickStaging.end();
++                    if (loomBucketDebug) {
++                        loomBucketNanos.set(loomTaskIndex, System.nanoTime() - loomTaskStart);
++                    }
+                 }
+             }));
+         }
+         final LoomTickSectionDiagnostics loomEntityDiagnostics = this.loomTickSectionDiagnostics;
+         final long loomParallelStart = loomEntityDiagnostics == null ? 0L : System.nanoTime();
++        final long loomPhaseStart = loomBucketDebug ? System.nanoTime() : 0L;
+         net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(this, tasks, "entityTick");
++        if (loomBucketDebug) {
++            final long wallMicros = (System.nanoTime() - loomPhaseStart) / 1_000L;
++            final StringBuilder line = new StringBuilder(160);
++            long sumMicros = 0L;
++            for (int i = 0; i < loomBucketSizes.length; ++i) {
++                sumMicros += loomBucketNanos.get(i) / 1_000L;
++            }
++            line.append("[loom.entity-buckets] world=").append(this.dimension().identifier())
++                .append(" buckets=").append(loomBucketSizes.length)
++                .append(" wall_us=").append(wallMicros)
++                .append(" sum_us=").append(sumMicros)
++                .append(" perBucket(size:us)=");
++            for (int i = 0; i < loomBucketSizes.length; ++i) {
++                if (i > 0) {
++                    line.append(',');
++                }
++                line.append(loomBucketSizes[i]).append(':').append(loomBucketNanos.get(i) / 1_000L);
++            }
++            LOGGER.info(line.toString());
++        }
+         final long loomReplayStart = loomEntityDiagnostics == null ? 0L : System.nanoTime();
+         if (loomEntityDiagnostics != null) {
+             loomEntityDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_PARALLEL, loomReplayStart - loomParallelStart);
