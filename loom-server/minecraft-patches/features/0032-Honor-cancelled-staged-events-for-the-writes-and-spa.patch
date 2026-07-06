@@ -1,0 +1,217 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sun, 5 Jul 2026 23:54:47 +0000
+Subject: [PATCH] Honor cancelled staged events for the writes and spawns they
+ gate
+
+A Bukkit event fired during a parallel phase is buffered and replayed
+on the owning thread, so the firing call site always sees it
+uncancelled and stages the side effects vanilla would have skipped.
+The replay veto only matched block events by position, which misses
+entity-driven block changes: a plugin cancelling a falling block's
+EntityChangeBlockEvent still had the block placed, and a cancelled
+physics update still dropped its pop-off items. ProjectKorra-style
+temp-block protection hit both constantly.
+
+Staged events now record buffer watermarks when they fire. When a
+replayed event of the staged-veto class is cancelled, the writes,
+scheduled ticks and entity spawns staged between its watermark and the
+next staged event are skipped: exactly the span the call site applied
+after the event returned. Entity removes are not vetoed; the cancelled
+vanilla branch discards the entity too. The position veto now also
+covers EntityChangeBlockEvent.
+
+Also relax the poi chunk thread check for reads on tick workers, like
+the block-state read relaxation: entity AI legitimately scans poi past
+its region lease, resident poi data is frozen during a parallel phase,
+and the off-main throw was killing entity ticks. Off-owner workers
+resolve an unloaded poi chunk to the if-loaded semantics instead of
+synchronously loading; mutation keeps the hard guard.
+
+diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
+index 56de9e0ec3ef2dd8d2df8d780fcd89f5accbafb9..02c979c382284d03735ac8389b08f22ad011ccdc 100644
+--- a/net/minecraft/server/threading/RegionTickStaging.java
++++ b/net/minecraft/server/threading/RegionTickStaging.java
+@@ -54,11 +54,18 @@ public final class RegionTickStaging {
+     private record StagedRemove(EntityLookup.EntityCallback callback, Entity.RemovalReason reason) {
+     }
+ 
++    // A Bukkit event buffered during the parallel phase, with the buffer watermarks captured when it fired.
++    // Everything the firing call site stages after the event — up to the next staged event — is the code the
++    // event's cancellation gates (vanilla fires the event and checks isCancelled() before applying those side
++    // effects). The watermarks let the replay veto exactly that span when a plugin cancels the event.
++    private record StagedEvent(org.bukkit.event.Event event, int writesStart, int ticksStart, int spawnsStart) {
++    }
++
+     private static final class Buffer {
+         final List<StagedWrite> writes = new ArrayList<>();
+         final List<StagedTick> ticks = new ArrayList<>();
+         final List<StagedSpawn> spawns = new ArrayList<>();
+-        final List<org.bukkit.event.Event> events = new ArrayList<>();
++        final List<StagedEvent> events = new ArrayList<>();
+         // Deferred entity moves, COALESCED per entity: an entity may setPos() many times in one tick, but a
+         // single applyMove() at replay reads its current (final) position and re-sections it once. The map is
+         // keyed by the EntityCallback instance (one per live entity, reference identity — Entity.equals is
+@@ -186,7 +193,7 @@ public final class RegionTickStaging {
+         if (buffer == null) {
+             return false;
+         }
+-        buffer.events.add(event);
++        buffer.events.add(new StagedEvent(event, buffer.writes.size(), buffer.ticks.size(), buffer.spawns.size()));
+         return true;
+     }
+ 
+@@ -303,10 +310,15 @@ public final class RegionTickStaging {
+         // throws must not abort the rest of the replay. If a handler cancels a block event, record the target
+         // position so the staged write it gated is skipped below — honouring the plugin's veto.
+         final java.util.Set<Long> vetoed = new java.util.HashSet<>();
++        final java.util.BitSet[] vetoWrites = new java.util.BitSet[blen];
++        final java.util.BitSet[] vetoTicks = new java.util.BitSet[blen];
++        final java.util.BitSet[] vetoSpawns = new java.util.BitSet[blen];
+         for (int b = 0; b < blen; ++b) {
+-            final List<org.bukkit.event.Event> events = buffers.get(b).events;
++            final Buffer buffer = buffers.get(b);
++            final List<StagedEvent> events = buffer.events;
+             for (int i = 0, len = events.size(); i < len; ++i) {
+-                final org.bukkit.event.Event event = events.get(i);
++                final StagedEvent mark = events.get(i);
++                final org.bukkit.event.Event event = mark.event();
+                 try {
+                     org.bukkit.Bukkit.getPluginManager().callEvent(event);
+                 } catch (final Throwable t) {
+@@ -318,10 +330,43 @@ public final class RegionTickStaging {
+                         block = fromTo.getToBlock();
+                     } else if (event instanceof org.bukkit.event.block.BlockEvent blockEvent) {
+                         block = blockEvent.getBlock();
++                    } else if (event instanceof org.bukkit.event.entity.EntityChangeBlockEvent changeBlock) {
++                        block = changeBlock.getBlock();
+                     }
+                     if (block != null) {
+                         vetoed.add(BlockPos.asLong(block.getX(), block.getY(), block.getZ()));
+                     }
++                    // Span veto: for the staged-veto class the cancellation gates every side effect the
++                    // firing call site applied after the event returned (vanilla checks isCancelled()
++                    // before applying them; the staged dispatch returned uncancelled, so they were staged
++                    // anyway). Skip everything this buffer staged between the event's watermark and the
++                    // next staged event: the block write a falling block would have placed, the item
++                    // drops a cancelled physics update would have popped, the falling-block entity a
++                    // cancelled fall would have spawned, and the follow-up scheduled ticks. Entity
++                    // moves/removes are NOT vetoed: the cancelled vanilla branch discards the entity too.
++                    if (isStagedVetoClass(event)) {
++                        final int wEnd = i + 1 < len ? events.get(i + 1).writesStart() : buffer.writes.size();
++                        final int tEnd = i + 1 < len ? events.get(i + 1).ticksStart() : buffer.ticks.size();
++                        final int sEnd = i + 1 < len ? events.get(i + 1).spawnsStart() : buffer.spawns.size();
++                        if (wEnd > mark.writesStart()) {
++                            if (vetoWrites[b] == null) {
++                                vetoWrites[b] = new java.util.BitSet();
++                            }
++                            vetoWrites[b].set(mark.writesStart(), wEnd);
++                        }
++                        if (tEnd > mark.ticksStart()) {
++                            if (vetoTicks[b] == null) {
++                                vetoTicks[b] = new java.util.BitSet();
++                            }
++                            vetoTicks[b].set(mark.ticksStart(), tEnd);
++                        }
++                        if (sEnd > mark.spawnsStart()) {
++                            if (vetoSpawns[b] == null) {
++                                vetoSpawns[b] = new java.util.BitSet();
++                            }
++                            vetoSpawns[b].set(mark.spawnsStart(), sEnd);
++                        }
++                    }
+                 }
+             }
+         }
+@@ -330,10 +375,11 @@ public final class RegionTickStaging {
+             final List<StagedWrite> writes = buffers.get(b).writes;
+             for (int i = 0, len = writes.size(); i < len; ++i) {
+                 final StagedWrite w = writes.get(i);
+-                if (vetoed.isEmpty() || !vetoed.contains(w.pos().asLong())) {
+-                    applyStagedWrite(w);
+-                } else {
++                if ((vetoWrites[b] != null && vetoWrites[b].get(i))
++                    || (!vetoed.isEmpty() && vetoed.contains(w.pos().asLong()))) {
+                     vetoedWrites++;
++                } else {
++                    applyStagedWrite(w);
+                 }
+             }
+         }
+@@ -343,6 +389,9 @@ public final class RegionTickStaging {
+         for (int b = 0; b < blen; ++b) {
+             final List<StagedTick> ticks = buffers.get(b).ticks;
+             for (int i = 0, len = ticks.size(); i < len; ++i) {
++                if (vetoTicks[b] != null && vetoTicks[b].get(i)) {
++                    continue;
++                }
+                 final StagedTick t = ticks.get(i);
+                 t.ticks().schedule(t.tick());
+             }
+@@ -377,10 +426,14 @@ public final class RegionTickStaging {
+             }
+         }
+         // (6) spawns — last, so a freshly added entity is never observed mid-replay while moves/removes of the
+-        // pre-existing population are still settling.
++        // pre-existing population are still settling. Spawns inside a cancelled event's veto span are skipped
++        // (a cancelled fall never spawns its falling block; a cancelled physics pop never drops its item).
+         for (int b = 0; b < blen; ++b) {
+             final List<StagedSpawn> spawns = buffers.get(b).spawns;
+             for (int i = 0, len = spawns.size(); i < len; ++i) {
++                if (vetoSpawns[b] != null && vetoSpawns[b].get(i)) {
++                    continue;
++                }
+                 final StagedSpawn s = spawns.get(i);
+                 s.level().addFreshEntity(s.entity(), s.reason());
+             }
+diff --git a/net/minecraft/world/entity/ai/village/poi/PoiManager.java b/net/minecraft/world/entity/ai/village/poi/PoiManager.java
+index ab92bb9a3c5c1900e5d77fd3885e2c9dde64d339..739cc04033bbfa5cd80434849217e7cda6501620 100644
+--- a/net/minecraft/world/entity/ai/village/poi/PoiManager.java
++++ b/net/minecraft/world/entity/ai/village/poi/PoiManager.java
+@@ -74,7 +74,15 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
+         final int chunkY = ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkSectionY(pos);
+         final int chunkZ = ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkSectionZ(pos);
+ 
+-        ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(this.world, chunkX, chunkZ, "Accessing poi chunk off-main");
++        // Loom - relax cross-region poi READS on tick workers, mirroring the block-state read relaxation:
++        // during a parallel phase every mutation is staged and replayed serially and poi chunk integration
++        // is deferred to the owning thread, so resident poi data is frozen and a read of loaded data is
++        // consistent. Entity AI legitimately scans poi past its region's lease (villager searches span
++        // chunks), so an off-owner read here must not kill the entity tick. Non-tick threads keep the
++        // loud guard; this path never loads or mutates.
++        if (!ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) {
++            ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(this.world, chunkX, chunkZ, "Accessing poi chunk off-main");
++        }
+ 
+         final ca.spottedleaf.moonrise.patches.chunk_system.level.poi.PoiChunk ret = ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)this.world).moonrise$getChunkTaskScheduler().chunkHolderManager.getPoiChunkIfLoaded(chunkX, chunkZ, true);
+ 
+@@ -87,7 +95,10 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
+         final int chunkY = ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkSectionY(pos);
+         final int chunkZ = ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkSectionZ(pos);
+ 
+-        ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(this.world, chunkX, chunkZ, "Accessing poi chunk off-main");
++        // Loom - see get(): tick workers may read cross-region; non-tick threads keep the loud guard.
++        if (!ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) {
++            ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(this.world, chunkX, chunkZ, "Accessing poi chunk off-main");
++        }
+ 
+         final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkHolderManager manager = ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)this.world).moonrise$getChunkTaskScheduler().chunkHolderManager;
+ 
+@@ -95,9 +106,15 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
+             final ca.spottedleaf.moonrise.patches.chunk_system.level.poi.PoiChunk ret = manager.getPoiChunkIfLoaded(chunkX, chunkZ, true);
+             if (ret != null) {
+                 return ret.getSectionForVanilla(chunkY);
+-            } else {
+-                return manager.loadPoiChunk(chunkX, chunkZ).getSectionForVanilla(chunkY);
+             }
++            // Loom - an off-owner worker may not synchronously load a poi chunk (it would claim a
++            // conflicting lease and cannot wait mid-tick); resolve to the if-loaded semantics instead,
++            // matching the cross-region block-state read. The owner keeps the vanilla load.
++            if (!net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this.world.getServer())
++                && !net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(this.world, chunkX, chunkZ)) {
++                return Optional.empty();
++            }
++            return manager.loadPoiChunk(chunkX, chunkZ).getSectionForVanilla(chunkY);
+         }
+         // retain vanilla behavior: do not load section if out of bounds!
+         return Optional.empty();
