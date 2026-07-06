@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 6 Jul 2026 13:39:41 +0000
+Subject: [PATCH] Consolidate flushes issued outside channel reads
+
+Paper's flush consolidation only batches flushes that happen while a
+read is in progress. Under parallel ticking the entity tracker sends
+from region threads, so its packets reach the event loop as write
+tasks outside any read and every flush goes straight to a syscall;
+profiling under mob load showed send() at a fifth of total CPU. Turn
+on consolidateWhenNoReadInProgress so those flushes batch until the
+event loop drains, which keeps latency at task-queue scale instead of
+buffering whole ticks.
+
+diff --git a/net/minecraft/server/network/ServerConnectionListener.java b/net/minecraft/server/network/ServerConnectionListener.java
+index 92bda2d0638411ed23cc4a2499b8100ca8f7adfb..b33f970a0e28866de33311d76a0c98520213e375 100644
+--- a/net/minecraft/server/network/ServerConnectionListener.java
++++ b/net/minecraft/server/network/ServerConnectionListener.java
+@@ -99,7 +99,7 @@ public class ServerConnectionListener {
+                                     } catch (ChannelException var5) {
+                                     }
+ 
+-                                    if (!disableFlushConsolidation) channel.pipeline().addFirst(new io.netty.handler.flush.FlushConsolidationHandler()); // Paper - Optimize network
++                                    if (!disableFlushConsolidation) channel.pipeline().addFirst(new io.netty.handler.flush.FlushConsolidationHandler(io.netty.handler.flush.FlushConsolidationHandler.DEFAULT_EXPLICIT_FLUSH_AFTER_FLUSHES, true)); // Paper - Optimize network // Loom - also consolidate flushes issued outside a read: under parallel ticking the entity tracker's packets arrive as write tasks from region threads, and the read-scoped default passes every one of those flushes straight to a syscall
+                                     ChannelPipeline pipeline = channel.pipeline().addLast(HandlerNames.TIMEOUT, new ReadTimeoutHandler(Connection.READ_TIMEOUT_SECONDS));
+                                     if (ServerConnectionListener.this.server.repliesToStatus()) {
+                                         pipeline.addLast(HandlerNames.LEGACY_QUERY, new LegacyQueryHandler(ServerConnectionListener.this.getServer()));
