@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 6 Jul 2026 14:53:45 +0000
+Subject: [PATCH] Revert "Coalesce play-phase flushes for packets sent off the
+ event loop"
+
+This reverts commit f0839ff80bca98f52dd91ac30235bf1ce7333dbd.
+
+diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
+index 5d98833d368c60b76566828695c8ac4814658b76..d953bb4edb1ae93667a3c8865cb3d2fc1354ada6 100644
+--- a/net/minecraft/network/Connection.java
++++ b/net/minecraft/network/Connection.java
+@@ -70,12 +70,6 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+     private volatile boolean sendLoginDisconnect = true;
+     private final Queue<WrappedConsumer> pendingActions = Queues.newConcurrentLinkedQueue(); // Paper - Optimize network
+     private final AtomicInteger loomPendingEventLoopWrites = new AtomicInteger();
+-    // Loom - flush batching applies only to established PLAY-phase connections. Handshake, login and
+-    // configuration are request-response exchanges where the peer waits on every packet, so those keep
+-    // per-write flushes; play traffic is a firehose the client never round-trips on, so its flushes
+-    // coalesce per event-loop burst.
+-    private volatile boolean loomFlushBatchable;
+-    private final java.util.concurrent.atomic.AtomicBoolean loomFlushScheduled = new java.util.concurrent.atomic.AtomicBoolean();
+     public Channel channel;
+     public SocketAddress address;
+     // Spigot start
+@@ -354,7 +348,6 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+             }
+ 
+             boolean isLoginProtocol = protocol.id() == ConnectionProtocol.LOGIN;
+-            this.loomFlushBatchable = protocol.id() == ConnectionProtocol.PLAY; // Loom - see field
+             syncAfterConfigurationChange(this.channel.writeAndFlush(configMessage.andThen(ctx -> this.sendLoginDisconnect = isLoginProtocol)));
+         }
+     }
+@@ -481,28 +474,15 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+         if (this.channel.eventLoop().inEventLoop()) {
+             this.doSendPacket(packet, listener, flush);
+         } else {
+-            // Loom - on an established play-phase connection, coalesce the flushes of writes marshalled
+-            // onto the event loop: write without flushing and queue at most one flush task per burst. The
+-            // flush task is enqueued behind the writes it covers, so everything already marshalled reaches
+-            // the socket in a single flush; a packet racing a pending flush is picked up by the next
+-            // trigger (the entity tracker fires every tick). Pre-play phases keep per-write flushes - the
+-            // peer round-trips on those packets, so deferring them stalls the exchange.
+-            final boolean batchFlush = flush && this.loomFlushBatchable;
+             this.loomPendingEventLoopWrites.incrementAndGet();
+             try {
+                 this.channel.eventLoop().execute(() -> {
+                     try {
+-                        this.doSendPacket(packet, listener, batchFlush ? false : flush);
++                        this.doSendPacket(packet, listener, flush);
+                     } finally {
+                         this.loomPendingEventLoopWrites.decrementAndGet();
+                     }
+                 });
+-                if (batchFlush && this.loomFlushScheduled.compareAndSet(false, true)) {
+-                    this.channel.eventLoop().execute(() -> {
+-                        this.loomFlushScheduled.set(false);
+-                        this.channel.flush();
+-                    });
+-                }
+             } catch (final RuntimeException ex) {
+                 this.loomPendingEventLoopWrites.decrementAndGet();
+                 throw ex;
