@@ -1,0 +1,376 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 6 Jul 2026 10:48:01 +0000
+Subject: [PATCH] Trim always-on overhead from the hot tick paths
+
+Profiling with all patches read end to end found a diffuse tax rather
+than one hot spot; this takes the mechanical parts:
+
+Ownership-check, dispatch and drain counters were shared AtomicLongs
+bumped from every region thread (the ownership counter on every check,
+the dispatch pair on every owner-domain execute), which ping-pongs the
+cache line across workers. They are LongAdders now.
+
+The relaxed block-state read fetched the already-loaded chunk, then
+returned null so the normal path fetched it a second time, with an
+ownership walk in between. A loaded chunk now answers directly: reads
+are identical for owner and off-owner while mutations are staged, so
+the ownership walk only runs for unloaded chunks.
+
+The per-domain random sources are thread-confined, so they use the
+non-atomic SingleThreadedRandomSource; the sequence is identical to
+LegacyRandomSource, without a compare-and-set per sample.
+
+Staged-event veto bookkeeping is allocated lazily; the common phase
+with no cancelled events no longer allocates the veto sets.
+
+diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
+index 02c979c382284d03735ac8389b08f22ad011ccdc..af4f7bf952f52dbc43de69d20bc63bfa887076c2 100644
+--- a/net/minecraft/server/threading/RegionTickStaging.java
++++ b/net/minecraft/server/threading/RegionTickStaging.java
+@@ -309,10 +309,12 @@ public final class RegionTickStaging {
+         // joined — so plugin handlers run single-threaded exactly as under serial ticking. A handler that
+         // throws must not abort the rest of the replay. If a handler cancels a block event, record the target
+         // position so the staged write it gated is skipped below — honouring the plugin's veto.
+-        final java.util.Set<Long> vetoed = new java.util.HashSet<>();
+-        final java.util.BitSet[] vetoWrites = new java.util.BitSet[blen];
+-        final java.util.BitSet[] vetoTicks = new java.util.BitSet[blen];
+-        final java.util.BitSet[] vetoSpawns = new java.util.BitSet[blen];
++        // Veto bookkeeping is lazy: the overwhelmingly common phase has no cancelled events, so nothing
++        // is allocated until a replayed event actually cancels.
++        java.util.Set<Long> vetoed = null;
++        java.util.BitSet[] vetoWrites = null;
++        java.util.BitSet[] vetoTicks = null;
++        java.util.BitSet[] vetoSpawns = null;
+         for (int b = 0; b < blen; ++b) {
+             final Buffer buffer = buffers.get(b);
+             final List<StagedEvent> events = buffer.events;
+@@ -334,6 +336,9 @@ public final class RegionTickStaging {
+                         block = changeBlock.getBlock();
+                     }
+                     if (block != null) {
++                        if (vetoed == null) {
++                            vetoed = new java.util.HashSet<>();
++                        }
+                         vetoed.add(BlockPos.asLong(block.getX(), block.getY(), block.getZ()));
+                     }
+                     // Span veto: for the staged-veto class the cancellation gates every side effect the
+@@ -349,18 +354,27 @@ public final class RegionTickStaging {
+                         final int tEnd = i + 1 < len ? events.get(i + 1).ticksStart() : buffer.ticks.size();
+                         final int sEnd = i + 1 < len ? events.get(i + 1).spawnsStart() : buffer.spawns.size();
+                         if (wEnd > mark.writesStart()) {
++                            if (vetoWrites == null) {
++                                vetoWrites = new java.util.BitSet[blen];
++                            }
+                             if (vetoWrites[b] == null) {
+                                 vetoWrites[b] = new java.util.BitSet();
+                             }
+                             vetoWrites[b].set(mark.writesStart(), wEnd);
+                         }
+                         if (tEnd > mark.ticksStart()) {
++                            if (vetoTicks == null) {
++                                vetoTicks = new java.util.BitSet[blen];
++                            }
+                             if (vetoTicks[b] == null) {
+                                 vetoTicks[b] = new java.util.BitSet();
+                             }
+                             vetoTicks[b].set(mark.ticksStart(), tEnd);
+                         }
+                         if (sEnd > mark.spawnsStart()) {
++                            if (vetoSpawns == null) {
++                                vetoSpawns = new java.util.BitSet[blen];
++                            }
+                             if (vetoSpawns[b] == null) {
+                                 vetoSpawns[b] = new java.util.BitSet();
+                             }
+@@ -375,8 +389,8 @@ public final class RegionTickStaging {
+             final List<StagedWrite> writes = buffers.get(b).writes;
+             for (int i = 0, len = writes.size(); i < len; ++i) {
+                 final StagedWrite w = writes.get(i);
+-                if ((vetoWrites[b] != null && vetoWrites[b].get(i))
+-                    || (!vetoed.isEmpty() && vetoed.contains(w.pos().asLong()))) {
++                if ((vetoWrites != null && vetoWrites[b] != null && vetoWrites[b].get(i))
++                    || (vetoed != null && vetoed.contains(w.pos().asLong()))) {
+                     vetoedWrites++;
+                 } else {
+                     applyStagedWrite(w);
+@@ -389,7 +403,7 @@ public final class RegionTickStaging {
+         for (int b = 0; b < blen; ++b) {
+             final List<StagedTick> ticks = buffers.get(b).ticks;
+             for (int i = 0, len = ticks.size(); i < len; ++i) {
+-                if (vetoTicks[b] != null && vetoTicks[b].get(i)) {
++                if (vetoTicks != null && vetoTicks[b] != null && vetoTicks[b].get(i)) {
+                     continue;
+                 }
+                 final StagedTick t = ticks.get(i);
+@@ -431,7 +445,7 @@ public final class RegionTickStaging {
+         for (int b = 0; b < blen; ++b) {
+             final List<StagedSpawn> spawns = buffers.get(b).spawns;
+             for (int i = 0, len = spawns.size(); i < len; ++i) {
+-                if (vetoSpawns[b] != null && vetoSpawns[b].get(i)) {
++                if (vetoSpawns != null && vetoSpawns[b] != null && vetoSpawns[b].get(i)) {
+                     continue;
+                 }
+                 final StagedSpawn s = spawns.get(i);
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index 789be2c5ae3c8f8ef99a468661337d249560e148..14b4a882e88470bb9ef10695091aef78017b9d7e 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -129,7 +129,7 @@ public class TickRegions {
+         REGION_WORKER_COUNT,
+         new RegionSchedulerThreadFactory()
+     );
+-    private static final AtomicLong OWNERSHIP_CHECKS = new AtomicLong();
++    private static final java.util.concurrent.atomic.LongAdder OWNERSHIP_CHECKS = new java.util.concurrent.atomic.LongAdder();
+     private static final AtomicLong OWNERSHIP_FAILURES = new AtomicLong();
+     private static final AtomicLong LEASE_CLAIM_FAILURES = new AtomicLong();
+     private static final AtomicLong SCHEDULER_TASKS_EXECUTED = new AtomicLong();
+@@ -137,9 +137,9 @@ public class TickRegions {
+     private static final AtomicLong SCHEDULER_PARALLEL_TICKS = new AtomicLong();
+     private static final AtomicLong SCHEDULER_PARALLEL_BUCKETS = new AtomicLong();
+     private static final AtomicLong SCHEDULER_BUDGET_SKIPS = new AtomicLong();
+-    private static final AtomicLong SCHEDULER_DRAIN_CALLS = new AtomicLong();
+-    private static final AtomicLong SCHEDULER_DRAIN_TASKS = new AtomicLong();
+-    private static final AtomicLong SCHEDULER_DRAIN_NANOS = new AtomicLong();
++    private static final java.util.concurrent.atomic.LongAdder SCHEDULER_DRAIN_CALLS = new java.util.concurrent.atomic.LongAdder();
++    private static final java.util.concurrent.atomic.LongAdder SCHEDULER_DRAIN_TASKS = new java.util.concurrent.atomic.LongAdder();
++    private static final java.util.concurrent.atomic.LongAdder SCHEDULER_DRAIN_NANOS = new java.util.concurrent.atomic.LongAdder();
+     private static final AtomicLong MAILBOX_MESSAGES_POSTED = new AtomicLong();
+     private static final AtomicLong MAILBOX_MESSAGES_DELIVERED = new AtomicLong();
+     private static final AtomicLong MAILBOX_MESSAGES_DEFERRED = new AtomicLong();
+@@ -147,9 +147,9 @@ public class TickRegions {
+     private static final AtomicLong MAILBOX_PARALLEL_DRAINS = new AtomicLong();
+     private static final AtomicLong MAILBOX_PARALLEL_BUCKETS = new AtomicLong();
+     private static final AtomicLong MAILBOX_BUDGET_SKIPS = new AtomicLong();
+-    private static final AtomicLong MAILBOX_DRAIN_CALLS = new AtomicLong();
+-    private static final AtomicLong MAILBOX_DRAIN_MESSAGES = new AtomicLong();
+-    private static final AtomicLong MAILBOX_DRAIN_NANOS = new AtomicLong();
++    private static final java.util.concurrent.atomic.LongAdder MAILBOX_DRAIN_CALLS = new java.util.concurrent.atomic.LongAdder();
++    private static final java.util.concurrent.atomic.LongAdder MAILBOX_DRAIN_MESSAGES = new java.util.concurrent.atomic.LongAdder();
++    private static final java.util.concurrent.atomic.LongAdder MAILBOX_DRAIN_NANOS = new java.util.concurrent.atomic.LongAdder();
+     private static final AtomicLong SIMULATION_BATCH_TASKS = new AtomicLong();
+     private static final AtomicLong SIMULATION_BATCH_OPERATIONS = new AtomicLong();
+     private static final AtomicLong SIMULATION_SERIAL_FALLBACKS = new AtomicLong();
+@@ -284,7 +284,7 @@ public class TickRegions {
+     }
+ 
+     public static boolean isCurrentThreadOwner(final ServerLevel world, final int chunkX, final int chunkZ) {
+-        OWNERSHIP_CHECKS.getAndIncrement();
++        OWNERSHIP_CHECKS.increment();
+ 
+         final Thread currentThread = Thread.currentThread();
+         if (isCurrentThreadOwnerByContext(world, chunkX, chunkZ, currentThread.threadId())) {
+@@ -304,7 +304,7 @@ public class TickRegions {
+         final int maxChunkX,
+         final int maxChunkZ
+     ) {
+-        OWNERSHIP_CHECKS.getAndIncrement();
++        OWNERSHIP_CHECKS.increment();
+ 
+         final Thread currentThread = Thread.currentThread();
+         if (isCurrentThreadOwnerByContext(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread.threadId())) {
+@@ -339,7 +339,7 @@ public class TickRegions {
+     }
+ 
+     public static long getOwnershipCheckCount() {
+-        return OWNERSHIP_CHECKS.get();
++        return OWNERSHIP_CHECKS.sum();
+     }
+ 
+     public static long getOwnershipFailureCount() {
+@@ -435,7 +435,7 @@ public class TickRegions {
+ 
+         return new RuntimeDiagnostics(
+             STRICT_RUNTIME_MODE,
+-            OWNERSHIP_CHECKS.get(),
++            OWNERSHIP_CHECKS.sum(),
+             OWNERSHIP_FAILURES.get(),
+             LEASE_CLAIM_FAILURES.get(),
+             SCHEDULER_TASKS_EXECUTED.get(),
+@@ -443,9 +443,9 @@ public class TickRegions {
+             SCHEDULER_PARALLEL_TICKS.get(),
+             SCHEDULER_PARALLEL_BUCKETS.get(),
+             SCHEDULER_BUDGET_SKIPS.get(),
+-            SCHEDULER_DRAIN_CALLS.get(),
+-            SCHEDULER_DRAIN_TASKS.get(),
+-            SCHEDULER_DRAIN_NANOS.get(),
++            SCHEDULER_DRAIN_CALLS.sum(),
++            SCHEDULER_DRAIN_TASKS.sum(),
++            SCHEDULER_DRAIN_NANOS.sum(),
+             MAILBOX_MESSAGES_POSTED.get(),
+             MAILBOX_MESSAGES_DELIVERED.get(),
+             MAILBOX_MESSAGES_DEFERRED.get(),
+@@ -453,9 +453,9 @@ public class TickRegions {
+             MAILBOX_PARALLEL_DRAINS.get(),
+             MAILBOX_PARALLEL_BUCKETS.get(),
+             MAILBOX_BUDGET_SKIPS.get(),
+-            MAILBOX_DRAIN_CALLS.get(),
+-            MAILBOX_DRAIN_MESSAGES.get(),
+-            MAILBOX_DRAIN_NANOS.get(),
++            MAILBOX_DRAIN_CALLS.sum(),
++            MAILBOX_DRAIN_MESSAGES.sum(),
++            MAILBOX_DRAIN_NANOS.sum(),
+             SIMULATION_BATCH_TASKS.get(),
+             SIMULATION_BATCH_OPERATIONS.get(),
+             SIMULATION_SERIAL_FALLBACKS.get(),
+@@ -606,22 +606,22 @@ public class TickRegions {
+     }
+ 
+     private static void recordSchedulerDrain(final int tasks, final long nanos) {
+-        SCHEDULER_DRAIN_CALLS.incrementAndGet();
++        SCHEDULER_DRAIN_CALLS.increment();
+         if (tasks > 0) {
+-            SCHEDULER_DRAIN_TASKS.addAndGet(tasks);
++            SCHEDULER_DRAIN_TASKS.add(tasks);
+         }
+         if (nanos > 0L) {
+-            SCHEDULER_DRAIN_NANOS.addAndGet(nanos);
++            SCHEDULER_DRAIN_NANOS.add(nanos);
+         }
+     }
+ 
+     private static void recordMailboxDrain(final int messages, final long nanos) {
+-        MAILBOX_DRAIN_CALLS.incrementAndGet();
++        MAILBOX_DRAIN_CALLS.increment();
+         if (messages > 0) {
+-            MAILBOX_DRAIN_MESSAGES.addAndGet(messages);
++            MAILBOX_DRAIN_MESSAGES.add(messages);
+         }
+         if (nanos > 0L) {
+-            MAILBOX_DRAIN_NANOS.addAndGet(nanos);
++            MAILBOX_DRAIN_NANOS.add(nanos);
+         }
+     }
+ 
+diff --git a/net/minecraft/server/threading/runtime/DomainRandom.java b/net/minecraft/server/threading/runtime/DomainRandom.java
+index 3e3d181d4c2e3ab0765b4d7f52c114c104b6c3ea..9d9cba9fc92c2211bac4b06974842811e1c5a3a6 100644
+--- a/net/minecraft/server/threading/runtime/DomainRandom.java
++++ b/net/minecraft/server/threading/runtime/DomainRandom.java
+@@ -35,7 +35,10 @@ public final class DomainRandom {
+         final Map<String, RandomSource> randoms = DOMAIN_RANDOMS.get();
+         RandomSource source = randoms.get(key);
+         if (source == null) {
+-            source = RandomSource.create(seed(level, BlockPos.ZERO, key));
++            // Thread-confined by construction (per-thread map, context cache is thread-local), so use the
++            // non-atomic source. Same LCG constants and seed scramble as LegacyRandomSource: the sequence is
++            // identical, it just skips the compare-and-set per call that the shared variant pays.
++            source = new net.minecraft.world.level.levelgen.SingleThreadedRandomSource(seed(level, BlockPos.ZERO, key));
+             randoms.put(key, source);
+         }
+         return source;
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index 9c6b2c44ef97cee2d7de8c94a5004e608b7dd966..58eab7e0724f7d88b647310131422a44f6edc77a 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -34,10 +34,10 @@ public final class OwnerDomainExecutor {
+ 
+     private static final ThreadLocal<@Nullable OwnerContext> CURRENT_OWNER = new ThreadLocal<>();
+     private static final Executor LOGIN_EXECUTOR = Executors.newSingleThreadExecutor(new NamedThreadFactory("Owner domain login"));
+-    private static final AtomicLong EXECUTE_INLINE = new AtomicLong();
+-    private static final AtomicLong EXECUTE_HANDOFF = new AtomicLong();
+-    private static final AtomicLong[] EXECUTE_INLINE_BY_DOMAIN = createDomainCounters();
+-    private static final AtomicLong[] EXECUTE_HANDOFF_BY_DOMAIN = createDomainCounters();
++    private static final java.util.concurrent.atomic.LongAdder EXECUTE_INLINE = new java.util.concurrent.atomic.LongAdder();
++    private static final java.util.concurrent.atomic.LongAdder EXECUTE_HANDOFF = new java.util.concurrent.atomic.LongAdder();
++    private static final java.util.concurrent.atomic.LongAdder[] EXECUTE_INLINE_BY_DOMAIN = createDomainCounters();
++    private static final java.util.concurrent.atomic.LongAdder[] EXECUTE_HANDOFF_BY_DOMAIN = createDomainCounters();
+ 
+     private OwnerDomainExecutor() {
+     }
+@@ -346,12 +346,12 @@ public final class OwnerDomainExecutor {
+             domains.put(
+                 domain,
+                 new DomainDiagnostics(
+-                    EXECUTE_INLINE_BY_DOMAIN[domain.ordinal()].get(),
+-                    EXECUTE_HANDOFF_BY_DOMAIN[domain.ordinal()].get()
++                    EXECUTE_INLINE_BY_DOMAIN[domain.ordinal()].sum(),
++                    EXECUTE_HANDOFF_BY_DOMAIN[domain.ordinal()].sum()
+                 )
+             );
+         }
+-        return new Diagnostics(EXECUTE_INLINE.get(), EXECUTE_HANDOFF.get(), Map.copyOf(domains));
++        return new Diagnostics(EXECUTE_INLINE.sum(), EXECUTE_HANDOFF.sum(), Map.copyOf(domains));
+     }
+ 
+     private static void enqueueGlobal(final Owner owner, final Runnable task) {
+@@ -402,23 +402,23 @@ public final class OwnerDomainExecutor {
+         };
+     }
+ 
+-    private static AtomicLong[] createDomainCounters() {
++    private static java.util.concurrent.atomic.LongAdder[] createDomainCounters() {
+         final Domain[] domains = Domain.values();
+-        final AtomicLong[] counters = new AtomicLong[domains.length];
++        final java.util.concurrent.atomic.LongAdder[] counters = new java.util.concurrent.atomic.LongAdder[domains.length];
+         for (int i = 0, len = domains.length; i < len; ++i) {
+-            counters[i] = new AtomicLong();
++            counters[i] = new java.util.concurrent.atomic.LongAdder();
+         }
+         return counters;
+     }
+ 
+     private static void recordInline(final Owner owner) {
+-        EXECUTE_INLINE.incrementAndGet();
+-        EXECUTE_INLINE_BY_DOMAIN[owner.domain().ordinal()].incrementAndGet();
++        EXECUTE_INLINE.increment();
++        EXECUTE_INLINE_BY_DOMAIN[owner.domain().ordinal()].increment();
+     }
+ 
+     private static void recordHandoff(final Owner owner) {
+-        EXECUTE_HANDOFF.incrementAndGet();
+-        EXECUTE_HANDOFF_BY_DOMAIN[owner.domain().ordinal()].incrementAndGet();
++        EXECUTE_HANDOFF.increment();
++        EXECUTE_HANDOFF_BY_DOMAIN[owner.domain().ordinal()].increment();
+     }
+ 
+     public record Diagnostics(
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index 7946114fe520b3a5a7e1b9e1f113b7a1b9e5f174..dca78a87b16ba370d3b43cf2bc8e3bc55cfe9bdd 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -1357,30 +1357,24 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+         final int chunkZ = pos.getZ() >> 4;
+         final net.minecraft.world.level.chunk.LevelChunk loaded =
+             serverLevel.getChunkSource().getChunkAtIfLoadedImmediately(chunkX, chunkZ);
+-        final boolean owner = net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(serverLevel.getServer())
+-            || net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(serverLevel, chunkX, chunkZ);
+-        if (owner) {
+-            // The owner (region owner or the global-lease holder) reads its own data through the unchanged path
+-            // whenever that path is correct: a LOADED chunk reads byte-identically, and an UNLOADED chunk that the
+-            // engine can still CLEANLY synchronously load (only the startup chunk-load barrier) must keep forcing
+-            // that load. We only intercept the one case the normal path cannot serve - an UNLOADED chunk mid-tick
+-            // where a synchronous load would throw "Non-blocking runtime cannot synchronously wait..." or be routed
+-            // through the degraded violation-recording sync-bridge - converting that into a consistent default read.
+-            if (loaded != null
+-                || net.minecraft.server.threading.runtime.ThreadedRegionsBlockingBarrier.canSynchronouslyLoadChunk(serverLevel)) {
+-                return null;
+-            }
+-            return Blocks.VOID_AIR.defaultBlockState();
+-        }
+-        // Off-owner (cross-region) READ: serve the frozen, already-loaded block state directly. We deliberately do
+-        // NOT force a load of an unloaded chunk off-owner (that would claim a conflicting full-level lease and
+-        // could deadlock, and cannot be synchronously awaited mid-tick anyway); an unloaded cross-region read
+-        // resolves to the default state rather than crashing the listener - matching the "if-loaded" read
+-        // semantics plugins already rely on elsewhere, and the same answer the engine would surface for an
+-        // out-of-bounds read.
++        // A LOADED chunk serves the read identically for owner and off-owner alike (off-owner reads see
++        // frozen state during a parallel phase because every mutation is staged), so answer straight from
++        // the chunk we already fetched - no ownership walk, and no second chunk lookup through the normal
++        // path below.
+         if (loaded != null) {
+             return loaded.getBlockState(pos);
+         }
++        // UNLOADED chunk: the owner (region owner or the global-lease holder) may still CLEANLY force the
++        // synchronous load during the startup chunk-load barrier - keep that behavior. Anything else - an
++        // owner mid-tick (a synchronous load would throw "Non-blocking runtime cannot synchronously wait...")
++        // or an off-owner reader (forcing a load would claim a conflicting lease and cannot be awaited
++        // mid-tick) - resolves to the consistent default state instead of crashing, matching the "if-loaded"
++        // read semantics plugins already rely on elsewhere.
++        final boolean owner = net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(serverLevel.getServer())
++            || net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(serverLevel, chunkX, chunkZ);
++        if (owner && net.minecraft.server.threading.runtime.ThreadedRegionsBlockingBarrier.canSynchronouslyLoadChunk(serverLevel)) {
++            return null;
++        }
+         return Blocks.VOID_AIR.defaultBlockState();
+     }
+     // Loom end
