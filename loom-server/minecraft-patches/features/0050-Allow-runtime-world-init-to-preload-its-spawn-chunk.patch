@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 7 Jul 2026 15:02:11 +0000
+Subject: [PATCH] Allow runtime world init to preload its spawn chunk
+
+Bukkit createWorld after boot runs MinecraftServer.initWorld, which
+synchronously loads the new world's spawn chunk. Past the startup
+barrier the non-blocking runtime refused that wait and threw
+"cannot synchronously wait for chunk", so every plugin that creates
+a world at runtime (world managers, minigame arenas) failed with
+"Exception initializing level". Permit the blocking spawn load while
+a world is initializing: it runs on the server thread as the global
+owner with no region leases held for the fresh world, the same
+conditions the startup barrier already blocks under. Scoped to the
+init call by a depth counter so no other runtime path gains a
+blocking chunk wait.
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 3b2451b173b4bbe4f929c3ffa7c9ed8b7023bbf3..b1e3fc29c6b53f72276aac474faa9b7a71d6adaa 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -831,6 +831,8 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         this.server.getPluginManager().callEvent(new org.bukkit.event.world.WorldInitEvent(overworld.getWorld()));
+     // Paper end - rework world loading process
+         if (!levelData.isInitialized()) {
++          net.minecraft.server.threading.runtime.ThreadedRegionsBlockingBarrier.beginWorldInit(); // Loom - permit the world-init spawn preload to block on this world's chunk, like startup
++          try {
+             try {
+                 setInitialSpawn(overworld, levelData, worldOptions.generateBonusChest(), isDebug, overworld.levelLoadListener); // Paper - per world level load listener
+                 levelData.setInitialized(true);
+@@ -849,6 +851,9 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             }
+ 
+             levelData.setInitialized(true);
++          } finally {
++            net.minecraft.server.threading.runtime.ThreadedRegionsBlockingBarrier.endWorldInit(); // Loom
++          }
+         }
+ 
+         GlobalPos focusPos = this.selectLevelLoadFocusPos();
+diff --git a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
+index d912b312127e979d261a5a1249ed4316d209dc2d..bf6359cef8cab22c7df06a2a883bca48cadc6e62 100644
+--- a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
++++ b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
+@@ -37,7 +37,30 @@ public final class ThreadedRegionsBlockingBarrier {
+     // and is exactly what a plain block-state READ must avoid - so it is deliberately NOT treated as "can load"
+     // here. READ relaxations use this to decide between forcing a clean load and serving already-loaded data.
+     public static boolean canSynchronouslyLoadChunk(final ServerLevel level) {
+-        return isStartupChunkLoadBarrier(level);
++        return isStartupChunkLoadBarrier(level) || isWorldInitBarrier(level);
++    }
++
++    // Loom - runtime world initialization (Bukkit createWorld / MinecraftServer.initWorld after boot) must be
++    // able to synchronously preload the new world's spawn chunk, exactly as the startup barrier does for the
++    // initial worlds. It runs on the server (global-owner) thread with no region leases held for the fresh
++    // world, so managedBlock drains chunk tasks under the same conditions the startup path relies on. The
++    // permission is scoped to the init call by a depth counter so no other runtime path gains a blocking wait.
++    private static final ThreadLocal<int[]> WORLD_INIT_DEPTH = ThreadLocal.withInitial(() -> new int[1]);
++
++    public static void beginWorldInit() {
++        WORLD_INIT_DEPTH.get()[0]++;
++    }
++
++    public static void endWorldInit() {
++        WORLD_INIT_DEPTH.get()[0]--;
++    }
++
++    public static boolean isWorldInitBarrier(final ServerLevel level) {
++        final MinecraftServer server = level.getServer();
++        return server != null
++            && Thread.currentThread() == server.serverThread
++            && ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()
++            && WORLD_INIT_DEPTH.get()[0] > 0;
+     }
+ 
+     public static boolean isShutdownThread(final MinecraftServer server) {
+@@ -55,7 +78,7 @@ public final class ThreadedRegionsBlockingBarrier {
+         if (future.isDone()) {
+             return;
+         }
+-        if (isStartupChunkLoadBarrier(level)) {
++        if (isStartupChunkLoadBarrier(level) || isWorldInitBarrier(level)) {
+             final TickRegions.RegionContext context = TickRegions.pushLevelContext(level);
+             try {
+                 owner.managedBlock(future::isDone);
