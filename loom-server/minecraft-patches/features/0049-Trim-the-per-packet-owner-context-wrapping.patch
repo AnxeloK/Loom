@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 7 Jul 2026 12:02:17 +0000
+Subject: [PATCH] Trim the per-packet owner-context wrapping
+
+The packet processor entered an owner scope before checking whether
+the current thread already covered the player's region, allocating
+one per packet for nothing; the scope now wraps only the slow path,
+and a covering thread's enclosing scope serves the handler. The
+connection wrapper's view-distance bounds are memoized per connection
+and refresh only when the player crosses a chunk boundary or changes
+level, which is safe because both paths run on the single-threaded
+packet drain.
+
+diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
+index d953bb4edb1ae93667a3c8865cb3d2fc1354ada6..61bfcdde7f4cfb24ba25f6f9f7fdf28200cb64df 100644
+--- a/net/minecraft/network/Connection.java
++++ b/net/minecraft/network/Connection.java
+@@ -594,16 +594,36 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+     private static int joinAttemptsThisTick; // Paper - Buffer joins to world
+     private static int currTick; // Paper - Buffer joins to world
+ 
+-    private static void runListenerInOwnerContext(final PacketListener listener, final Runnable action) {
++    // Loom - memo for the owner-context bounds below. Connection ticking and packet handling run on
++    // the single-threaded main drain, so plain fields suffice; the memo recomputes only when the player
++    // crosses a chunk boundary or changes level (a level swap re-resolves the distances too).
++    private net.minecraft.server.level.ServerLevel loomBoundsLevel;
++    private int loomBoundsChunkX = Integer.MIN_VALUE;
++    private int loomBoundsChunkZ = Integer.MIN_VALUE;
++    private int loomBoundsMinX;
++    private int loomBoundsMinZ;
++    private int loomBoundsMaxX;
++    private int loomBoundsMaxZ;
++
++    private void runListenerInOwnerContext(final PacketListener listener, final Runnable action) {
+         if (listener instanceof net.minecraft.server.network.ServerGamePacketListenerImpl gameListener) {
+             final net.minecraft.server.level.ServerPlayer player = gameListener.player;
+             final net.minecraft.server.level.ServerLevel level = player.level();
+             final net.minecraft.world.level.ChunkPos chunkPos = player.chunkPosition();
+-            final int radius = Math.max(io.papermc.paper.FeatureHooks.getViewDistance(level), io.papermc.paper.FeatureHooks.getSimulationDistance(level)) + 1;
+-            final int minChunkX = chunkPos.x() - radius;
+-            final int minChunkZ = chunkPos.z() - radius;
+-            final int maxChunkX = chunkPos.x() + radius;
+-            final int maxChunkZ = chunkPos.z() + radius;
++            if (level != this.loomBoundsLevel || chunkPos.x() != this.loomBoundsChunkX || chunkPos.z() != this.loomBoundsChunkZ) {
++                final int radius = Math.max(io.papermc.paper.FeatureHooks.getViewDistance(level), io.papermc.paper.FeatureHooks.getSimulationDistance(level)) + 1;
++                this.loomBoundsLevel = level;
++                this.loomBoundsChunkX = chunkPos.x();
++                this.loomBoundsChunkZ = chunkPos.z();
++                this.loomBoundsMinX = chunkPos.x() - radius;
++                this.loomBoundsMinZ = chunkPos.z() - radius;
++                this.loomBoundsMaxX = chunkPos.x() + radius;
++                this.loomBoundsMaxZ = chunkPos.z() + radius;
++            }
++            final int minChunkX = this.loomBoundsMinX;
++            final int minChunkZ = this.loomBoundsMinZ;
++            final int maxChunkX = this.loomBoundsMaxX;
++            final int maxChunkZ = this.loomBoundsMaxZ;
+             if (net.minecraft.server.threading.TickRegions.currentContext() != null
+                 && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
+                 action.run();
+@@ -623,8 +643,8 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+         action.run();
+     }
+ 
+-    private static void tickListenerInOwnerContext(final PacketListener listener, final TickablePacketListener tickable) {
+-        runListenerInOwnerContext(listener, tickable::tick);
++    private void tickListenerInOwnerContext(final PacketListener listener, final TickablePacketListener tickable) {
++        this.runListenerInOwnerContext(listener, tickable::tick);
+     }
+ 
+     public void tick() {
+diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
+index 8a7830dfde27c293266d2c55538167331ca1981d..b20b05abbd8232543abe5a908d8098a5a46187d2 100644
+--- a/net/minecraft/network/PacketProcessor.java
++++ b/net/minecraft/network/PacketProcessor.java
+@@ -139,16 +139,20 @@ public class PacketProcessor implements AutoCloseable {
+             final int minChunkZ = chunkPos.z() - radius;
+             final int maxChunkX = chunkPos.x() + radius;
+             final int maxChunkZ = chunkPos.z() + radius;
++            // Fast path first: a thread that already holds a covering lease also carries an enclosing
++            // owner scope (pushRegionContext establishes both), so the packet handler sees a valid owner
++            // context without this method allocating one per packet. Only the slow path - a thread with
++            // no covering lease - establishes the scope, via pushRegionContext itself.
++            if (net.minecraft.server.threading.TickRegions.currentContext() != null
++                && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++                action.run();
++                return;
++            }
++
+             try (final net.minecraft.server.threading.runtime.OwnerDomainExecutor.Scope ownerScope =
+                      net.minecraft.server.threading.runtime.OwnerDomainExecutor.enterRegion(
+                          level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, "packet-listener-owner-context"
+                      )) {
+-                if (net.minecraft.server.threading.TickRegions.currentContext() != null
+-                    && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
+-                    action.run();
+-                    return;
+-                }
+-
+                 final net.minecraft.server.threading.TickRegions.RegionContext context =
+                     net.minecraft.server.threading.TickRegions.pushRegionContext(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
+                 try {

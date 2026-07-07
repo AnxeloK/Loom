@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 7 Jul 2026 12:02:17 +0000
+Subject: [PATCH] Cache the region-task bucket partition
+
+Grouping region tasks into concurrently-safe buckets is a pure
+function of the task rectangles, and under steady load the occupied
+region cells repeat tick after tick, so the quadratic fixed-point
+merge re-derived the same partition every tick. Tasks now sort into a
+canonical order and the task-to-bucket assignment is cached per world
+and phase, keyed on the exact sorted rectangle list; the merge runs
+only when the rectangles change and stays as the fallback that keeps
+the non-adjacency guarantee.
+
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index 55b1da8af2637207725ce993c6ed585154d6da84..ff58b9bab31ff3d86c77c00ed3ffe56a8e379f8b 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -195,6 +195,10 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+                 net.minecraft.server.threading.RegionTickStaging.newSession();
+             final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(byRegion.size());
+             for (final java.util.List<net.minecraft.world.level.chunk.LevelChunk> regionChunks : byRegion.values()) {
++                // Bounds stay the occupied bounding box (NOT snapped to the cell): full-cell bounds always
++                // touch adjacent occupied cells through the non-adjacency buffer and merge them, costing
++                // chunk-phase parallelism. The partition cache keys on the exact boxes, which are stable
++                // under steady load, so caching still hits without widening the leases.
+                 int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+                 for (int j = 0, n = regionChunks.size(); j < n; ++j) {
+                     final net.minecraft.world.level.ChunkPos p = regionChunks.get(j).getPos();
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index 14b4a882e88470bb9ef10695091aef78017b9d7e..1d3095b897c1cd80be812baa2ec0e0866bc42d09 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -721,7 +721,7 @@ public class TickRegions {
+     ) {
+         final boolean containsMultiChunkTasks = containsMultiChunkRegionTasks(tasks);
+         final List<RegionBoundBucket> buckets = containsMultiChunkTasks
+-            ? bucketRegionBoundTasksByOverlap(world, tasks)
++            ? bucketRegionBoundTasksCached(world, tasks, stageName)
+             : bucketRegionBoundTasksByDispatchChunk(world, tasks);
+ 
+         if (PARALLEL_SIMULATION_ENABLED && buckets.size() > 1) {
+@@ -830,6 +830,76 @@ public class TickRegions {
+         return buckets;
+     }
+ 
++    // Loom - bucket-partition cache. The overlap merge below is a pure function of the task rectangle
++    // set (plus the non-adjacency buffer and region shift, both fixed at runtime), and under steady load
++    // the occupied region cells - and therefore the rectangles - repeat tick after tick. Cache the
++    // task->bucket assignment keyed on the EXACT sorted rectangle list (full comparison, never a hash:
++    // a false hit would let overlapping buckets dispatch concurrently). One entry per (world, phase);
++    // only that world's owner thread touches its entry during a dispatch.
++    private static final class BucketPartition {
++        final int[] bounds;      // sorted (minX,minZ,maxX,maxZ) per task
++        final int[] assignment;  // task index -> bucket ordinal
++        final int bucketCount;
++
++        BucketPartition(final int[] bounds, final int[] assignment, final int bucketCount) {
++            this.bounds = bounds;
++            this.assignment = assignment;
++            this.bucketCount = bucketCount;
++        }
++    }
++
++    private static final java.util.concurrent.ConcurrentHashMap<String, BucketPartition> BUCKET_PARTITIONS =
++        new java.util.concurrent.ConcurrentHashMap<>();
++
++    private static final java.util.Comparator<RegionBoundTask> TASK_BOUNDS_ORDER = java.util.Comparator
++        .comparingInt(RegionBoundTask::minChunkX)
++        .thenComparingInt(RegionBoundTask::minChunkZ)
++        .thenComparingInt(RegionBoundTask::maxChunkX)
++        .thenComparingInt(RegionBoundTask::maxChunkZ);
++
++    private static List<RegionBoundBucket> bucketRegionBoundTasksCached(
++        final ServerLevel world,
++        final List<RegionBoundTask> tasks,
++        final String operation
++    ) {
++        // Canonical order makes the assignment reusable across ticks regardless of map iteration order.
++        tasks.sort(TASK_BOUNDS_ORDER);
++        final int len = tasks.size();
++        final int[] bounds = new int[len * 4];
++        for (int i = 0; i < len; ++i) {
++            final RegionBoundTask t = tasks.get(i);
++            bounds[i * 4] = t.minChunkX();
++            bounds[i * 4 + 1] = t.minChunkZ();
++            bounds[i * 4 + 2] = t.maxChunkX();
++            bounds[i * 4 + 3] = t.maxChunkZ();
++        }
++        final String cacheKey = world.dimension().identifier() + "|" + operation;
++        final BucketPartition cached = BUCKET_PARTITIONS.get(cacheKey);
++        if (cached != null && java.util.Arrays.equals(cached.bounds, bounds)) {
++            final List<RegionBoundBucket> buckets = new ArrayList<>(cached.bucketCount);
++            for (int b = 0; b < cached.bucketCount; ++b) {
++                buckets.add(new RegionBoundBucket(world));
++            }
++            for (int i = 0; i < len; ++i) {
++                buckets.get(cached.assignment[i]).add(tasks.get(i));
++            }
++            return buckets;
++        }
++        final List<RegionBoundBucket> buckets = bucketRegionBoundTasksByOverlap(world, tasks);
++        final int[] assignment = new int[len];
++        final java.util.IdentityHashMap<RegionBoundTask, Integer> byTask = new java.util.IdentityHashMap<>(len * 2);
++        for (int b = 0, blen = buckets.size(); b < blen; ++b) {
++            for (final RegionBoundTask t : buckets.get(b).tasks) {
++                byTask.put(t, b);
++            }
++        }
++        for (int i = 0; i < len; ++i) {
++            assignment[i] = byTask.get(tasks.get(i));
++        }
++        BUCKET_PARTITIONS.put(cacheKey, new BucketPartition(bounds, assignment, buckets.size()));
++        return buckets;
++    }
++
+     private static List<RegionBoundBucket> bucketRegionBoundTasksByOverlap(
+         final ServerLevel world,
+         final List<RegionBoundTask> tasks

@@ -1,0 +1,233 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 7 Jul 2026 12:02:17 +0000
+Subject: [PATCH] Trim region bookkeeping from the lease claim path
+
+Every parallel bucket claims and releases an ownership lease each
+tick, and each claim paid an exact-lease scan, an overlap set
+allocation, a containing-region scan, a region descriptor allocation
+with two timestamps, and reference-count maintenance - all feeding
+only the aggregate counters in the /loom snapshot. A claim now does
+the conflict check, which is the safety contract, and the
+registration itself; each lease counts as its own region for the
+snapshot's created and retired totals.
+
+diff --git a/net/minecraft/server/threading/RegionRuntime.java b/net/minecraft/server/threading/RegionRuntime.java
+index 50fa9abae92ac9275c3041913dda16f8e6371b96..fdcbc63f30326f981703a36edec7c06e639f7193 100644
+--- a/net/minecraft/server/threading/RegionRuntime.java
++++ b/net/minecraft/server/threading/RegionRuntime.java
+@@ -238,8 +238,6 @@ public class RegionRuntime {
+         // lock that claim/release use. Keyed by the Thread object, not the thread id, so the lookup does
+         // not box a Long per query. Mutated only while holding `lock`.
+         private final ConcurrentHashMap<Thread, Lease[]> leasesByThread = new ConcurrentHashMap<>();
+-        private final Map<Long, RegionDescriptor> regions = new HashMap<>();
+-        private final Map<Long, Integer> regionReferenceCounts = new HashMap<>();
+         private long createdRegions;
+         private long splitEvents;
+         private long mergeEvents;
+@@ -260,44 +258,25 @@ public class RegionRuntime {
+             try {
+                 final long ownerThreadId = ownerThread.threadId();
+                 final String ownerThreadName = ownerThread.getName();
+-                if (this.leases.isEmpty()) {
+-                    final long regionId = nextRegionId.getAndIncrement();
+-                    ++this.createdRegions;
+-                    this.regions.put(
+-                        regionId,
+-                        new RegionDescriptor(regionId, minChunkX, minChunkZ, maxChunkX, maxChunkZ, RegionLifecycleEvent.CREATED, List.of())
+-                    );
+-                    final Lease lease = new Lease(
+-                        leaseId,
+-                        minChunkX,
+-                        minChunkZ,
+-                        maxChunkX,
+-                        maxChunkZ,
+-                        ownerThread,
+-                        ownerThreadName,
+-                        regionId
+-                    );
+-                    final Lease prev = this.leases.put(lease.id, lease);
+-                    if (prev != null) {
+-                        throw new IllegalStateException("Duplicate lease id: " + lease.id);
++                // The claim path is hot (every parallel bucket, every tick). The former region
++                // descriptor/reference-count bookkeeping (exact-lease scan, overlap set, containing-
++                // region scan, descriptor allocation and timestamps) fed only the /loom snapshot's
++                // aggregate counters, so claims now do exactly two things: the conflict check that is
++                // the safety contract, and the lease registration itself. A lease is its own region
++                // for accounting: createdRegions counts claims, retiredRegions counts releases.
++                if (!this.leases.isEmpty()) {
++                    final Lease conflictingLease = this.findConflictingLease(minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThreadId);
++                    if (conflictingLease != null) {
++                        conflictCounter.getAndIncrement();
++                        throw new IllegalStateException(
++                            "Region lease conflict: new lease [" + minChunkX + "," + minChunkZ + " -> " + maxChunkX + "," + maxChunkZ + "]"
++                                + " by thread " + ownerThreadName + "[" + ownerThreadId + "] overlaps existing lease "
++                                + conflictingLease.describeBounds() + " by thread "
++                                + conflictingLease.ownerThreadName + "[" + conflictingLease.ownerThreadId + "]"
++                        );
+                     }
+-                    this.indexLease(lease);
+-                    this.regionReferenceCounts.put(regionId, 1);
+-                    return;
+-                }
+-
+-                final Lease conflictingLease = this.findConflictingLease(minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThreadId);
+-                if (conflictingLease != null) {
+-                    conflictCounter.getAndIncrement();
+-                    throw new IllegalStateException(
+-                        "Region lease conflict: new lease [" + minChunkX + "," + minChunkZ + " -> " + maxChunkX + "," + maxChunkZ + "]"
+-                            + " by thread " + ownerThreadName + "[" + ownerThreadId + "] overlaps existing lease "
+-                            + conflictingLease.describeBounds() + " by thread "
+-                            + conflictingLease.ownerThreadName + "[" + conflictingLease.ownerThreadId + "]"
+-                    );
+                 }
+-
+-                final long regionId = this.resolveRegionId(minChunkX, minChunkZ, maxChunkX, maxChunkZ, nextRegionId);
++                ++this.createdRegions;
+                 final Lease lease = new Lease(
+                     leaseId,
+                     minChunkX,
+@@ -306,19 +285,13 @@ public class RegionRuntime {
+                     maxChunkZ,
+                     ownerThread,
+                     ownerThreadName,
+-                    regionId
++                    leaseId
+                 );
+                 final Lease prev = this.leases.put(lease.id, lease);
+                 if (prev != null) {
+                     throw new IllegalStateException("Duplicate lease id: " + lease.id);
+                 }
+                 this.indexLease(lease);
+-                this.regionReferenceCounts.merge(regionId, 1, Integer::sum);
+-
+-                final RegionDescriptor regionDescriptor = this.regions.get(regionId);
+-                if (regionDescriptor != null) {
+-                    regionDescriptor.touch();
+-                }
+             } finally {
+                 this.lock.unlock();
+             }
+@@ -332,15 +305,7 @@ public class RegionRuntime {
+                     return;
+                 }
+                 this.unindexLease(removed);
+-                final Integer refs = this.regionReferenceCounts.get(removed.regionId);
+-                if (refs == null || refs <= 1) {
+-                    this.regionReferenceCounts.remove(removed.regionId);
+-                    if (this.regions.remove(removed.regionId) != null) {
+-                        ++this.retiredRegions;
+-                    }
+-                } else {
+-                    this.regionReferenceCounts.put(removed.regionId, refs - 1);
+-                }
++                ++this.retiredRegions;
+             } finally {
+                 this.lock.unlock();
+             }
+@@ -447,96 +412,8 @@ public class RegionRuntime {
+             return null;
+         }
+ 
+-        private long resolveRegionId(
+-            final int minChunkX,
+-            final int minChunkZ,
+-            final int maxChunkX,
+-            final int maxChunkZ,
+-            final AtomicLong nextRegionId
+-        ) {
+-            final Lease exact = this.findExactLease(minChunkX, minChunkZ, maxChunkX, maxChunkZ);
+-            if (exact != null) {
+-                return exact.regionId;
+-            }
+ 
+-            final Set<Long> overlappingRegions = new HashSet<>();
+-            for (final Lease existing : this.leases.values()) {
+-                if (existing.intersects(minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
+-                    overlappingRegions.add(existing.regionId);
+-                }
+-            }
+ 
+-            final long reusableRegionId = this.findContainingRegion(
+-                overlappingRegions,
+-                minChunkX,
+-                minChunkZ,
+-                maxChunkX,
+-                maxChunkZ
+-            );
+-            if (reusableRegionId != Long.MIN_VALUE) {
+-                ++this.reusedRegionAssignments;
+-                final RegionDescriptor descriptor = this.regions.get(reusableRegionId);
+-                if (descriptor != null) {
+-                    descriptor.touch();
+-                }
+-                return reusableRegionId;
+-            }
+-
+-            final long regionId = nextRegionId.getAndIncrement();
+-            final RegionLifecycleEvent lifecycleEvent;
+-            final List<Long> parentRegionIds;
+-            if (overlappingRegions.isEmpty()) {
+-                lifecycleEvent = RegionLifecycleEvent.CREATED;
+-                parentRegionIds = List.of();
+-            } else if (overlappingRegions.size() == 1) {
+-                lifecycleEvent = RegionLifecycleEvent.SPLIT;
+-                ++this.splitEvents;
+-                parentRegionIds = List.copyOf(overlappingRegions);
+-            } else {
+-                lifecycleEvent = RegionLifecycleEvent.MERGE;
+-                ++this.mergeEvents;
+-                parentRegionIds = List.copyOf(overlappingRegions);
+-            }
+-
+-            ++this.createdRegions;
+-            this.regions.put(
+-                regionId,
+-                new RegionDescriptor(regionId, minChunkX, minChunkZ, maxChunkX, maxChunkZ, lifecycleEvent, parentRegionIds)
+-            );
+-            return regionId;
+-        }
+-
+-        private long findContainingRegion(
+-            final Set<Long> overlappingRegions,
+-            final int minChunkX,
+-            final int minChunkZ,
+-            final int maxChunkX,
+-            final int maxChunkZ
+-        ) {
+-            long selectedRegionId = Long.MIN_VALUE;
+-            long selectedArea = Long.MAX_VALUE;
+-            for (final Long regionId : overlappingRegions) {
+-                final RegionDescriptor descriptor = this.regions.get(regionId);
+-                if (descriptor == null || !descriptor.contains(minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
+-                    continue;
+-                }
+-                final long area = descriptor.area();
+-                if (selectedRegionId == Long.MIN_VALUE || area < selectedArea) {
+-                    selectedRegionId = regionId.longValue();
+-                    selectedArea = area;
+-                }
+-            }
+-            return selectedRegionId;
+-        }
+-
+-        private Lease findExactLease(final int minChunkX, final int minChunkZ, final int maxChunkX, final int maxChunkZ) {
+-            for (final Lease lease : this.leases.values()) {
+-                if (lease.matches(minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
+-                    return lease;
+-                }
+-            }
+-            return null;
+-        }
+ 
+         private WorldDiagnostics snapshot(final String worldId) {
+             this.lock.lock();
+@@ -544,7 +421,7 @@ public class RegionRuntime {
+                 return new WorldDiagnostics(
+                     worldId,
+                     this.leases.size(),
+-                    this.regionReferenceCounts.size(),
++                    this.leases.size(),
+                     this.createdRegions,
+                     this.splitEvents,
+                     this.mergeEvents,
