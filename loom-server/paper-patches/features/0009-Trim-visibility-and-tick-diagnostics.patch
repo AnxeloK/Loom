@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 10 Jul 2026 19:11:41 +0000
+Subject: [PATCH] Trim visibility and tick diagnostics
+
+
+diff --git a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+index 2c36922658ff18555c4f3dcbbf027501b49a7435..d149bf927c61b7844443cd67c9863aa529d218e4 100644
+--- a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
++++ b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+@@ -9,6 +9,10 @@ import net.minecraft.world.phys.Vec3;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Set;
++import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.atomic.AtomicInteger;
+ 
+ public class TickThread extends Thread {
+@@ -105,6 +109,12 @@ public class TickThread extends Thread {
+     public final int id; /* We don't override getId as the spec requires that it be unique (with respect to all other threads) */
+ 
+     private static final AtomicInteger ID_GENERATOR = new AtomicInteger();
++    private static final Set<TickThread> TICK_THREADS = ConcurrentHashMap.newKeySet();
++
++    // Loom - each tick worker publishes its own diagnostic entity. A single process-wide atomic reference
++    // both lost all but one concurrently ticking entity and forced every worker to contend on the same cache
++    // line in the hottest entity path.
++    public volatile Entity currentlyTickingEntity;
+ 
+     public TickThread(final String name) {
+         this(null, name);
+@@ -121,6 +131,27 @@ public class TickThread extends Thread {
+     private TickThread(final ThreadGroup group, final Runnable run, final String name, final int id) {
+         super(group, run, name);
+         this.id = id;
++        TICK_THREADS.add(this);
++    }
++
++    @Override
++    public void run() {
++        try {
++            super.run();
++        } finally {
++            TICK_THREADS.remove(this);
++        }
++    }
++
++    public static List<Entity> getCurrentlyTickingEntities() {
++        final List<Entity> ret = new ArrayList<>();
++        for (final TickThread thread : TICK_THREADS) {
++            final Entity entity = thread.currentlyTickingEntity;
++            if (entity != null) {
++                ret.add(entity);
++            }
++        }
++        return ret;
+     }
+ 
+     public static TickThread getCurrentTickThread() {
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index 36e71f9557ddf1da301d334749078adf929d4518..73efb1d436510e5c5dfd9bd4fe62657dea0cfbd0 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -2058,7 +2058,13 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+ 
+     @Override
+     public boolean canSee(org.bukkit.entity.Entity entity) {
+-        return this.equals(entity) || entity.isVisibleByDefault() ^ this.invertedVisibilityEntities.containsKey(entity.getUniqueId()); // SPIGOT-7312: Can always see self
++        if (this.equals(entity)) { // SPIGOT-7312: Can always see self
++            return true;
++        }
++        final boolean visibleByDefault = entity.isVisibleByDefault();
++        return this.invertedVisibilityEntities.isEmpty()
++            ? visibleByDefault
++            : visibleByDefault ^ this.invertedVisibilityEntities.containsKey(entity.getUniqueId());
+     }
+ 
+     public boolean canSeePlayer(UUID uuid) {
