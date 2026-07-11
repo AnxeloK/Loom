@@ -1,0 +1,202 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 11 Jul 2026 17:23:09 +0000
+Subject: [PATCH] Test cooperative region dispatch
+
+
+diff --git a/src/test/java/net/minecraft/server/threading/TickRegionsCooperativeDispatchTest.java b/src/test/java/net/minecraft/server/threading/TickRegionsCooperativeDispatchTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f98612bc02523f6e6b6414493445b286bceb8c44
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/TickRegionsCooperativeDispatchTest.java
+@@ -0,0 +1,169 @@
++package net.minecraft.server.threading;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import java.lang.reflect.Constructor;
++import java.lang.reflect.Field;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicIntegerArray;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.concurrent.locks.LockSupport;
++import java.util.function.IntConsumer;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++
++@Normal
++public class TickRegionsCooperativeDispatchTest {
++
++    private static final Class<?> BATCH_CLASS;
++    private static final Constructor<?> BATCH_CONSTRUCTOR;
++    private static final Method DISPATCH;
++    private static final Method RUN_ONE;
++    private static final Method PARK_IF_INCOMPLETE;
++    private static final Field CURSOR;
++    private static final Field WAITER;
++
++    static {
++        try {
++            BATCH_CLASS = Class.forName("net.minecraft.server.threading.TickRegions$ParallelTaskBatch");
++            BATCH_CONSTRUCTOR = BATCH_CLASS.getDeclaredConstructor(int.class, IntConsumer.class, String.class, boolean.class);
++            BATCH_CONSTRUCTOR.setAccessible(true);
++            DISPATCH = TickRegions.class.getDeclaredMethod("dispatchBucketsParticipating", int.class, IntConsumer.class, String.class);
++            DISPATCH.setAccessible(true);
++            RUN_ONE = BATCH_CLASS.getDeclaredMethod("runOne");
++            RUN_ONE.setAccessible(true);
++            PARK_IF_INCOMPLETE = TickRegions.class.getDeclaredMethod("parkIfIncomplete", BATCH_CLASS);
++            PARK_IF_INCOMPLETE.setAccessible(true);
++            CURSOR = BATCH_CLASS.getDeclaredField("cursor");
++            CURSOR.setAccessible(true);
++            WAITER = BATCH_CLASS.getDeclaredField("waiter");
++            WAITER.setAccessible(true);
++        } catch (final ReflectiveOperationException exception) {
++            throw new ExceptionInInitializerError(exception);
++        }
++    }
++
++    @Test
++    public void completedBatchCannotParkAfterItsPermitWasConsumed() throws InterruptedException {
++        runOnTickThread(() -> {
++            final Object batch = newBatch(1, ignored -> {
++            });
++            set(WAITER, batch, Thread.currentThread());
++
++            Assertions.assertTrue((boolean) invoke(RUN_ONE, batch));
++            LockSupport.parkNanos(batch, 1L);
++            invoke(PARK_IF_INCOMPLETE, null, batch);
++        });
++    }
++
++    @Test
++    public void exhaustedRunnersDoNotAdvanceTheCursor() throws InterruptedException {
++        runOnTickThread(() -> {
++            final AtomicInteger executions = new AtomicInteger();
++            final Object batch = newBatch(2, ignored -> executions.incrementAndGet());
++            for (int i = 0; i < 64; ++i) {
++                invoke(RUN_ONE, batch);
++            }
++
++            Assertions.assertEquals(2, executions.get());
++            Assertions.assertEquals(2, ((AtomicInteger) get(CURSOR, batch)).get());
++        });
++    }
++
++    @Test
++    public void nestedBatchesCompleteEveryIndexExactlyOnce() throws InterruptedException {
++        runOnTickThread(() -> {
++            final int outerCount = 12;
++            final int innerCount = 6;
++            for (int iteration = 0; iteration < 64; ++iteration) {
++                final AtomicIntegerArray outerExecutions = new AtomicIntegerArray(outerCount);
++                final AtomicIntegerArray innerExecutions = new AtomicIntegerArray(outerCount * innerCount);
++
++                dispatch(outerCount, outerIndex -> {
++                    Assertions.assertEquals(0, outerExecutions.getAndIncrement(outerIndex));
++                    dispatch(innerCount, innerIndex -> Assertions.assertEquals(
++                        0,
++                        innerExecutions.getAndIncrement(outerIndex * innerCount + innerIndex)
++                    ));
++                });
++
++                for (int i = 0; i < outerCount; ++i) {
++                    Assertions.assertEquals(1, outerExecutions.get(i));
++                }
++                for (int i = 0; i < outerCount * innerCount; ++i) {
++                    Assertions.assertEquals(1, innerExecutions.get(i));
++                }
++            }
++        });
++    }
++
++    private static Object newBatch(final int count, final IntConsumer action) {
++        try {
++            return BATCH_CONSTRUCTOR.newInstance(count, action, "cooperative-dispatch-test", false);
++        } catch (final ReflectiveOperationException exception) {
++            throw new AssertionError(exception);
++        }
++    }
++
++    private static void dispatch(final int count, final IntConsumer action) {
++        invoke(DISPATCH, null, count, action, "cooperative-dispatch-test");
++    }
++
++    private static Object invoke(final Method method, final Object instance, final Object... arguments) {
++        try {
++            return method.invoke(instance, arguments);
++        } catch (final InvocationTargetException exception) {
++            final Throwable cause = exception.getCause();
++            if (cause instanceof Error error) {
++                throw error;
++            }
++            if (cause instanceof RuntimeException runtimeException) {
++                throw runtimeException;
++            }
++            throw new AssertionError(cause);
++        } catch (final ReflectiveOperationException exception) {
++            throw new AssertionError(exception);
++        }
++    }
++
++    private static Object get(final Field field, final Object instance) {
++        try {
++            return field.get(instance);
++        } catch (final IllegalAccessException exception) {
++            throw new AssertionError(exception);
++        }
++    }
++
++    private static void set(final Field field, final Object instance, final Object value) {
++        try {
++            field.set(instance, value);
++        } catch (final IllegalAccessException exception) {
++            throw new AssertionError(exception);
++        }
++    }
++
++    private static void runOnTickThread(final Runnable action) throws InterruptedException {
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread thread = new TickThread(() -> {
++            try {
++                action.run();
++            } catch (final Throwable throwable) {
++                failure.set(throwable);
++            }
++        }, "cooperative-dispatch-test");
++        thread.setDaemon(true);
++        thread.start();
++        thread.join(15_000L);
++        if (thread.isAlive()) {
++            LockSupport.unpark(thread);
++            thread.interrupt();
++            thread.join(1_000L);
++            Assertions.fail("Cooperative dispatch did not complete within 15 seconds");
++        }
++        if (failure.get() != null) {
++            Assertions.fail(failure.get());
++        }
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/threading/TickRegionsCooperativeDispatchTestSuite.java b/src/test/java/net/minecraft/server/threading/TickRegionsCooperativeDispatchTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa9fcc970ba726cce7660cdf271b0d0a6da56b39
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/TickRegionsCooperativeDispatchTestSuite.java
+@@ -0,0 +1,15 @@
++package net.minecraft.server.threading;
++
++import org.junit.platform.suite.api.ConfigurationParameter;
++import org.junit.platform.suite.api.IncludeTags;
++import org.junit.platform.suite.api.SelectClasses;
++import org.junit.platform.suite.api.Suite;
++import org.junit.platform.suite.api.SuiteDisplayName;
++
++@Suite
++@SuiteDisplayName("Cooperative region dispatch")
++@IncludeTags("Normal")
++@SelectClasses(TickRegionsCooperativeDispatchTest.class)
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class TickRegionsCooperativeDispatchTestSuite {
++}
