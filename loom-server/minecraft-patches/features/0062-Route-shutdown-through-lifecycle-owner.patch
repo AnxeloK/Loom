@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 11 Jul 2026 21:11:32 +0000
+Subject: [PATCH] Route shutdown through lifecycle owner
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index cb3dbb2b74c6be2d47848ed5a196fe9e10b3aa29..d21a2932aff446f65dbdf2beaf0c614b50db19f2 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -2472,6 +2472,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         return super.scheduleExecutables() && !this.isStopped();
+     }
+ 
++    public boolean enqueueGlobalOwnerTask(final Runnable command) {
++        if (this.isStopped() || this.hasStopped()) {
++            return false;
++        }
++        // Owner handoffs must never use Executor.execute here: BlockableEventLoop executes inline after
++        // shutdown begins, which would attach a GLOBAL_CONTROL token to the submitting thread.
++        this.schedule(new TickTask(this.tickTaskTickCount.get(), command));
++        return true;
++    }
++
+     @Override
+     public void executeIfPossible(final Runnable command) {
+         if (this.isStopped()) {
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 616d70d40c924f907ed279351879ff1bc83101d7..933583dd74fed89e719b5dcb67f6f391e57e9b8a 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -1019,20 +1019,41 @@ public abstract class PlayerList {
+     }
+     public void saveAll(final int interval) {
+         // Paper end - Incremental chunk and player saving
+-        io.papermc.paper.util.MCUtil.ensureMain("Save Players" , () -> { // Paper - Ensure main
++        // Loom - the global player list must only be traversed by the lifecycle owner. A void API can
++        // hand off without blocking its caller; lifecycle/autosave calls already hold GLOBAL_CONTROL and
++        // retain their synchronous behavior. This replaces Paper's processQueue + Waitable round trip,
++        // which deadlocks when shutdown is initiated after the server thread has stalled.
++        if (!net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this.server)) {
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this.server, "save-all-players"),
++                () -> this.saveAllOwned(interval)
++            );
++            return;
++        }
++        this.saveAllOwned(interval);
++    }
++
++    private void saveAllOwned(final int interval) {
+         // Paper start - Incremental chunk and player saving
+-            int numSaved = 0;
+-            final long now = DomainClock.currentServerTick(this.server);
+-            for (final ServerPlayer player : this.players) {
+-            if (interval == -1 || now - player.lastSave >= interval) {
+-                this.save(player);
+-                if (interval != -1 && ++numSaved >= io.papermc.paper.configuration.GlobalConfiguration.get().playerAutoSave.maxPerTick()) {
+-                    break;
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "save-all-players");
++        int numSaved = 0;
++        final long now = DomainClock.currentServerTick(this.server);
++        for (final ServerPlayer player : this.players) {
++            boolean saved = false;
++            try (net.minecraft.server.threading.runtime.OwnerDomainExecutor.Scope ignored =
++                     net.minecraft.server.threading.runtime.OwnerDomainExecutor.enter(
++                         net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "save-player")
++                     )) {
++                if (interval == -1 || now - player.lastSave >= interval) {
++                    this.save(player);
++                    saved = true;
+                 }
+             }
++            if (saved && interval != -1 && ++numSaved >= io.papermc.paper.configuration.GlobalConfiguration.get().playerAutoSave.maxPerTick()) {
++                break;
+             }
++        }
+         // Paper end - Incremental chunk and player saving
+-        return null; }); // Paper - ensure main
+     }
+ 
+     public UserWhiteList getWhiteList() {
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index 61b7b42acbc23d01f6fc1b62fa46cd18ba5ed627..10e1e24f9518bc0b73dca38ff5a2e149fb5cc168 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -379,10 +379,9 @@ public final class OwnerDomainExecutor {
+ 
+     private static void enqueueGlobal(final Owner owner, final Runnable task) {
+         final MinecraftServer server = owner.server();
+-        if (server == null || server.hasStopped()) {
++        if (server == null || !server.enqueueGlobalOwnerTask(wrap(owner, task))) {
+             throw new RejectedExecutionException("Server is unavailable for " + owner.describe());
+         }
+-        server.execute(wrap(owner, task));
+     }
+ 
+     private static void enqueueRegion(final Owner owner, final Runnable task) {

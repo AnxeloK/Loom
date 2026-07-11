@@ -1,0 +1,277 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 11 Jul 2026 21:11:38 +0000
+Subject: [PATCH] Bound emergency shutdown waits
+
+
+diff --git a/src/main/java/org/bukkit/craftbukkit/util/ServerShutdownThread.java b/src/main/java/org/bukkit/craftbukkit/util/ServerShutdownThread.java
+index 6050180e65d2a664e96318029cf5031d1bc1f504..99382b23bbbfe95426ca359b410d1f7d653a4f99 100644
+--- a/src/main/java/org/bukkit/craftbukkit/util/ServerShutdownThread.java
++++ b/src/main/java/org/bukkit/craftbukkit/util/ServerShutdownThread.java
+@@ -1,9 +1,15 @@
+ package org.bukkit.craftbukkit.util;
+ 
+ import io.papermc.paper.log.LoggerShutdown;
++import java.util.concurrent.RejectedExecutionException;
+ import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
+ 
+ public class ServerShutdownThread extends Thread {
++    private static final long SHUTDOWN_GRACE_MILLIS = Math.max(
++        1_000L,
++        Long.getLong("loom.shutdownHook.graceMillis", 600_000L)
++    );
+     private final MinecraftServer server;
+ 
+     public ServerShutdownThread(MinecraftServer server) {
+@@ -13,24 +19,54 @@ public class ServerShutdownThread extends Thread {
+     @Override
+     public void run() {
+         try {
+-            // Paper start - try to shutdown on main
+-            server.safeShutdown(false, false);
+-            for (int i = 1000; i > 0 && !server.hasStopped(); i -= 100) {
+-                Thread.sleep(100);
++            // Loom - request shutdown from the lifecycle owner and wait only for a bounded grace period.
++            // Stealing stopServer onto this hook thread races every mutable owner domain; waiting on the
++            // stalled server's processQueue deadlocks. If the owner cannot finish, terminate abnormally
++            // instead of pretending that an unsafe partial save is possible.
++            if (!requestShutdown(this.server, false)) {
++                haltStalledServer(this.server, "JVM shutdown hook could not reach the server lifecycle owner");
+             }
+-            if (server.hasStopped()) {
+-                while (!server.hasFullyShutdown) Thread.sleep(1000);
+-                return;
++            if (!awaitFullShutdown(this.server, SHUTDOWN_GRACE_MILLIS)) {
++                haltStalledServer(this.server, "JVM shutdown hook timed out waiting for the server lifecycle owner");
+             }
+-            // Looks stalled, close async
+-            server.forceTicks = true;
+-            this.server.close();
+-            while (!server.hasFullyShutdown) Thread.sleep(1000);
+         } catch (InterruptedException e) {
+-            e.printStackTrace();
+-            // Paper end
++            Thread.currentThread().interrupt();
++            haltStalledServer(this.server, "JVM shutdown hook was interrupted before shutdown completed");
+         } finally {
+             LoggerShutdown.shutdownLogging();
+         }
+     }
++
++    public static boolean requestShutdown(final MinecraftServer server, final boolean restarting) {
++        if (server.hasFullyShutdown || server.hasStopped() || server.isStopped()) {
++            return true;
++        }
++        try {
++            OwnerDomainExecutor.execute(
++                OwnerDomainExecutor.global(server, "server-shutdown-request"),
++                () -> server.safeShutdown(false, restarting)
++            );
++            return true;
++        } catch (final RejectedExecutionException rejected) {
++            return server.hasFullyShutdown || server.hasStopped() || server.isStopped();
++        }
++    }
++
++    public static boolean awaitFullShutdown(final MinecraftServer server, final long timeoutMillis) throws InterruptedException {
++        final long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
++        while (!server.hasFullyShutdown) {
++            final long remainingNanos = deadline - System.nanoTime();
++            if (remainingNanos <= 0L) {
++                return false;
++            }
++            Thread.sleep(Math.min(100L, Math.max(1L, java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(remainingNanos))));
++        }
++        return true;
++    }
++
++    public static void haltStalledServer(final MinecraftServer server, final String reason) {
++        server.abnormalExit = true;
++        MinecraftServer.LOGGER.error("{}; forcing abnormal termination without an off-owner save", reason);
++        Runtime.getRuntime().halt(70);
++    }
+ }
+diff --git a/src/main/java/org/spigotmc/WatchdogThread.java b/src/main/java/org/spigotmc/WatchdogThread.java
+index 5c1306ac6eb620a38ed5ef3632b611214e1d5dcd..192625adac2026e078b1294aef481587ba958d1d 100644
+--- a/src/main/java/org/spigotmc/WatchdogThread.java
++++ b/src/main/java/org/spigotmc/WatchdogThread.java
+@@ -14,6 +14,16 @@ import org.bukkit.craftbukkit.CraftServer;
+ public class WatchdogThread extends ca.spottedleaf.moonrise.common.util.TickThread { // Paper - rewrite chunk system
+ 
+     public static final boolean DISABLE_WATCHDOG = Boolean.getBoolean("disable.watchdog"); // Paper - Improved watchdog support
++    private static final long EMERGENCY_SHUTDOWN_GRACE_MILLIS = Math.max(
++        1_000L,
++        Long.getLong("loom.watchdog.emergencyShutdownGraceMillis", 30_000L)
++    );
++    // A normal close can legitimately consume the chunk system's bounded halt and I/O windows for
++    // every dimension. It still needs an outer bound, but must not inherit the much shorter emergency one.
++    private static final long NORMAL_SHUTDOWN_GRACE_MILLIS = Math.max(
++        EMERGENCY_SHUTDOWN_GRACE_MILLIS,
++        Long.getLong("loom.watchdog.normalShutdownGraceMillis", 600_000L)
++    );
+     private static WatchdogThread instance;
+     private long timeoutTime;
+     private boolean restart;
+@@ -22,7 +32,7 @@ public class WatchdogThread extends ca.spottedleaf.moonrise.common.util.TickThre
+     public static volatile boolean hasStarted;
+     private long lastEarlyWarning; // Paper - Keep track of short dump times to avoid spamming console with short dumps
+     private volatile long lastTick;
+-    private volatile boolean stopping;
++    private volatile long shutdownDeadlineMillis;
+ 
+     private WatchdogThread(long timeoutTime, boolean restart) {
+         super("Paper Watchdog Thread");
+@@ -53,17 +63,27 @@ public class WatchdogThread extends ca.spottedleaf.moonrise.common.util.TickThre
+ 
+     public static void doStop() {
+         if (WatchdogThread.instance != null) {
+-            WatchdogThread.instance.stopping = true;
++            WatchdogThread.instance.shutdownDeadlineMillis = WatchdogThread.monotonicMillis() + NORMAL_SHUTDOWN_GRACE_MILLIS;
+         }
+     }
+ 
+     @Override
+     public void run() {
+-        while (!this.stopping) {
++        while (true) {
+             Logger logger = Bukkit.getServer().getLogger();
+             long currentTime = WatchdogThread.monotonicMillis();
+             MinecraftServer server = MinecraftServer.getServer();
+-            if (this.lastTick != 0 && this.timeoutTime > 0 && WatchdogThread.hasStarted && (!server.isRunning() || (currentTime > this.lastTick + this.earlyWarningEvery && !DISABLE_WATCHDOG))) { // Paper - add property to disable
++            if (server.hasFullyShutdown) {
++                break;
++            }
++            final long shutdownDeadline = this.shutdownDeadlineMillis;
++            if (shutdownDeadline != 0L && currentTime >= shutdownDeadline) {
++                org.bukkit.craftbukkit.util.ServerShutdownThread.haltStalledServer(
++                    server,
++                    "Server shutdown did not complete within the watchdog grace period"
++                );
++            }
++            if (shutdownDeadline == 0L && this.lastTick != 0 && this.timeoutTime > 0 && WatchdogThread.hasStarted && (!server.isRunning() || (currentTime > this.lastTick + this.earlyWarningEvery && !DISABLE_WATCHDOG))) { // Paper - add property to disable
+                 boolean isLongTimeout = currentTime > this.lastTick + this.timeoutTime || (!server.isRunning() && !server.hasStopped() && currentTime > this.lastTick + 1000);
+                 // Don't spam early warning dumps
+                 if (!isLongTimeout && (this.earlyWarningEvery <= 0 ||
+@@ -133,14 +153,25 @@ public class WatchdogThread extends ca.spottedleaf.moonrise.common.util.TickThre
+                         }
+                         // try one last chance to safe shutdown on main in case it 'comes back'
+                         server.abnormalExit = true;
+-                        server.safeShutdown(false, this.restart);
++                        if (!org.bukkit.craftbukkit.util.ServerShutdownThread.requestShutdown(server, this.restart)) {
++                            org.bukkit.craftbukkit.util.ServerShutdownThread.haltStalledServer(
++                                server,
++                                "Watchdog could not reach the server lifecycle owner"
++                            );
++                        }
+                         try {
+-                            Thread.sleep(1000);
++                            if (!org.bukkit.craftbukkit.util.ServerShutdownThread.awaitFullShutdown(server, EMERGENCY_SHUTDOWN_GRACE_MILLIS)) {
++                                org.bukkit.craftbukkit.util.ServerShutdownThread.haltStalledServer(
++                                    server,
++                                    "Watchdog grace period expired"
++                                );
++                            }
+                         } catch (InterruptedException e) {
+-                            e.printStackTrace();
+-                        }
+-                        if (!server.hasStopped()) {
+-                            server.close();
++                            Thread.currentThread().interrupt();
++                            org.bukkit.craftbukkit.util.ServerShutdownThread.haltStalledServer(
++                                server,
++                                "Watchdog shutdown wait was interrupted"
++                            );
+                         }
+                     }
+                     break;
+diff --git a/src/test/java/org/bukkit/craftbukkit/util/ServerShutdownThreadTest.java b/src/test/java/org/bukkit/craftbukkit/util/ServerShutdownThreadTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..08c4f83335cde1c7b88b9dd0bce05831a89c053a
+--- /dev/null
++++ b/src/test/java/org/bukkit/craftbukkit/util/ServerShutdownThreadTest.java
+@@ -0,0 +1,63 @@
++package org.bukkit.craftbukkit.util;
++
++import java.time.Duration;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++public class ServerShutdownThreadTest {
++
++    @Test
++    public void shutdownRequestRunsInsideTheLifecycleOwner() {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final AtomicReference<Runnable> queued = new AtomicReference<>();
++        Mockito.doAnswer(invocation -> {
++            queued.set(invocation.getArgument(0));
++            return true;
++        }).when(server).enqueueGlobalOwnerTask(Mockito.any(Runnable.class));
++        Mockito.doAnswer(invocation -> {
++            Assertions.assertTrue(OwnerDomainExecutor.isGlobalOwner(server));
++            return null;
++        }).when(server).safeShutdown(false, true);
++
++        Assertions.assertTrue(ServerShutdownThread.requestShutdown(server, true));
++
++        Mockito.verify(server, Mockito.never()).safeShutdown(false, true);
++        Assertions.assertNotNull(queued.get());
++        queued.get().run();
++        Mockito.verify(server).safeShutdown(false, true);
++    }
++
++    @Test
++    public void shutdownTransitionRejectsWithoutRunningOnTheCaller() {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        Mockito.when(server.isStopped()).thenReturn(false, true);
++
++        Assertions.assertTrue(ServerShutdownThread.requestShutdown(server, false));
++
++        Mockito.verify(server, Mockito.never()).safeShutdown(Mockito.anyBoolean(), Mockito.anyBoolean());
++    }
++
++    @Test
++    public void completedShutdownReturnsImmediately() throws InterruptedException {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        server.hasFullyShutdown = true;
++
++        Assertions.assertTrue(ServerShutdownThread.awaitFullShutdown(server, 1_000L));
++    }
++
++    @Test
++    public void stalledShutdownStopsWaitingAtTheDeadline() {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++
++        Assertions.assertTimeoutPreemptively(
++            Duration.ofSeconds(1L),
++            () -> Assertions.assertFalse(ServerShutdownThread.awaitFullShutdown(server, 1L))
++        );
++    }
++}
+diff --git a/src/test/java/org/bukkit/craftbukkit/util/ServerShutdownThreadTestSuite.java b/src/test/java/org/bukkit/craftbukkit/util/ServerShutdownThreadTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b774b8905fd0507b08b668b2fd72a9807e46caa1
+--- /dev/null
++++ b/src/test/java/org/bukkit/craftbukkit/util/ServerShutdownThreadTestSuite.java
+@@ -0,0 +1,15 @@
++package org.bukkit.craftbukkit.util;
++
++import org.junit.platform.suite.api.ConfigurationParameter;
++import org.junit.platform.suite.api.IncludeTags;
++import org.junit.platform.suite.api.SelectClasses;
++import org.junit.platform.suite.api.Suite;
++import org.junit.platform.suite.api.SuiteDisplayName;
++
++@Suite
++@SuiteDisplayName("Bounded server shutdown")
++@IncludeTags("Normal")
++@SelectClasses(ServerShutdownThreadTest.class)
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class ServerShutdownThreadTestSuite {
++}
