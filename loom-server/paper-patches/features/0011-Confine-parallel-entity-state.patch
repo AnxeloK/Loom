@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 11 Jul 2026 00:42:18 +0000
+Subject: [PATCH] Confine parallel entity state
+
+
+diff --git a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+index 5d171b760f8cd80d507e428531325211570f92b6..4d35b23970b92b2dea28c3780b295cd2561a343d 100644
+--- a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
++++ b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+@@ -122,6 +122,12 @@ public class TickThread extends Thread {
+     public boolean skipHopperPushEvents;
+     public boolean suppressBlockEntityUpdates;
+ 
++    // Loom - one entity RNG per physical tick thread keeps Paper's shared-per-thread memory profile without
++    // racing every parallel entity on one ThreadUnsafeRandom seed and Gaussian cache.
++    public final ThreadUnsafeRandom entityRandom = new ThreadUnsafeRandom(
++        net.minecraft.world.level.levelgen.RandomSupport.generateUniqueSeed()
++    );
++
+     public TickThread(final String name) {
+         this(null, name);
+     }
+diff --git a/src/main/java/io/papermc/paper/entity/activation/ActivationType.java b/src/main/java/io/papermc/paper/entity/activation/ActivationType.java
+index 39fd663c2e95feea4db424b48f095d5fff20e209..86ef887701c18fa863715cedc0606d5a2ce0de17 100644
+--- a/src/main/java/io/papermc/paper/entity/activation/ActivationType.java
++++ b/src/main/java/io/papermc/paper/entity/activation/ActivationType.java
+@@ -11,7 +11,6 @@ import net.minecraft.world.entity.monster.Ghast;
+ import net.minecraft.world.entity.monster.Phantom;
+ import net.minecraft.world.entity.npc.villager.Villager;
+ import net.minecraft.world.entity.raid.Raider;
+-import net.minecraft.world.phys.AABB;
+ 
+ public enum ActivationType {
+     WATER,
+@@ -22,8 +21,6 @@ public enum ActivationType {
+     RAIDER,
+     MISC;
+ 
+-    AABB boundingBox = new AABB(0, 0, 0, 0, 0, 0);
+-
+     /**
+      * Returns the activation type for the given entity.
+      *

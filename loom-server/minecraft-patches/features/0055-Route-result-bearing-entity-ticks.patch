@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 11 Jul 2026 00:42:27 +0000
+Subject: [PATCH] Route result-bearing entity ticks
+
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 67982abed7b87bf21fee43cc96819ba71e1ce8a4..f17e9acd63a12c5ed6513f375d253f2f169eebea 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1417,13 +1417,25 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         this.guardEntityTick(this.tickNonPassengerConsumer, entity);
+     }
+ 
+-    // Multipart/boss entities (e.g. the Ender Dragon and its EnderDragonPart sub-entities) move and remove
+-    // across region boundaries within a single tick, which violates Moonrise's per-region "off-main" thread
+-    // check when ticked in a parallel region bucket. Such entities must be ticked on the world-owning thread,
+-    // which holds the full-level lease, so their cross-region move/remove always passes the thread check.
++    // Entities may require an immediate ordered callback result or mutate beyond a bounded region. Multipart
++    // dragon entities also move/remove across region boundaries. Tick either case on the world-owning thread,
++    // which holds the full-level lease and runs outside the staging window.
+     private static boolean mustTickOnRegionOwner(final Entity entity) {
+-        return entity instanceof net.minecraft.world.entity.boss.enderdragon.EnderDragon
+-            || entity instanceof net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
++        if (entity.requiresFullLevelTickOwnership()
++            || entity instanceof net.minecraft.world.entity.boss.enderdragon.EnderDragon
++            || entity instanceof net.minecraft.world.entity.boss.enderdragon.EnderDragonPart) {
++            return true;
++        }
++
++        // Passenger entries are skipped by tickOneEntity and tick recursively with their root vehicle. Route
++        // the whole tree to the owner if any descendant needs it, or that descendant would still tick staged.
++        final java.util.List<Entity> passengers = entity.getPassengers();
++        for (int i = 0, len = passengers.size(); i < len; ++i) {
++            if (mustTickOnRegionOwner(passengers.get(i))) {
++                return true;
++            }
++        }
++        return false;
+     }
+ 
+     // Tick entities bucketed by region, running non-adjacent regions concurrently. The non-adjacency
+@@ -1548,7 +1560,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             loomEntityDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_REPLAY, System.nanoTime() - loomReplayStart);
+         }
+         // The parallel phase has joined; we are back on the world-owning thread holding the full-level lease.
+-        // Tick the owner-bound (multipart/boss) entities here so their cross-region move/remove is on-owner.
++        // Tick owner-bound entities here so callbacks observe their result immediately and any wide mutation is on-owner.
+         if (ownerTick != null) {
+             for (int i = 0, n = ownerTick.size(); i < n; ++i) {
+                 this.tickOneEntity(ownerTick.get(i));
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index d6498ffc3b9a902ace8e87076cde73f322ca6758..3783b83ec942c6e74185a45958b6f9abd15760b7 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -5273,6 +5273,12 @@ public abstract class Entity
+         return false;
+     }
+ 
++    // Loom - entities whose tick requires an immediate result from globally ordered callbacks, or otherwise
++    // mutates beyond a bounded region, can opt out of shard staging and run under the world's full lease.
++    public boolean requiresFullLevelTickOwnership() {
++        return false;
++    }
++
+     public boolean mayInteract(final ServerLevel level, final BlockPos pos) {
+         return true;
+     }
+diff --git a/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java b/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java
+index 3465a5fc23f7f91fbfadceed2f74fe643fab390c..aa93a6eeb47cba381564abe681d293ffd111d6b4 100644
+--- a/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java
++++ b/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java
+@@ -81,6 +81,13 @@ public class MinecartHopper extends AbstractMinecartContainer implements Hopper
+         return false;
+     }
+ 
++    @Override
++    public boolean requiresFullLevelTickOwnership() {
++        // Hopper inventory events return cancellation and inventory substitutions synchronously. Until those
++        // operations have an owner-domain continuation, deferring the event would apply the transfer first.
++        return true;
++    }
++
+     @Override
+     public void tick() {
+         this.consumedItemThisFrame = false;

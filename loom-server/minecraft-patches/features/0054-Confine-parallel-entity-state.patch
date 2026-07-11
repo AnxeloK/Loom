@@ -1,0 +1,339 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 11 Jul 2026 00:42:18 +0000
+Subject: [PATCH] Confine parallel entity state
+
+
+diff --git a/io/papermc/paper/entity/activation/ActivationRange.java b/io/papermc/paper/entity/activation/ActivationRange.java
+index f44f9be27f8d3e5f3d9607f3618f40c8074f73cc..d4b69d8199ec4bdb232f72c07c148883f5c0082b 100644
+--- a/io/papermc/paper/entity/activation/ActivationRange.java
++++ b/io/papermc/paper/entity/activation/ActivationRange.java
+@@ -39,6 +39,7 @@ import net.minecraft.world.phys.AABB;
+ import org.spigotmc.SpigotWorldConfig;
+ import java.util.List;
+ import java.util.Set;
++import java.util.concurrent.atomic.AtomicInteger;
+ 
+ public final class ActivationRange {
+ 
+@@ -65,30 +66,46 @@ public final class ActivationRange {
+         final SpigotWorldConfig config = world.spigotConfig;
+         final long inactiveFor = currentTick(entity) - entity.activatedTick;
+         if (entity.activationType == ActivationType.VILLAGER) {
+-            if (inactiveFor > config.wakeUpInactiveVillagersEvery && world.wakeupInactiveRemainingVillagers > 0) {
+-                world.wakeupInactiveRemainingVillagers--;
++            if (inactiveFor > config.wakeUpInactiveVillagersEvery && consumeWakeup(world.wakeupInactiveRemainingVillagers)) {
+                 return config.wakeUpInactiveVillagersFor;
+             }
+         } else if (entity.activationType == ActivationType.ANIMAL) {
+-            if (inactiveFor > config.wakeUpInactiveAnimalsEvery && world.wakeupInactiveRemainingAnimals > 0) {
+-                world.wakeupInactiveRemainingAnimals--;
++            if (inactiveFor > config.wakeUpInactiveAnimalsEvery && consumeWakeup(world.wakeupInactiveRemainingAnimals)) {
+                 return config.wakeUpInactiveAnimalsFor;
+             }
+         } else if (entity.activationType == ActivationType.FLYING_MONSTER) {
+-            if (inactiveFor > config.wakeUpInactiveFlyingEvery && world.wakeupInactiveRemainingFlying > 0) {
+-                world.wakeupInactiveRemainingFlying--;
++            if (inactiveFor > config.wakeUpInactiveFlyingEvery && consumeWakeup(world.wakeupInactiveRemainingFlying)) {
+                 return config.wakeUpInactiveFlyingFor;
+             }
+         } else if (entity.activationType == ActivationType.MONSTER || entity.activationType == ActivationType.RAIDER) {
+-            if (inactiveFor > config.wakeUpInactiveMonstersEvery && world.wakeupInactiveRemainingMonsters > 0) {
+-                world.wakeupInactiveRemainingMonsters--;
++            if (inactiveFor > config.wakeUpInactiveMonstersEvery && consumeWakeup(world.wakeupInactiveRemainingMonsters)) {
+                 return config.wakeUpInactiveMonstersFor;
+             }
+         }
+         return -1;
+     }
+ 
+-    static AABB maxBB = new AABB(0, 0, 0, 0, 0, 0);
++    private static boolean consumeWakeup(final AtomicInteger remaining) {
++        int available;
++        while ((available = remaining.get()) > 0) {
++            if (remaining.compareAndSet(available, available - 1)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private static void replenishWakeups(final AtomicInteger remaining, final int maximum) {
++        int current;
++        int replenished;
++        do {
++            current = remaining.get();
++            replenished = Math.min(current + 1, maximum);
++            if (replenished == current) {
++                return;
++            }
++        } while (!remaining.compareAndSet(current, replenished));
++    }
+ 
+     /**
+      * These entities are excluded from Activation range checks.
+@@ -136,10 +153,10 @@ public final class ActivationRange {
+         final int waterActivationRange = world.spigotConfig.waterActivationRange;
+         final int flyingActivationRange = world.spigotConfig.flyingMonsterActivationRange;
+         final int villagerActivationRange = world.spigotConfig.villagerActivationRange;
+-        world.wakeupInactiveRemainingAnimals = Math.min(world.wakeupInactiveRemainingAnimals + 1, world.spigotConfig.wakeUpInactiveAnimals);
+-        world.wakeupInactiveRemainingVillagers = Math.min(world.wakeupInactiveRemainingVillagers + 1, world.spigotConfig.wakeUpInactiveVillagers);
+-        world.wakeupInactiveRemainingMonsters = Math.min(world.wakeupInactiveRemainingMonsters + 1, world.spigotConfig.wakeUpInactiveMonsters);
+-        world.wakeupInactiveRemainingFlying = Math.min(world.wakeupInactiveRemainingFlying + 1, world.spigotConfig.wakeUpInactiveFlying);
++        replenishWakeups(world.wakeupInactiveRemainingAnimals, world.spigotConfig.wakeUpInactiveAnimals);
++        replenishWakeups(world.wakeupInactiveRemainingVillagers, world.spigotConfig.wakeUpInactiveVillagers);
++        replenishWakeups(world.wakeupInactiveRemainingMonsters, world.spigotConfig.wakeUpInactiveMonsters);
++        replenishWakeups(world.wakeupInactiveRemainingFlying, world.spigotConfig.wakeUpInactiveFlying);
+ 
+         int maxRange = Math.max(monsterActivationRange, animalActivationRange);
+         maxRange = Math.max(maxRange, raiderActivationRange);
+@@ -156,23 +173,28 @@ public final class ActivationRange {
+             }
+ 
+             final int worldHeight = world.getHeight();
+-            ActivationRange.maxBB = player.getBoundingBox().inflate(maxRange, worldHeight, maxRange);
+-            ActivationType.MISC.boundingBox = player.getBoundingBox().inflate(miscActivationRange, worldHeight, miscActivationRange);
+-            ActivationType.RAIDER.boundingBox = player.getBoundingBox().inflate(raiderActivationRange, worldHeight, raiderActivationRange);
+-            ActivationType.ANIMAL.boundingBox = player.getBoundingBox().inflate(animalActivationRange, worldHeight, animalActivationRange);
+-            ActivationType.MONSTER.boundingBox = player.getBoundingBox().inflate(monsterActivationRange, worldHeight, monsterActivationRange);
+-            ActivationType.WATER.boundingBox = player.getBoundingBox().inflate(waterActivationRange, worldHeight, waterActivationRange);
+-            ActivationType.FLYING_MONSTER.boundingBox = player.getBoundingBox().inflate(flyingActivationRange, worldHeight, flyingActivationRange);
+-            ActivationType.VILLAGER.boundingBox = player.getBoundingBox().inflate(villagerActivationRange, worldHeight, villagerActivationRange);
++            final AABB playerBox = player.getBoundingBox();
++            final AABB maxBox = playerBox.inflate(maxRange, worldHeight, maxRange);
+ 
+-            final List<Entity> entities = world.getEntities((Entity) null, ActivationRange.maxBB, e -> true);
++            final List<Entity> entities = world.getEntities((Entity) null, maxBox, e -> true);
+             final boolean tickMarkers = world.paperConfig().entities.markers.tick;
+             for (final Entity entity : entities) {
+                 if (!tickMarkers && entity instanceof Marker) {
+                     continue;
+                 }
+ 
+-                ActivationRange.activateEntity(entity);
++                ActivationRange.activateEntity(
++                    entity,
++                    playerBox,
++                    worldHeight,
++                    waterActivationRange,
++                    flyingActivationRange,
++                    villagerActivationRange,
++                    monsterActivationRange,
++                    animalActivationRange,
++                    raiderActivationRange,
++                    miscActivationRange
++                );
+             }
+         }
+     }
+@@ -182,14 +204,57 @@ public final class ActivationRange {
+      *
+      * @param entity
+      */
+-    private static void activateEntity(final Entity entity) {
++    private static void activateEntity(
++        final Entity entity,
++        final AABB playerBox,
++        final int worldHeight,
++        final int waterActivationRange,
++        final int flyingActivationRange,
++        final int villagerActivationRange,
++        final int monsterActivationRange,
++        final int animalActivationRange,
++        final int raiderActivationRange,
++        final int miscActivationRange
++    ) {
+         final int currentTick = currentTick(entity);
+         if (currentTick > entity.activatedTick) {
+             if (entity.defaultActivationState) {
+                 entity.activatedTick = currentTick;
+                 return;
+             }
+-            if (entity.activationType.boundingBox.intersects(entity.getBoundingBox())) {
++            final int activationRange = switch (entity.activationType) {
++                case WATER -> waterActivationRange;
++                case FLYING_MONSTER -> flyingActivationRange;
++                case VILLAGER -> villagerActivationRange;
++                case MONSTER -> monsterActivationRange;
++                case ANIMAL -> animalActivationRange;
++                case RAIDER -> raiderActivationRange;
++                case MISC -> miscActivationRange;
++            };
++            double minX = playerBox.minX - activationRange;
++            double minZ = playerBox.minZ - activationRange;
++            double maxX = playerBox.maxX + activationRange;
++            double maxZ = playerBox.maxZ + activationRange;
++            // AABB's constructor normalizes inverted bounds. Preserve that behavior for negative configured
++            // ranges without allocating the per-category box on the normal positive-range path.
++            if (minX > maxX) {
++                final double swap = minX;
++                minX = maxX;
++                maxX = swap;
++            }
++            if (minZ > maxZ) {
++                final double swap = minZ;
++                minZ = maxZ;
++                maxZ = swap;
++            }
++            if (entity.getBoundingBox().intersects(
++                minX,
++                playerBox.minY - worldHeight,
++                minZ,
++                maxX,
++                playerBox.maxY + worldHeight,
++                maxZ
++            )) {
+                 entity.activatedTick = currentTick;
+             }
+         }
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index eb447bc00ac9da3681d3e9cc924d6e25ddff2a52..d6498ffc3b9a902ace8e87076cde73f322ca6758 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -176,31 +176,114 @@ public abstract class Entity
+ 
+     // Paper start - Share random for entities to make them more random
+     public static RandomSource SHARED_RANDOM = new RandomRandomSource();
+-    // Paper start - replace random
++    // Paper start - replace random; Loom - keep the shared facade while confining mutable state per tick thread
+     private static final class RandomRandomSource extends ca.spottedleaf.moonrise.common.util.ThreadUnsafeRandom {
+-        public RandomRandomSource() {
+-            this(net.minecraft.world.level.levelgen.RandomSupport.generateUniqueSeed());
++        private static final ThreadLocal<ca.spottedleaf.moonrise.common.util.ThreadUnsafeRandom> FALLBACK_RANDOM = ThreadLocal.withInitial(
++            () -> new ca.spottedleaf.moonrise.common.util.ThreadUnsafeRandom(
++                net.minecraft.world.level.levelgen.RandomSupport.generateUniqueSeed()
++            )
++        );
++        private boolean constructed;
++
++        private RandomRandomSource() {
++            super(net.minecraft.world.level.levelgen.RandomSupport.generateUniqueSeed());
++            this.constructed = true;
+         }
+ 
+-        public RandomRandomSource(long seed) {
+-            super(seed);
++        private static ca.spottedleaf.moonrise.common.util.ThreadUnsafeRandom current() {
++            final Thread thread = Thread.currentThread();
++            return thread instanceof ca.spottedleaf.moonrise.common.util.TickThread tickThread
++                ? tickThread.entityRandom
++                : FALLBACK_RANDOM.get();
+         }
+ 
+-        // Paper end - replace random
+-        private boolean locked = false;
++        @Override
++        public RandomSource fork() {
++            return current().fork();
++        }
+ 
+         @Override
+-        public synchronized void setSeed(long seed) {
+-            if (locked) {
+-                LOGGER.error("Ignoring setSeed on Entity.SHARED_RANDOM", new Throwable());
+-            } else {
++        public net.minecraft.world.level.levelgen.PositionalRandomFactory forkPositional() {
++            return current().forkPositional();
++        }
++
++        @Override
++        public void setSeed(final long seed) {
++            if (!this.constructed) {
++                // ThreadUnsafeRandom invokes this override from its constructor before the facade is published.
+                 super.setSeed(seed);
+-                locked = true;
++                return;
+             }
++            // Once published there is no single mutable stream that can be reseeded without racing workers.
++            LOGGER.error("Ignoring setSeed on Entity.SHARED_RANDOM", new Throwable());
++        }
++
++        @Override
++        public int next(final int bits) {
++            return current().next(bits);
++        }
++
++        @Override
++        public int nextInt() {
++            return current().nextInt();
++        }
++
++        @Override
++        public int nextInt(final int bound) {
++            return current().nextInt(bound);
++        }
++
++        @Override
++        public int nextIntBetweenInclusive(final int min, final int maxInclusive) {
++            return current().nextIntBetweenInclusive(min, maxInclusive);
++        }
++
++        @Override
++        public long nextLong() {
++            return current().nextLong();
++        }
++
++        @Override
++        public boolean nextBoolean() {
++            return current().nextBoolean();
++        }
++
++        @Override
++        public float nextFloat() {
++            return current().nextFloat();
++        }
++
++        @Override
++        public double nextDouble() {
++            return current().nextDouble();
++        }
++
++        @Override
++        public double nextGaussian() {
++            return current().nextGaussian();
++        }
++
++        @Override
++        public double triangle(final double mean, final double spread) {
++            return current().triangle(mean, spread);
++        }
++
++        @Override
++        public float triangle(final float mean, final float spread) {
++            return current().triangle(mean, spread);
++        }
++
++        @Override
++        public void consumeCount(final int rounds) {
++            current().consumeCount(rounds);
+         }
+ 
+-        // Paper - replace random
++        @Override
++        public int nextInt(final int origin, final int bound) {
++            return current().nextInt(origin, bound);
++        }
+     }
++    // Paper end - replace random
+     // Paper end - Share random for entities to make them more random
+     public org.bukkit.event.entity.CreatureSpawnEvent.@Nullable SpawnReason spawnReason; // Paper - Entity#getEntitySpawnReason
+ 
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index feb26eff43ec71f91b8c3e7cf5302146a94f59af..48429f7711ede4ddde6816b0af711dc58290dab9 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -157,10 +157,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+     public List<net.minecraft.world.entity.item.ItemEntity> captureDrops;
+     public final it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<SpawnCategory> ticksPerSpawnCategory = new it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<>();
+     // Paper start - EAR 2
+-    public int wakeupInactiveRemainingAnimals;
+-    public int wakeupInactiveRemainingFlying;
+-    public int wakeupInactiveRemainingMonsters;
+-    public int wakeupInactiveRemainingVillagers;
++    public final java.util.concurrent.atomic.AtomicInteger wakeupInactiveRemainingAnimals = new java.util.concurrent.atomic.AtomicInteger();
++    public final java.util.concurrent.atomic.AtomicInteger wakeupInactiveRemainingFlying = new java.util.concurrent.atomic.AtomicInteger();
++    public final java.util.concurrent.atomic.AtomicInteger wakeupInactiveRemainingMonsters = new java.util.concurrent.atomic.AtomicInteger();
++    public final java.util.concurrent.atomic.AtomicInteger wakeupInactiveRemainingVillagers = new java.util.concurrent.atomic.AtomicInteger();
+     // Paper end - EAR 2
+     public boolean populating;
+     public final org.spigotmc.SpigotWorldConfig spigotConfig; // Spigot
