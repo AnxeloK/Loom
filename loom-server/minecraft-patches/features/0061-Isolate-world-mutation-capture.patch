@@ -1,0 +1,1759 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 11 Jul 2026 11:11:30 +0000
+Subject: [PATCH] Isolate world mutation capture
+
+
+diff --git a/net/minecraft/core/dispenser/DispenseItemBehavior.java b/net/minecraft/core/dispenser/DispenseItemBehavior.java
+index 751232d09f5570a23223356a6572090e7d61139b..e280e4855a6f6f3fd19c3f6833579a8df0dbf739 100644
+--- a/net/minecraft/core/dispenser/DispenseItemBehavior.java
++++ b/net/minecraft/core/dispenser/DispenseItemBehavior.java
+@@ -337,39 +337,45 @@ public interface DispenseItemBehavior {
+                     return result;
+                 }
+                 // Paper end - Call BlockDispenseEvent
+-                level.captureTreeGeneration = true; // CraftBukkit
+-                if (!BoneMealItem.growCrop(dispensed, level, target) && !BoneMealItem.growWaterPlant(dispensed, level, target, null)) {
+-                    this.setSuccess(false);
+-                } else if (!level.isClientSide()) {
+-                    level.levelEvent(LevelEvent.PARTICLES_AND_SOUND_PLANT_GROWTH, target, 15);
+-                }
+-                // CraftBukkit start
+-                level.captureTreeGeneration = false;
+-                if (!level.capturedBlockStates.isEmpty()) {
+-                    org.bukkit.TreeType treeType = net.minecraft.world.level.block.SaplingBlock.treeType;
+-                    net.minecraft.world.level.block.SaplingBlock.treeType = null;
+-                    org.bukkit.Location location = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(target, level);
+-                    List<org.bukkit.block.BlockState> states = new java.util.ArrayList<>(level.capturedBlockStates.values());
+-                    level.capturedBlockStates.clear();
+-                    org.bukkit.event.world.StructureGrowEvent structureEvent = null;
+-                    if (treeType != null) {
+-                        structureEvent = new org.bukkit.event.world.StructureGrowEvent(location, treeType, false, null, states);
+-                        org.bukkit.Bukkit.getPluginManager().callEvent(structureEvent);
++                try (net.minecraft.world.level.LevelCaptureContext.Scope captureScope = level.beginCaptureContext(net.minecraft.world.level.LevelCaptureContext.TREE)) { // CraftBukkit
++                    if (!BoneMealItem.growCrop(dispensed, level, target) && !BoneMealItem.growWaterPlant(dispensed, level, target, null)) {
++                        this.setSuccess(false);
++                    } else if (!level.isClientSide()) {
++                        level.levelEvent(LevelEvent.PARTICLES_AND_SOUND_PLANT_GROWTH, target, 15);
+                     }
+-
++                    // CraftBukkit start
++                    final net.minecraft.world.level.LevelCaptureContext.Result captured = captureScope.freeze();
++                    if (!captured.blockStates().isEmpty()) {
++                    org.bukkit.TreeType treeType = captured.treeType();
++                    org.bukkit.Location location = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(target, level);
++                    List<org.bukkit.block.BlockState> states = new java.util.ArrayList<>(captured.blockStates().values());
++                    org.bukkit.event.world.StructureGrowEvent structureEvent = treeType == null
++                        ? null
++                        : new org.bukkit.event.world.StructureGrowEvent(location, treeType, false, null, states);
+                     org.bukkit.event.block.BlockFertilizeEvent fertilizeEvent = new org.bukkit.event.block.BlockFertilizeEvent(location.getBlock(), null, states);
+-                    fertilizeEvent.setCancelled(structureEvent != null && structureEvent.isCancelled());
+-                    org.bukkit.Bukkit.getPluginManager().callEvent(fertilizeEvent);
+-
+-                    if (!fertilizeEvent.isCancelled()) {
+-                        for (org.bukkit.block.BlockState state : states) {
+-                            org.bukkit.craftbukkit.block.CraftBlockState craftBlockState = (org.bukkit.craftbukkit.block.CraftBlockState) state;
+-                            craftBlockState.place(craftBlockState.getFlags());
+-                            source.level().checkCapturedTreeStateForObserverNotify(target, craftBlockState); // Paper - notify observers even if grow failed
++                    if (!net.minecraft.server.threading.RegionTickStaging.stageTreeDecision(
++                        structureEvent,
++                        fertilizeEvent,
++                        states,
++                        source.level(),
++                        target
++                    )) {
++                        if (structureEvent != null) {
++                            org.bukkit.Bukkit.getPluginManager().callEvent(structureEvent);
++                        }
++                        fertilizeEvent.setCancelled(structureEvent != null && structureEvent.isCancelled());
++                        org.bukkit.Bukkit.getPluginManager().callEvent(fertilizeEvent);
++                        if (!fertilizeEvent.isCancelled()) {
++                            for (org.bukkit.block.BlockState state : states) {
++                                org.bukkit.craftbukkit.block.CraftBlockState craftBlockState = (org.bukkit.craftbukkit.block.CraftBlockState) state;
++                                craftBlockState.place(craftBlockState.getFlags());
++                                source.level().checkCapturedTreeStateForObserverNotify(target, craftBlockState); // Paper - notify observers even if grow failed
++                            }
+                         }
+                     }
++                    }
++                    // CraftBukkit end
+                 }
+-                // CraftBukkit end
+ 
+                 return dispensed;
+             }
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 52eefa22787c45153feae72a45102ae3ee252375..cb3dbb2b74c6be2d47848ed5a196fe9e10b3aa29 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -2060,6 +2060,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             final net.minecraft.server.threading.TickRegions.RegionContext tickRegionContext =
+                 net.minecraft.server.threading.TickRegions.pushLevelContext(level);
+             try {
++                net.minecraft.server.threading.TickRegions.runFullLevelContinuations(level);
+                 level.tick(haveTime);
+             } catch (Throwable throwable) {
+                 CrashReport report = CrashReport.forThrowable(throwable, "Exception ticking world");
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index ebac9d496abef9128eab4c484de774e58bded183..8c557df764378dacc6afa223828f20d68bcafef2 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1849,8 +1849,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         } else {
+             if (entity instanceof net.minecraft.world.entity.item.ItemEntity item && item.getItem().isEmpty()) return false; // Paper - Prevent empty items from being added
+             // Paper start - capture all item additions to the world
+-            if (captureDrops != null && entity instanceof net.minecraft.world.entity.item.ItemEntity item) {
+-                captureDrops.add(item);
++            if (entity instanceof net.minecraft.world.entity.item.ItemEntity item && this.captureItemDrop(item)) {
+                 return true;
+             }
+             // Paper end - capture all item additions to the world
+@@ -2106,13 +2105,13 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             return;
+         }
+         // CraftBukkit end
+-        if (captureBlockStates) { return; } // Paper - Cancel all physics during placement
++        if (this.isCaptureModeActive(net.minecraft.world.level.LevelCaptureContext.BLOCK_STATES)) { return; } // Paper - Cancel all physics during placement
+         this.updateNeighborsAt(pos, sourceBlock, ExperimentalRedstoneUtils.initialOrientation(this, null, null));
+     }
+ 
+     @Override
+     public void updateNeighborsAt(final BlockPos pos, final Block sourceBlock, final @Nullable Orientation orientation) {
+-        if (captureBlockStates) { return; } // Paper - Cancel all physics during placement
++        if (this.isCaptureModeActive(net.minecraft.world.level.LevelCaptureContext.BLOCK_STATES)) { return; } // Paper - Cancel all physics during placement
+         this.neighborUpdater.updateNeighborsAtExceptFromFacing(pos, sourceBlock, null, orientation);
+     }
+ 
+diff --git a/net/minecraft/server/level/ServerPlayerGameMode.java b/net/minecraft/server/level/ServerPlayerGameMode.java
+index d7087b7f9aedd2be6695582c52ea8d191def62c7..2d346794dabcab16cf2fdc4b19d9fccc45d79cff 100644
+--- a/net/minecraft/server/level/ServerPlayerGameMode.java
++++ b/net/minecraft/server/level/ServerPlayerGameMode.java
+@@ -389,56 +389,57 @@ public class ServerPlayerGameMode {
+             } else {
+                 // CraftBukkit start
+                 org.bukkit.block.BlockState bState = bblock.getState();
+-                this.level.captureDrops = new java.util.ArrayList<>();
+-                // CraftBukkit end
+-                BlockState adjustedState = block.playerWillDestroy(this.level, pos, state, this.player);
+-                boolean changed = this.level.removeBlock(pos, false);
+-                if (SharedConstants.DEBUG_BLOCK_BREAK) {
+-                    LOGGER.info("server broke {} {} -> {}", pos, adjustedState, this.level.getBlockState(pos));
+-                }
++                try (net.minecraft.world.level.LevelCaptureContext.Scope captureScope = this.level.beginCaptureContext(net.minecraft.world.level.LevelCaptureContext.DROPS)) {
++                    // CraftBukkit end
++                    BlockState adjustedState = block.playerWillDestroy(this.level, pos, state, this.player);
++                    boolean changed = this.level.removeBlock(pos, false);
++                    if (SharedConstants.DEBUG_BLOCK_BREAK) {
++                        LOGGER.info("server broke {} {} -> {}", pos, adjustedState, this.level.getBlockState(pos));
++                    }
+ 
+-                if (changed) {
+-                    block.destroy(this.level, pos, adjustedState);
+-                }
++                    if (changed) {
++                        block.destroy(this.level, pos, adjustedState);
++                    }
+ 
+-                ItemStack mainHandStack = null; // Paper - Trigger bee_nest_destroyed trigger in the correct place
+-                boolean isCorrectTool = false; // Paper - Trigger bee_nest_destroyed trigger in the correct place
+-                if (this.player.preventsBlockDrops()) {
+-                    // return true; // CraftBukkit
+-                } else {
+-                    ItemStack itemStack = this.player.getMainHandItem();
+-                    ItemStack destroyedWith = itemStack.copy();
+-                    boolean canDestroy = this.player.hasCorrectToolForDrops(adjustedState);
+-                    mainHandStack = destroyedWith; // Paper - Trigger bee_nest_destroyed trigger in the correct place
+-                    isCorrectTool = canDestroy; // Paper - Trigger bee_nest_destroyed trigger in the correct place
+-                    itemStack.mineBlock(this.level, adjustedState, pos, this.player);
+-                    if (changed && canDestroy) { // CraftBukkit - Check if block should drop items // Paper - fix drops not preventing stats/food exhaustion
+-                        block.playerDestroy(this.level, this.player, pos, adjustedState, blockEntity, destroyedWith, event.isDropItems(), false); // Paper - fix drops not preventing stats/food exhaustion
++                    ItemStack mainHandStack = null; // Paper - Trigger bee_nest_destroyed trigger in the correct place
++                    boolean isCorrectTool = false; // Paper - Trigger bee_nest_destroyed trigger in the correct place
++                    if (this.player.preventsBlockDrops()) {
++                        // return true; // CraftBukkit
++                    } else {
++                        ItemStack itemStack = this.player.getMainHandItem();
++                        ItemStack destroyedWith = itemStack.copy();
++                        boolean canDestroy = this.player.hasCorrectToolForDrops(adjustedState);
++                        mainHandStack = destroyedWith; // Paper - Trigger bee_nest_destroyed trigger in the correct place
++                        isCorrectTool = canDestroy; // Paper - Trigger bee_nest_destroyed trigger in the correct place
++                        itemStack.mineBlock(this.level, adjustedState, pos, this.player);
++                        if (changed && canDestroy) { // CraftBukkit - Check if block should drop items // Paper - fix drops not preventing stats/food exhaustion
++                            block.playerDestroy(this.level, this.player, pos, adjustedState, blockEntity, destroyedWith, event.isDropItems(), false); // Paper - fix drops not preventing stats/food exhaustion
++                        }
++
++                        // return true; // CraftBukkit
+                     }
+ 
+-                    // return true; // CraftBukkit
+-                }
+-                // CraftBukkit start
+-                java.util.List<net.minecraft.world.entity.item.ItemEntity> itemsToDrop = this.level.captureDrops; // Paper - capture all item additions to the world
+-                this.level.captureDrops = null; // Paper - capture all item additions to the world; Remove this earlier so that we can actually drop stuff
+-                if (event.isDropItems()) {
+-                    org.bukkit.craftbukkit.event.CraftEventFactory.handleBlockDropItemEvent(bblock, bState, this.player, itemsToDrop); // Paper - capture all item additions to the world
+-                }
++                    // CraftBukkit start
++                    final net.minecraft.world.level.LevelCaptureContext.Result capturedDrops = captureScope.freeze();
++                    if (event.isDropItems()) {
++                        org.bukkit.craftbukkit.event.CraftEventFactory.handleBlockDropItemEvent(bblock, bState, this.player, capturedDrops.drops()); // Paper - capture all item additions to the world
++                    }
+ 
+-                // Drop event experience
+-                if (changed) {
+-                    state.getBlock().popExperience(this.level, pos, event.getExpToDrop(), this.player); // Paper
+-                }
+-                // Paper start - Trigger bee_nest_destroyed trigger in the correct place (check impls of block#playerDestroy)
+-                if (mainHandStack != null) {
+-                    if (changed && isCorrectTool && event.isDropItems() && block instanceof net.minecraft.world.level.block.BeehiveBlock && blockEntity instanceof net.minecraft.world.level.block.entity.BeehiveBlockEntity beehiveBlockEntity) { // simulates the guard on block#playerDestroy above
+-                        CriteriaTriggers.BEE_NEST_DESTROYED.trigger(player, state, mainHandStack, beehiveBlockEntity.getOccupantCount());
++                    // Drop event experience
++                    if (changed) {
++                        state.getBlock().popExperience(this.level, pos, event.getExpToDrop(), this.player); // Paper
+                     }
+-                }
+-                // Paper end - Trigger bee_nest_destroyed trigger in the correct place
++                    // Paper start - Trigger bee_nest_destroyed trigger in the correct place (check impls of block#playerDestroy)
++                    if (mainHandStack != null) {
++                        if (changed && isCorrectTool && event.isDropItems() && block instanceof net.minecraft.world.level.block.BeehiveBlock && blockEntity instanceof net.minecraft.world.level.block.entity.BeehiveBlockEntity beehiveBlockEntity) { // simulates the guard on block#playerDestroy above
++                            CriteriaTriggers.BEE_NEST_DESTROYED.trigger(player, state, mainHandStack, beehiveBlockEntity.getOccupantCount());
++                        }
++                    }
++                    // Paper end - Trigger bee_nest_destroyed trigger in the correct place
+ 
+-                return true;
+-                // CraftBukkit end
++                    return true;
++                    // CraftBukkit end
++                }
+             }
+         }
+     }
+diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
+index da74fc87491bed529212f6a2f6143026ca616bca..185abbc450eb03cf285854b0decd7950a7925f27 100644
+--- a/net/minecraft/server/threading/RegionTickStaging.java
++++ b/net/minecraft/server/threading/RegionTickStaging.java
+@@ -1,6 +1,7 @@
+ package net.minecraft.server.threading;
+ 
+ import ca.spottedleaf.moonrise.patches.chunk_system.level.entity.EntityLookup;
++import ca.spottedleaf.concurrentutil.util.Priority;
+ import java.util.ArrayList;
+ import java.util.List;
+ import java.util.concurrent.atomic.AtomicLong;
+@@ -10,6 +11,7 @@ import net.minecraft.core.SectionPos;
+ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.world.entity.Entity;
+ import net.minecraft.world.level.Level;
++import net.minecraft.world.level.LevelAccessor;
+ import net.minecraft.world.level.block.state.BlockState;
+ import net.minecraft.world.ticks.LevelTicks;
+ import net.minecraft.world.ticks.ScheduledTick;
+@@ -53,11 +55,78 @@ public final class RegionTickStaging {
+     private record StagedRemove(EntityLookup.EntityCallback callback, Entity.RemovalReason reason) {
+     }
+ 
+-    // A Bukkit event buffered during the parallel phase, with the buffer watermarks captured when it fired.
+-    // Everything the firing call site stages after the event — up to the next staged event — is the code the
+-    // event's cancellation gates (vanilla fires the event and checks isCancelled() before applying those side
+-    // effects). The watermarks let the replay veto exactly that span when a plugin cancels the event.
+-    private record StagedEvent(org.bukkit.event.Event event, int writesStart, int ticksStart, int spawnsStart) {
++    // A replay decision buffered during the parallel phase, with the buffer watermarks captured when it was
++    // staged. Every decision is a boundary even when it does not stage a block write itself: the next decision
++    // closes the preceding cancellable event's veto span at exactly the point the worker observed it.
++    private interface StagedDecision {
++        int writesStart();
++
++        int ticksStart();
++
++        int spawnsStart();
++    }
++
++    private record StagedEvent(org.bukkit.event.Event event, int writesStart, int ticksStart, int spawnsStart) implements StagedDecision {
++    }
++
++    // Tree growth has two sequential owner-side decisions. BlockFertilizeEvent inherits the result of the
++    // preceding StructureGrowEvent before its listeners run, and may then change that result. The final result
++    // controls a commit marker in the ordered block-write stream rather than making a worker wait for plugins.
++    // One object occupies both ordered streams: events use its decision watermarks, while block replay uses
++    // its write index and approval bit. That avoids allocating a separate commit wrapper for each growth.
++    private static final class StagedTreeDecision implements StagedDecision {
++        private final org.bukkit.event.world.StructureGrowEvent structureEvent;
++        private final org.bukkit.event.block.BlockFertilizeEvent fertilizeEvent;
++        private final int writesStart;
++        private final int ticksStart;
++        private final int spawnsStart;
++        private final List<org.bukkit.block.BlockState> states;
++        private final ServerLevel observerLevel;
++        private final BlockPos observerPos;
++        private boolean approved;
++
++        private StagedTreeDecision(
++            final org.bukkit.event.world.StructureGrowEvent structureEvent,
++            final org.bukkit.event.block.BlockFertilizeEvent fertilizeEvent,
++            final int writesStart,
++            final int ticksStart,
++            final int spawnsStart,
++            final List<org.bukkit.block.BlockState> states,
++            final ServerLevel observerLevel,
++            final BlockPos observerPos
++        ) {
++            this.structureEvent = structureEvent;
++            this.fertilizeEvent = fertilizeEvent;
++            this.writesStart = writesStart;
++            this.ticksStart = ticksStart;
++            this.spawnsStart = spawnsStart;
++            this.states = states;
++            this.observerLevel = observerLevel;
++            this.observerPos = observerPos;
++        }
++
++        private org.bukkit.event.world.StructureGrowEvent structureEvent() {
++            return this.structureEvent;
++        }
++
++        private org.bukkit.event.block.BlockFertilizeEvent fertilizeEvent() {
++            return this.fertilizeEvent;
++        }
++
++        @Override
++        public int writesStart() {
++            return this.writesStart;
++        }
++
++        @Override
++        public int ticksStart() {
++            return this.ticksStart;
++        }
++
++        @Override
++        public int spawnsStart() {
++            return this.spawnsStart;
++        }
+     }
+ 
+     private static final class Buffer {
+@@ -66,7 +135,8 @@ public final class RegionTickStaging {
+         List<StagedWrite> writes;
+         List<StagedTick> ticks;
+         List<StagedSpawn> spawns;
+-        List<StagedEvent> events;
++        List<StagedDecision> events;
++        List<StagedTreeDecision> conditionalCommits;
+         // Deferred entity moves, COALESCED per entity: an entity may setPos() many times in one tick, but a
+         // single applyMove() at replay reads its current (final) position and re-sections it once. The callback
+         // carries the last staging-session id it joined, so this ordered list needs neither hashing nor one map
+@@ -233,6 +303,48 @@ public final class RegionTickStaging {
+         return true;
+     }
+ 
++    // Stage a tree-growth decision without synchronously crossing back to the owner. Both events are optional:
++    // natural growth only has StructureGrowEvent, while a growth operation without a known tree type may have
++    // only BlockFertilizeEvent (or neither event but still needs an ordered owner-side commit). When both are
++    // present they replay in vanilla order, with StructureGrowEvent cancellation copied to BlockFertilizeEvent
++    // before fertilize listeners run. The action executes once at this exact block-write boundary only when the
++    // final applicable event permits it. Returns false outside a staging window and performs no work itself.
++    public static boolean stageTreeDecision(
++        final org.bukkit.event.world.StructureGrowEvent structureEvent,
++        final org.bukkit.event.block.BlockFertilizeEvent fertilizeEvent,
++        final List<org.bukkit.block.BlockState> states,
++        final ServerLevel observerLevel,
++        final BlockPos observerPos
++    ) {
++        final Buffer buffer = CURRENT.get();
++        if (buffer == null) {
++            return false;
++        }
++        java.util.Objects.requireNonNull(states, "states");
++        java.util.Objects.requireNonNull(observerLevel, "observerLevel");
++        java.util.Objects.requireNonNull(observerPos, "observerPos");
++        if (buffer.events == null) {
++            buffer.events = new ArrayList<>();
++        }
++        if (buffer.conditionalCommits == null) {
++            buffer.conditionalCommits = new ArrayList<>();
++        }
++        final int writesStart = size(buffer.writes);
++        final StagedTreeDecision decision = new StagedTreeDecision(
++            structureEvent,
++            fertilizeEvent,
++            writesStart,
++            size(buffer.ticks),
++            size(buffer.spawns),
++            states,
++            observerLevel,
++            observerPos.immutable()
++        );
++        buffer.conditionalCommits.add(decision);
++        buffer.events.add(decision);
++        return true;
++    }
++
+     private static int size(final List<?> list) {
+         return list == null ? 0 : list.size();
+     }
+@@ -350,13 +462,18 @@ public final class RegionTickStaging {
+         // is allocated until a replayed event actually cancels.
+         it.unimi.dsi.fastutil.longs.LongOpenHashSet vetoed = null;
+         for (Buffer buffer = buffers; buffer != null; buffer = buffer.next) {
+-            final List<StagedEvent> events = buffer.events;
++            final List<StagedDecision> events = buffer.events;
+             if (events == null) {
+                 continue;
+             }
+             for (int i = 0, len = events.size(); i < len; ++i) {
+-                final StagedEvent mark = events.get(i);
+-                final org.bukkit.event.Event event = mark.event();
++                final StagedDecision mark = events.get(i);
++                if (mark instanceof StagedTreeDecision treeDecision) {
++                    replayTreeDecision(treeDecision);
++                    continue;
++                }
++                final StagedEvent stagedEvent = (StagedEvent) mark;
++                final org.bukkit.event.Event event = stagedEvent.event();
+                 try {
+                     org.bukkit.Bukkit.getPluginManager().callEvent(event);
+                 } catch (final Throwable t) {
+@@ -411,21 +528,68 @@ public final class RegionTickStaging {
+                 }
+             }
+         }
+-        int vetoedWrites = 0;
+-        for (Buffer buffer = buffers; buffer != null; buffer = buffer.next) {
+-            final List<StagedWrite> writes = buffer.writes;
+-            if (writes == null) {
+-                continue;
+-            }
+-            for (int i = 0, len = writes.size(); i < len; ++i) {
+-                final StagedWrite w = writes.get(i);
+-                if ((buffer.vetoWrites != null && buffer.vetoWrites.get(i))
+-                    || (vetoed != null && vetoed.contains(w.pos().asLong()))) {
+-                    vetoedWrites++;
++        replayWritesAndFinish(buffers, buffers, 0, 0, 0, owningWorld, vetoed);
++    }
++
++    private static void replayWritesAndFinish(
++        final Buffer buffers,
++        Buffer currentBuffer,
++        int writeIndex,
++        int commitIndex,
++        int vetoedWrites,
++        final ServerLevel owningWorld,
++        final it.unimi.dsi.fastutil.longs.LongOpenHashSet vetoed
++    ) {
++        while (currentBuffer != null) {
++            final List<StagedWrite> writes = currentBuffer.writes;
++            final List<StagedTreeDecision> commits = currentBuffer.conditionalCommits;
++            final int writesSize = size(writes);
++            final int commitsSize = size(commits);
++            for (int i = writeIndex; i <= writesSize; ++i) {
++                while (commitIndex < commitsSize && commits.get(commitIndex).writesStart == i) {
++                    final StagedTreeDecision commit = commits.get(commitIndex++);
++                    if (!commit.approved) {
++                        continue;
++                    }
++                    final Buffer resumeBuffer = currentBuffer;
++                    final int resumeWriteIndex = i;
++                    final int resumeCommitIndex = commitIndex;
++                    final int resumeVetoedWrites = vetoedWrites;
++                    try {
++                        if (!commitTreeStates(
++                            commit,
++                            owningWorld,
++                            0,
++                            () -> resumeReplay(
++                                buffers,
++                                resumeBuffer,
++                                resumeWriteIndex,
++                                resumeCommitIndex,
++                                resumeVetoedWrites,
++                                owningWorld,
++                                vetoed
++                            )
++                        )) {
++                            return;
++                        }
++                    } catch (final Throwable throwable) {
++                        LOGGER.error("Deferred tree commit failed", throwable);
++                    }
++                }
++                if (i == writesSize) {
++                    break;
++                }
++                final StagedWrite write = writes.get(i);
++                if ((currentBuffer.vetoWrites != null && currentBuffer.vetoWrites.get(i))
++                    || (vetoed != null && vetoed.contains(write.pos().asLong()))) {
++                    ++vetoedWrites;
+                 } else {
+-                    applyStagedWrite(w);
++                    applyStagedWrite(write);
+                 }
+             }
++            currentBuffer = currentBuffer.next;
++            writeIndex = 0;
++            commitIndex = 0;
+         }
+         if (VETO_DEBUG && vetoedWrites > 0) {
+             LOGGER.info("Loom parallel veto: skipped {} staged writes from cancelled events this phase", vetoedWrites);
+@@ -498,6 +662,205 @@ public final class RegionTickStaging {
+         }
+     }
+ 
++    private static void resumeReplay(
++        final Buffer buffers,
++        final Buffer buffer,
++        final int writeIndex,
++        final int commitIndex,
++        final int vetoedWrites,
++        final ServerLevel owningWorld,
++        final it.unimi.dsi.fastutil.longs.LongOpenHashSet vetoed
++    ) {
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.region(
++                owningWorld,
++                Integer.MIN_VALUE,
++                Integer.MIN_VALUE,
++                Integer.MAX_VALUE,
++                Integer.MAX_VALUE,
++                "staged-replay-continuation"
++            ),
++            () -> replayWritesAndFinish(
++                buffers,
++                buffer,
++                writeIndex,
++                commitIndex,
++                vetoedWrites,
++                owningWorld,
++                vetoed
++            )
++        );
++    }
++
++    private static boolean commitTreeStates(
++        final StagedTreeDecision decision,
++        final ServerLevel owningWorld,
++        int stateIndex,
++        final Runnable completion
++    ) {
++        final List<org.bukkit.block.BlockState> states = decision.states;
++        while (stateIndex < states.size()) {
++            final org.bukkit.craftbukkit.block.CraftBlockState state =
++                (org.bukkit.craftbukkit.block.CraftBlockState) states.get(stateIndex);
++            final LevelAccessor target = state.getWorldHandle();
++            if (target instanceof ServerLevel targetLevel && state.isPlaced()) {
++                final int chunkX = SectionPos.blockToSectionCoord(state.getX());
++                final int chunkZ = SectionPos.blockToSectionCoord(state.getZ());
++                if (!hasReadyOwner(targetLevel, chunkX, chunkZ)) {
++                    deferTreeState(targetLevel, chunkX, chunkZ, decision, owningWorld, stateIndex, completion);
++                    return false;
++                }
++            }
++
++            state.place(state.getFlags());
++            final int observerChunkX = SectionPos.blockToSectionCoord(state.getX());
++            final int observerChunkZ = SectionPos.blockToSectionCoord(state.getZ());
++            if (!hasReadyOwner(decision.observerLevel, observerChunkX, observerChunkZ)) {
++                deferTreeObserver(decision, owningWorld, stateIndex, completion);
++                return false;
++            }
++            decision.observerLevel.checkCapturedTreeStateForObserverNotify(decision.observerPos, state);
++            ++stateIndex;
++        }
++        return true;
++    }
++
++    private static boolean hasReadyOwner(final ServerLevel level, final int chunkX, final int chunkZ) {
++        return level.getChunkSource().getChunkAtIfLoadedImmediately(chunkX, chunkZ) != null
++            && net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(level, chunkX, chunkZ)
++            && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, chunkX, chunkZ);
++    }
++
++    private static void deferTreeState(
++        final ServerLevel level,
++        final int chunkX,
++        final int chunkZ,
++        final StagedTreeDecision decision,
++        final ServerLevel owningWorld,
++        final int stateIndex,
++        final Runnable completion
++    ) {
++        final Runnable continuation = () -> resumeTreeCommit(decision, owningWorld, stateIndex, completion);
++        if (level.getChunkSource().getChunkAtIfLoadedImmediately(chunkX, chunkZ) == null) {
++            net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
++                level,
++                chunkX,
++                chunkZ,
++                chunkX,
++                chunkZ,
++                Priority.HIGHER,
++                "staged-tree-commit",
++                ignored -> continuation.run()
++            ).whenComplete((ignored, failure) -> {
++                if (failure != null) {
++                    LOGGER.error("Deferred tree chunk load failed", failure);
++                    runTreeCompletion(completion);
++                }
++            });
++            return;
++        }
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.region(level, chunkX, chunkZ, "staged-tree-commit"),
++            continuation
++        );
++    }
++
++    private static void deferTreeObserver(
++        final StagedTreeDecision decision,
++        final ServerLevel owningWorld,
++        final int stateIndex,
++        final Runnable completion
++    ) {
++        final org.bukkit.craftbukkit.block.CraftBlockState state =
++            (org.bukkit.craftbukkit.block.CraftBlockState) decision.states.get(stateIndex);
++        final int chunkX = SectionPos.blockToSectionCoord(state.getX());
++        final int chunkZ = SectionPos.blockToSectionCoord(state.getZ());
++        final Runnable continuation = () -> {
++            try {
++                decision.observerLevel.checkCapturedTreeStateForObserverNotify(decision.observerPos, state);
++            } catch (final Throwable throwable) {
++                LOGGER.error("Deferred tree observer notification failed", throwable);
++                runTreeCompletion(completion);
++                return;
++            }
++            resumeTreeCommit(decision, owningWorld, stateIndex + 1, completion);
++        };
++        final ServerLevel observerLevel = decision.observerLevel;
++        if (observerLevel.getChunkSource().getChunkAtIfLoadedImmediately(chunkX, chunkZ) == null) {
++            net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
++                observerLevel,
++                chunkX,
++                chunkZ,
++                chunkX,
++                chunkZ,
++                Priority.HIGHER,
++                "staged-tree-observer",
++                ignored -> continuation.run()
++            ).whenComplete((ignored, failure) -> {
++                if (failure != null) {
++                    LOGGER.error("Deferred tree observer chunk load failed", failure);
++                    runTreeCompletion(completion);
++                }
++            });
++            return;
++        }
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.region(observerLevel, chunkX, chunkZ, "staged-tree-observer"),
++            continuation
++        );
++    }
++
++    private static void resumeTreeCommit(
++        final StagedTreeDecision decision,
++        final ServerLevel owningWorld,
++        final int stateIndex,
++        final Runnable completion
++    ) {
++        final boolean completed;
++        try {
++            completed = commitTreeStates(decision, owningWorld, stateIndex, completion);
++        } catch (final Throwable throwable) {
++            LOGGER.error("Deferred tree commit failed", throwable);
++            runTreeCompletion(completion);
++            return;
++        }
++        if (completed) {
++            runTreeCompletion(completion);
++        }
++    }
++
++    private static void runTreeCompletion(final Runnable completion) {
++        try {
++            completion.run();
++        } catch (final Throwable throwable) {
++            LOGGER.error("Deferred tree replay continuation failed", throwable);
++        }
++    }
++
++    private static void replayTreeDecision(final StagedTreeDecision decision) {
++        final org.bukkit.event.world.StructureGrowEvent structureEvent = decision.structureEvent();
++        if (structureEvent != null) {
++            try {
++                org.bukkit.Bukkit.getPluginManager().callEvent(structureEvent);
++            } catch (final Throwable t) {
++                LOGGER.error("Deferred StructureGrowEvent dispatch failed", t);
++            }
++        }
++
++        final org.bukkit.event.block.BlockFertilizeEvent fertilizeEvent = decision.fertilizeEvent();
++        if (fertilizeEvent != null) {
++            fertilizeEvent.setCancelled(structureEvent != null && structureEvent.isCancelled());
++            try {
++                org.bukkit.Bukkit.getPluginManager().callEvent(fertilizeEvent);
++            } catch (final Throwable t) {
++                LOGGER.error("Deferred BlockFertilizeEvent dispatch failed", t);
++            }
++            decision.approved = !fertilizeEvent.isCancelled();
++        } else {
++            decision.approved = structureEvent == null || !structureEvent.isCancelled();
++        }
++    }
++
+     // Replay one staged block write on the thread that owns the target chunk's region. The calling thread
+     // holds the owning world's full-level lease, so for a write into this world it already owns the target
+     // region and takes the inline fast path. The cross-region routing is a defensive fallback: if a write's
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index 65fcc768b6af4bd7df384786a157f08939fd56f3..67b63540c9b3f17c8bf485530786befab35e3d1f 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -1365,6 +1365,25 @@ public class TickRegions {
+         stateFor(world).drainMailbox();
+     }
+ 
++    public static void runFullLevelContinuations(final ServerLevel world) {
++        if (!isCurrentThreadOwnerQuiet(
++            world,
++            Integer.MIN_VALUE,
++            Integer.MIN_VALUE,
++            Integer.MAX_VALUE,
++            Integer.MAX_VALUE
++        )) {
++            throw new IllegalStateException("Full-level continuation requires the world's full region owner");
++        }
++        stateFor(world).drainFullLevelContinuations();
++    }
++
++    public static void sendFullLevelContinuation(final ServerLevel world, final Runnable action) {
++        Objects.requireNonNull(world, "World may not be null");
++        Objects.requireNonNull(action, "Action may not be null");
++        stateFor(world).enqueueFullLevelContinuation(action);
++    }
++
+     // Loom - tick independent worlds through the same cooperative batch as region shards. The server thread
+     // participates with its GLOBAL_CONTROL owner temporarily detached; nested world coordinators help ready
+     // region work but do not recursively enter another world tick. Failures remain deterministic by world
+@@ -1602,6 +1621,7 @@ public class TickRegions {
+         private final Object lock = new Object();
+         private final Map<Long, List<RegionScheduledTask>> tasksByDeadline = new HashMap<>();
+         private final ArrayDeque<CrossRegionMessage> mailbox = new ArrayDeque<>();
++        private final ArrayDeque<Runnable> fullLevelContinuations = new ArrayDeque<>();
+         private long tickCount;
+         private long scheduledTaskCount;
+         private long executedTaskCount;
+@@ -1738,6 +1758,38 @@ public class TickRegions {
+             }
+         }
+ 
++        private void enqueueFullLevelContinuation(final Runnable action) {
++            synchronized (this.lock) {
++                this.fullLevelContinuations.addLast(action);
++            }
++        }
++
++        private void drainFullLevelContinuations() {
++            final List<Runnable> continuations;
++            synchronized (this.lock) {
++                if (this.fullLevelContinuations.isEmpty()) {
++                    return;
++                }
++                continuations = new ArrayList<>(this.fullLevelContinuations);
++                this.fullLevelContinuations.clear();
++            }
++            for (int i = 0, len = continuations.size(); i < len; ++i) {
++                try {
++                    continuations.get(i).run();
++                } catch (final Throwable throwable) {
++                    recordDiagnostic(
++                        DiagnosticType.MAILBOX_MESSAGE_DROPPED,
++                        this.world,
++                        Integer.MIN_VALUE,
++                        Integer.MIN_VALUE,
++                        Integer.MAX_VALUE,
++                        Integer.MAX_VALUE,
++                        "Full-level continuation threw exception: " + throwable
++                    );
++                }
++            }
++        }
++
+         private List<CrossRegionMessage> collectMailboxBudgeted() {
+             synchronized (this.lock) {
+                 final int available = this.mailbox.size();
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index 154cef0e1f291d9b8ab0e8644ab79b5782b11f70..61b7b42acbc23d01f6fc1b62fa46cd18ba5ed627 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -390,6 +390,10 @@ public final class OwnerDomainExecutor {
+         if (level == null) {
+             throw new RejectedExecutionException("Region owner has no level: " + owner.describe());
+         }
++        if (isFullLevelRegion(owner, level)) {
++            TickRegions.sendFullLevelContinuation(level, wrap(owner, task));
++            return;
++        }
+         TickRegions.sendCrossRegionMessage(
+             level,
+             owner.chunkX(),
+diff --git a/net/minecraft/world/item/ItemStack.java b/net/minecraft/world/item/ItemStack.java
+index 54d67c847c1de9ee216cedb0527136f50223ea2d..22ac5c5f62f558038df2b34d6fab627dab2e6b2a 100644
+--- a/net/minecraft/world/item/ItemStack.java
++++ b/net/minecraft/world/item/ItemStack.java
+@@ -382,29 +382,26 @@ public final class ItemStack implements DataComponentHolder, ItemInstance {
+             ServerLevel level = (ServerLevel) context.getLevel();
+             boolean isBonemeal = usedItem == Items.BONE_MEAL;
+ 
+-            if (!(usedItem instanceof BucketItem)) {
+-                level.captureBlockStates = true;
+-                if (isBonemeal) {
+-                    level.captureTreeGeneration = true;
+-                }
+-            }
+-            InteractionResult result;
++            net.minecraft.world.level.LevelCaptureContext.Scope captureScope = null;
+             try {
+-                result = usedItem.useOn(context);
+-            } finally {
+-                level.captureBlockStates = false;
+-            }
+-            DataComponentPatch newPatch = this.components.asPatch();
+-            int newCount = this.getCount();
+-            this.setCount(previousCount);
+-            this.restorePatch(previousPatch);
+-            if (result.consumesAction() && level.captureTreeGeneration && !level.capturedBlockStates.isEmpty()) {
+-                level.captureTreeGeneration = false;
++                if (!(usedItem instanceof BucketItem)) {
++                    final int captureModes = net.minecraft.world.level.LevelCaptureContext.BLOCK_STATES
++                        | (isBonemeal ? net.minecraft.world.level.LevelCaptureContext.TREE : 0);
++                    captureScope = level.beginCaptureContext(captureModes);
++                }
++                InteractionResult result = usedItem.useOn(context);
++                final net.minecraft.world.level.LevelCaptureContext.Result captured = captureScope == null ? null : captureScope.freeze();
++                DataComponentPatch newPatch = this.components.asPatch();
++                int newCount = this.getCount();
++                this.setCount(previousCount);
++                this.restorePatch(previousPatch);
++                if (result.consumesAction()
++                    && captured != null
++                    && captured.hasMode(net.minecraft.world.level.LevelCaptureContext.TREE)
++                    && !captured.blockStates().isEmpty()) {
+                 org.bukkit.Location location = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(pos, level);
+-                org.bukkit.TreeType treeType = net.minecraft.world.level.block.SaplingBlock.treeType;
+-                net.minecraft.world.level.block.SaplingBlock.treeType = null;
+-                List<org.bukkit.craftbukkit.block.CraftBlockState> blocks = new java.util.ArrayList<>(level.capturedBlockStates.values());
+-                level.capturedBlockStates.clear();
++                org.bukkit.TreeType treeType = captured.treeType();
++                List<org.bukkit.craftbukkit.block.CraftBlockState> blocks = new java.util.ArrayList<>(captured.blockStates().values());
+                 org.bukkit.event.world.StructureGrowEvent structureEvent = null;
+                 if (treeType != null) {
+                     structureEvent = new org.bukkit.event.world.StructureGrowEvent(location, treeType, isBonemeal, (org.bukkit.entity.Player) player.getBukkitEntity(), (List<org.bukkit.block.BlockState>) (List<? extends org.bukkit.block.BlockState>) blocks);
+@@ -429,15 +426,14 @@ public final class ItemStack implements DataComponentHolder, ItemInstance {
+                     player.awardStat(Stats.ITEM_USED.get(usedItem)); // SPIGOT-7236 - award stat
+                 }
+ 
+-                SignItem.openSign = null; // SPIGOT-6758 - Reset on early return
+                 return result;
+             }
+-            level.captureTreeGeneration = false;
+             if (player != null && result instanceof InteractionResult.Success success && success.wasItemInteraction()) {
+                 InteractionHand hand = context.getHand();
+                 org.bukkit.event.block.BlockPlaceEvent placeEvent = null;
+-                List<org.bukkit.block.BlockState> blocks = new java.util.ArrayList<>(level.capturedBlockStates.values());
+-                level.capturedBlockStates.clear();
++                List<org.bukkit.block.BlockState> blocks = captured == null
++                    ? new java.util.ArrayList<>()
++                    : new java.util.ArrayList<>(captured.blockStates().values());
+                 if (blocks.size() > 1) {
+                     placeEvent = org.bukkit.craftbukkit.event.CraftEventFactory.callBlockMultiPlaceEvent(level, player, hand, blocks, pos);
+                 } else if (blocks.size() == 1 && usedItem != Items.POWDER_SNOW_BUCKET) { // Paper - Fix cancelled powdered snow bucket placement
+@@ -448,13 +444,10 @@ public final class ItemStack implements DataComponentHolder, ItemInstance {
+                     result = InteractionResult.FAIL; // cancel placement
+                     // PAIL: Remove this when MC-99075 fixed
+                     player.containerMenu.forceHeldSlot(hand);
+-                    level.capturedTileEntities.clear(); // Paper - Allow chests to be placed with NBT data; clear out block entities as chests and such will pop loot
+                     // revert back all captured blocks
+                     for (org.bukkit.block.BlockState blockstate : blocks) {
+                         ((org.bukkit.craftbukkit.block.CraftBlockState) blockstate).revertPlace();
+                     }
+-
+-                    SignItem.openSign = null; // SPIGOT-6758 - Reset on early return
+                 } else {
+                     // Change the stack to its new contents if it hasn't been tampered with.
+                     if (this.getCount() == previousCount && Objects.equals(this.components.asPatch(), previousPatch)) {
+@@ -462,8 +455,10 @@ public final class ItemStack implements DataComponentHolder, ItemInstance {
+                         this.setCount(newCount);
+                     }
+ 
+-                    for (java.util.Map.Entry<BlockPos, net.minecraft.world.level.block.entity.BlockEntity> e : level.capturedTileEntities.entrySet()) {
+-                        level.setBlockEntity(e.getValue());
++                    if (captured != null) {
++                        for (java.util.Map.Entry<BlockPos, net.minecraft.world.level.block.entity.BlockEntity> e : captured.blockEntities().entrySet()) {
++                            level.setBlockEntity(e.getValue());
++                        }
+                     }
+ 
+                     for (org.bukkit.block.BlockState blockstate : blocks) {
+@@ -497,15 +492,12 @@ public final class ItemStack implements DataComponentHolder, ItemInstance {
+                     }
+ 
+                     // SPIGOT-4678
+-                    if (usedItem instanceof SignItem && SignItem.openSign != null) {
+-                        try {
+-                            if (level.getBlockEntity(SignItem.openSign) instanceof net.minecraft.world.level.block.entity.SignBlockEntity blockEntity) {
+-                                if (level.getBlockState(SignItem.openSign).getBlock() instanceof net.minecraft.world.level.block.SignBlock signBlock) {
+-                                    signBlock.openTextEdit(player, blockEntity, true, io.papermc.paper.event.player.PlayerOpenSignEvent.Cause.PLACE); // CraftBukkit // Paper - Add PlayerOpenSignEvent
+-                                }
++                    final BlockPos openSign = captured == null ? null : captured.openSign();
++                    if (usedItem instanceof SignItem && openSign != null) {
++                        if (level.getBlockEntity(openSign) instanceof net.minecraft.world.level.block.entity.SignBlockEntity blockEntity) {
++                            if (level.getBlockState(openSign).getBlock() instanceof net.minecraft.world.level.block.SignBlock signBlock) {
++                                signBlock.openTextEdit(player, blockEntity, true, io.papermc.paper.event.player.PlayerOpenSignEvent.Cause.PLACE); // CraftBukkit // Paper - Add PlayerOpenSignEvent
+                             }
+-                        } finally {
+-                            SignItem.openSign = null;
+                         }
+                     }
+ 
+@@ -532,11 +524,14 @@ public final class ItemStack implements DataComponentHolder, ItemInstance {
+                     player.awardStat(Stats.ITEM_USED.get(usedItem));
+                 }
+             }
+-            level.capturedTileEntities.clear();
+-            level.capturedBlockStates.clear();
+             // CraftBukkit end
+ 
+             return result;
++            } finally {
++                if (captureScope != null) {
++                    captureScope.close();
++                }
++            }
+         }
+     }
+ 
+diff --git a/net/minecraft/world/item/SignItem.java b/net/minecraft/world/item/SignItem.java
+index 3b84ebb898c867289eaef934321b5252db21a708..4fa12d36c996d5ada8a9a33373389f4340939966 100644
+--- a/net/minecraft/world/item/SignItem.java
++++ b/net/minecraft/world/item/SignItem.java
+@@ -11,7 +11,6 @@ import net.minecraft.world.level.block.state.BlockState;
+ import org.jspecify.annotations.Nullable;
+ 
+ public class SignItem extends StandingAndWallBlockItem {
+-    public static BlockPos openSign; // CraftBukkit
+     public SignItem(final Block sign, final Block wallSign, final Item.Properties properties) {
+         super(sign, wallSign, Direction.DOWN, properties);
+     }
+@@ -32,7 +31,7 @@ public class SignItem extends StandingAndWallBlockItem {
+             && level.getBlockState(pos).getBlock() instanceof SignBlock sign) {
+             // CraftBukkit start - SPIGOT-4678
+             // sign.openTextEdit(player, signEntity, true);
+-            SignItem.openSign = pos;
++            level.setCapturedOpenSign(pos);
+             // CraftBukkit end
+         }
+ 
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index 48429f7711ede4ddde6816b0af711dc58290dab9..176754124047d79da83ab9ea8bf7fa8143256998 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -149,12 +149,6 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+     private final CraftWorld world;
+     public org.bukkit.generator.@Nullable ChunkGenerator generator;
+ 
+-    public boolean captureBlockStates = false;
+-    public boolean captureTreeGeneration = false;
+-    public Map<BlockPos, org.bukkit.craftbukkit.block.CraftBlockState> capturedBlockStates = new java.util.LinkedHashMap<>(); // Paper
+-    public Map<BlockPos, BlockEntity> capturedTileEntities = new java.util.LinkedHashMap<>(); // Paper - Retain block place order when capturing blockstates
+-    @Nullable
+-    public List<net.minecraft.world.entity.item.ItemEntity> captureDrops;
+     public final it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<SpawnCategory> ticksPerSpawnCategory = new it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<>();
+     // Paper start - EAR 2
+     public final java.util.concurrent.atomic.AtomicInteger wakeupInactiveRemainingAnimals = new java.util.concurrent.atomic.AtomicInteger();
+@@ -183,6 +177,45 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+     public CraftServer getCraftServer() {
+         return (CraftServer) org.bukkit.Bukkit.getServer();
+     }
++
++    // Loom start - owner-confined world mutation capture
++    public final LevelCaptureContext.Scope beginCaptureContext(final int modes) {
++        return LevelCaptureContext.begin(this, modes);
++    }
++
++    public final LevelCaptureContext.@Nullable Frame currentCaptureContext() {
++        return LevelCaptureContext.current(this);
++    }
++
++    public final boolean isCaptureModeActive(final int mode) {
++        final LevelCaptureContext.Frame context = this.currentCaptureContext();
++        return context != null && context.hasMode(mode);
++    }
++
++    public final void setCapturedTreeType(final org.bukkit.TreeType treeType) {
++        final LevelCaptureContext.Frame context = this.currentCaptureContext();
++        if (context != null && context.hasMode(LevelCaptureContext.TREE)) {
++            context.setTreeType(treeType);
++        }
++    }
++
++    public final void setCapturedOpenSign(final BlockPos pos) {
++        final LevelCaptureContext.Frame context = this.currentCaptureContext();
++        if (context != null && context.hasMode(LevelCaptureContext.BLOCK_STATES)) {
++            context.setOpenSign(pos);
++        }
++    }
++
++    public final boolean captureItemDrop(final net.minecraft.world.entity.item.ItemEntity item) {
++        final LevelCaptureContext.Frame context = this.currentCaptureContext();
++        if (context == null || !context.hasMode(LevelCaptureContext.DROPS)) {
++            return false;
++        }
++        context.captureDrop(item);
++        return true;
++    }
++    // Loom end - owner-confined world mutation capture
++
+     // Paper start - Use getChunkIfLoadedImmediately
+     @Override
+     public boolean hasChunk(int chunkX, int chunkZ) {
+@@ -987,8 +1020,9 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+     @Nullable
+     public final BlockState getBlockStateIfLoaded(BlockPos pos) {
+         // CraftBukkit start - tree generation
+-        if (this.captureTreeGeneration) {
+-            CraftBlockState previous = this.capturedBlockStates.get(pos);
++        final LevelCaptureContext.Frame captureContext = this.currentCaptureContext();
++        if (captureContext != null && captureContext.hasMode(LevelCaptureContext.TREE)) {
++            CraftBlockState previous = captureContext.getCapturedBlockState(pos);
+             if (previous != null) {
+                 return previous.getHandle();
+             }
+@@ -1051,27 +1085,29 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+ 
+     @Override
+     public boolean setBlock(final BlockPos pos, final BlockState blockState, @Block.UpdateFlags final int updateFlags, final int updateLimit) {
+-        // Loom - during parallel chunk ticking, buffer the write and apply it serially after the parallel
+-        // phase instead of mutating another region's chunk / shared world state off-thread.
+-        if (net.minecraft.server.threading.RegionTickStaging.stageSetBlock(this, pos, blockState, updateFlags, updateLimit)) {
+-            return true;
+-        }
+-        // CraftBukkit start - tree generation
+-        if (this.captureTreeGeneration) {
++        final LevelCaptureContext.Frame captureContext = this.currentCaptureContext();
++        // CraftBukkit start - tree generation. This must run before generic region staging so a feature can
++        // observe its own virtual writes and the owner-side tree event receives the complete change set.
++        if (captureContext != null && captureContext.hasMode(LevelCaptureContext.TREE)) {
+             // Paper start - Protect Bedrock and End Portal/Frames from being destroyed
+             BlockState type = getBlockState(pos);
+             if (!type.isDestroyable()) return false;
+             // Paper end - Protect Bedrock and End Portal/Frames from being destroyed
+-            CraftBlockState blockstate = this.capturedBlockStates.get(pos);
++            CraftBlockState blockstate = captureContext.getCapturedBlockState(pos);
+             if (blockstate == null) {
+                 blockstate = org.bukkit.craftbukkit.block.CapturedBlockState.getTreeBlockState(this, pos, updateFlags);
+-                this.capturedBlockStates.put(pos.immutable(), blockstate);
++                captureContext.putCapturedBlockState(pos, blockstate);
+             }
+             blockstate.setBlock(blockState);
+             blockstate.setFlags(updateFlags);
+             return true;
+         }
+         // CraftBukkit end
++        // Loom - during parallel chunk ticking, buffer the write and apply it serially after the parallel
++        // phase instead of mutating another region's chunk / shared world state off-thread.
++        if (net.minecraft.server.threading.RegionTickStaging.stageSetBlock(this, pos, blockState, updateFlags, updateLimit)) {
++            return true;
++        }
+         if (!this.isInValidBounds(pos)) {
+             return false;
+         } else if (!this.isClientSide() && this.isDebug()) {
+@@ -1081,14 +1117,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+             Block block = blockState.getBlock();
+             // CraftBukkit start - capture blockstates
+             boolean captured = false;
+-            if (this.captureBlockStates) {
+-                final CraftBlockState snapshot;
+-                if (!this.capturedBlockStates.containsKey(pos)) {
++            if (captureContext != null && captureContext.hasMode(LevelCaptureContext.BLOCK_STATES)) {
++                CraftBlockState snapshot = captureContext.getCapturedBlockState(pos);
++                if (snapshot == null) {
+                     snapshot = (CraftBlockState) org.bukkit.craftbukkit.block.CraftBlock.at(this, pos).getState(); // Paper - use CB getState to get a suitable snapshot
+-                    this.capturedBlockStates.put(pos.immutable(), snapshot);
++                    captureContext.putCapturedBlockState(pos, snapshot);
+                     captured = true;
+-                } else {
+-                    snapshot = this.capturedBlockStates.get(pos);
+                 }
+                 snapshot.setFlags(updateFlags); // Paper - always set the flag of the most recent call to mitigate issues with multiple update at the same pos with different flags
+             }
+@@ -1097,8 +1131,8 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+             this.chunkPacketBlockController.onBlockChange(this, pos, blockState, oldState, updateFlags, updateLimit); // Paper - Anti-Xray
+             if (oldState == null) {
+                 // CraftBukkit start - remove blockstate if failed (or the same)
+-                if (this.captureBlockStates && captured) {
+-                    this.capturedBlockStates.remove(pos);
++                if (captureContext != null && captureContext.hasMode(LevelCaptureContext.BLOCK_STATES) && captured) {
++                    captureContext.removeCapturedBlockState(pos);
+                 }
+                 // CraftBukkit end
+                 return false;
+@@ -1135,7 +1169,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+                 */ // CraftBukkit
+ 
+                 // CraftBukkit start
+-                if (!this.captureBlockStates) { // Don't notify clients or update physics while capturing blockstates
++                if (captureContext == null || !captureContext.hasMode(LevelCaptureContext.BLOCK_STATES)) { // Don't notify clients or update physics while capturing blockstates
+                     // Modularize client and physic updates
+                     // Spigot start
+                     try {
+@@ -1311,8 +1345,9 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+     @Override
+     public BlockState getBlockState(final BlockPos pos) {
+         // CraftBukkit start - tree generation
+-        if (this.captureTreeGeneration) {
+-            CraftBlockState previous = this.capturedBlockStates.get(pos); // Paper
++        final LevelCaptureContext.Frame captureContext = this.currentCaptureContext();
++        if (captureContext != null && captureContext.hasMode(LevelCaptureContext.TREE)) {
++            CraftBlockState previous = captureContext.getCapturedBlockState(pos); // Paper
+             if (previous != null) {
+                 return previous.getHandle();
+             }
+@@ -1740,12 +1775,15 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+ 
+     @Override
+     public @Nullable BlockEntity getBlockEntity(final BlockPos pos) {
+-        // Paper start - Perf: Optimize capturedTileEntities lookup
+-        net.minecraft.world.level.block.entity.BlockEntity blockEntity;
+-        if (!this.capturedTileEntities.isEmpty() && (blockEntity = this.capturedTileEntities.get(pos)) != null) {
+-            return blockEntity;
++        // Paper start - Perf: Optimize captured block entity lookup
++        final LevelCaptureContext.Frame captureContext = this.currentCaptureContext();
++        if (captureContext != null && captureContext.hasMode(LevelCaptureContext.BLOCK_STATES)) {
++            final net.minecraft.world.level.block.entity.BlockEntity captured = captureContext.getCapturedBlockEntity(pos);
++            if (captured != null) {
++                return captured;
++            }
+         }
+-        // Paper end - Perf: Optimize capturedTileEntities lookup
++        // Paper end - Perf: Optimize captured block entity lookup
+         if (!this.isInValidBounds(pos)) {
+             return null;
+         } else {
+@@ -1759,8 +1797,9 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+         BlockPos pos = blockEntity.getBlockPos();
+         if (this.isInValidBounds(pos)) {
+             // CraftBukkit start
+-            if (this.captureBlockStates) {
+-                this.capturedTileEntities.put(pos.immutable(), blockEntity);
++            final LevelCaptureContext.Frame captureContext = this.currentCaptureContext();
++            if (captureContext != null && captureContext.hasMode(LevelCaptureContext.BLOCK_STATES)) {
++                captureContext.putCapturedBlockEntity(pos, blockEntity);
+                 return;
+             }
+             // CraftBukkit end
+diff --git a/net/minecraft/world/level/LevelCaptureContext.java b/net/minecraft/world/level/LevelCaptureContext.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ebba24d14416afad1f8fd156c42bbb91e7598ff
+--- /dev/null
++++ b/net/minecraft/world/level/LevelCaptureContext.java
+@@ -0,0 +1,331 @@
++package net.minecraft.world.level;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Objects;
++import net.minecraft.core.BlockPos;
++import net.minecraft.world.entity.item.ItemEntity;
++import net.minecraft.world.level.block.entity.BlockEntity;
++import org.bukkit.TreeType;
++import org.bukkit.craftbukkit.block.CraftBlockState;
++import org.jspecify.annotations.Nullable;
++
++/**
++ * Thread-confined state for one world mutation capture operation.
++ *
++ * <p>Frames form a stack on the physical tick thread rather than on a level. This isolates concurrent
++ * operations in different owner domains while retaining inexpensive, allocation-free lookup when there is
++ * no active capture. Only the top frame may intercept an operation; a child for another level or a frozen
++ * frame is an isolation barrier and never exposes an older frame underneath it.</p>
++ */
++public final class LevelCaptureContext {
++
++    public static final int BLOCK_STATES = 1;
++    public static final int TREE = 1 << 1;
++    public static final int DROPS = 1 << 2;
++    private static final int ALL_MODES = BLOCK_STATES | TREE | DROPS;
++
++    private LevelCaptureContext() {
++    }
++
++    static Scope begin(final Level level, final int modes) {
++        Objects.requireNonNull(level, "level");
++        if (modes == 0 || (modes & ~ALL_MODES) != 0) {
++            throw new IllegalArgumentException("Invalid level capture modes: " + modes);
++        }
++        if ((modes & (BLOCK_STATES | DROPS)) != 0
++            && net.minecraft.server.threading.RegionTickStaging.isStaging()) {
++            throw new IllegalStateException("Mutable level capture cannot begin during region tick staging");
++        }
++
++        TickThread.ensureTickThread(level, "Cannot begin a level capture outside its owner domain");
++        final TickThread creator = TickThread.getCurrentTickThread();
++        final Frame frame = new Frame(level, modes, creator, creator.levelCaptureContext);
++        creator.levelCaptureContext = frame;
++        return new Scope(frame);
++    }
++
++    static @Nullable Frame current(final Level level) {
++        final Thread thread = Thread.currentThread();
++        if (!(thread instanceof TickThread tickThread)) {
++            return null;
++        }
++
++        final Frame frame = tickThread.levelCaptureContext;
++        return frame != null && frame.level == level && frame.state == State.ACTIVE ? frame : null;
++    }
++
++    private enum State {
++        ACTIVE,
++        FROZEN,
++        CLOSED
++    }
++
++    public static final class Frame {
++        private final Level level;
++        private final int modes;
++        private final TickThread creator;
++        private final @Nullable Frame previous;
++        private State state = State.ACTIVE;
++        private @Nullable LinkedHashMap<BlockPos, CraftBlockState> blockStates;
++        private @Nullable LinkedHashMap<BlockPos, BlockEntity> blockEntities;
++        private @Nullable ArrayList<ItemEntity> drops;
++        private @Nullable TreeType treeType;
++        private @Nullable BlockPos openSign;
++
++        private Frame(final Level level, final int modes, final TickThread creator, final @Nullable Frame previous) {
++            this.level = level;
++            this.modes = modes;
++            this.creator = creator;
++            this.previous = previous;
++        }
++
++        public Level level() {
++            return this.level;
++        }
++
++        public int modes() {
++            return this.modes;
++        }
++
++        public boolean hasMode(final int mode) {
++            return (this.modes & mode) != 0;
++        }
++
++        public boolean hasCapturedBlockStates() {
++            this.ensureActiveOnCreator();
++            return this.blockStates != null && !this.blockStates.isEmpty();
++        }
++
++        public @Nullable CraftBlockState getCapturedBlockState(final BlockPos pos) {
++            this.ensureActiveOnCreator();
++            return this.blockStates == null ? null : this.blockStates.get(pos);
++        }
++
++        public @Nullable CraftBlockState putCapturedBlockState(final BlockPos pos, final CraftBlockState state) {
++            this.ensureActiveOnCreator();
++            this.requireAnyMode(BLOCK_STATES | TREE, "block states");
++            if (this.blockStates == null) {
++                this.blockStates = new LinkedHashMap<>();
++            }
++            return this.blockStates.put(pos.immutable(), Objects.requireNonNull(state, "state"));
++        }
++
++        public @Nullable CraftBlockState removeCapturedBlockState(final BlockPos pos) {
++            this.ensureActiveOnCreator();
++            return this.blockStates == null ? null : this.blockStates.remove(pos);
++        }
++
++        public boolean hasCapturedBlockEntities() {
++            this.ensureActiveOnCreator();
++            return this.blockEntities != null && !this.blockEntities.isEmpty();
++        }
++
++        public @Nullable BlockEntity getCapturedBlockEntity(final BlockPos pos) {
++            this.ensureActiveOnCreator();
++            return this.blockEntities == null ? null : this.blockEntities.get(pos);
++        }
++
++        public @Nullable BlockEntity putCapturedBlockEntity(final BlockPos pos, final BlockEntity blockEntity) {
++            this.ensureActiveOnCreator();
++            this.requireAnyMode(BLOCK_STATES, "block entities");
++            if (this.blockEntities == null) {
++                this.blockEntities = new LinkedHashMap<>();
++            }
++            return this.blockEntities.put(pos.immutable(), Objects.requireNonNull(blockEntity, "blockEntity"));
++        }
++
++        public void captureDrop(final ItemEntity item) {
++            this.ensureActiveOnCreator();
++            this.requireAnyMode(DROPS, "drops");
++            if (this.drops == null) {
++                this.drops = new ArrayList<>();
++            }
++            this.drops.add(Objects.requireNonNull(item, "item"));
++        }
++
++        public @Nullable TreeType treeType() {
++            this.ensureActiveOnCreator();
++            return this.treeType;
++        }
++
++        public void setTreeType(final TreeType treeType) {
++            this.ensureActiveOnCreator();
++            this.requireAnyMode(TREE, "tree type");
++            this.treeType = Objects.requireNonNull(treeType, "treeType");
++        }
++
++        public @Nullable BlockPos openSign() {
++            this.ensureActiveOnCreator();
++            return this.openSign;
++        }
++
++        public void setOpenSign(final BlockPos openSign) {
++            this.ensureActiveOnCreator();
++            this.requireAnyMode(BLOCK_STATES, "open sign position");
++            this.openSign = Objects.requireNonNull(openSign, "openSign").immutable();
++        }
++
++        private Result freeze() {
++            this.ensureActiveOnCreator();
++            final Result result = new Result(
++                this.level,
++                this.modes,
++                this.blockStates,
++                this.blockEntities,
++                this.drops,
++                this.treeType,
++                this.openSign
++            );
++            this.blockStates = null;
++            this.blockEntities = null;
++            this.drops = null;
++            this.treeType = null;
++            this.openSign = null;
++            this.state = State.FROZEN;
++            return result;
++        }
++
++        private void discard() {
++            this.blockStates = null;
++            this.blockEntities = null;
++            this.drops = null;
++            this.treeType = null;
++            this.openSign = null;
++        }
++
++        private void ensureActiveOnCreator() {
++            if (Thread.currentThread() != this.creator) {
++                throw new IllegalStateException("Level capture accessed from a thread other than its creator");
++            }
++            if (this.creator.levelCaptureContext != this) {
++                throw new IllegalStateException("Level capture is not the current operation");
++            }
++            if (this.state != State.ACTIVE) {
++                throw new IllegalStateException("Level capture is not active: " + this.state);
++            }
++        }
++
++        private void requireAnyMode(final int required, final String value) {
++            if ((this.modes & required) == 0) {
++                throw new IllegalStateException("Capture mode " + this.modes + " does not collect " + value);
++            }
++        }
++    }
++
++    public static final class Scope implements AutoCloseable {
++        private final Frame frame;
++        private boolean closed;
++
++        private Scope(final Frame frame) {
++            this.frame = frame;
++        }
++
++        public Frame frame() {
++            return this.frame;
++        }
++
++        /**
++         * Transfers the captured values to a result while leaving a non-capturing isolation barrier on the
++         * creator thread. The barrier is removed by {@link #close()}.
++         */
++        public Result freeze() {
++            this.ensureCreator();
++            if (this.closed) {
++                throw new IllegalStateException("Level capture scope is closed");
++            }
++            return this.frame.freeze();
++        }
++
++        @Override
++        public void close() {
++            this.ensureCreator();
++            if (this.closed) {
++                return;
++            }
++            if (this.frame.creator.levelCaptureContext != this.frame) {
++                throw new IllegalStateException("Level capture scopes must close in stack order");
++            }
++            if (this.frame.state == State.CLOSED) {
++                throw new IllegalStateException("Level capture frame was already closed");
++            }
++            if (this.frame.state == State.ACTIVE) {
++                this.frame.discard();
++            }
++
++            this.frame.creator.levelCaptureContext = this.frame.previous;
++            this.frame.state = State.CLOSED;
++            this.closed = true;
++        }
++
++        private void ensureCreator() {
++            if (Thread.currentThread() != this.frame.creator) {
++                throw new IllegalStateException("Level capture scope must be completed by its creator thread");
++            }
++        }
++    }
++
++    public static final class Result {
++        private final Level level;
++        private final int modes;
++        private final @Nullable LinkedHashMap<BlockPos, CraftBlockState> blockStates;
++        private final @Nullable LinkedHashMap<BlockPos, BlockEntity> blockEntities;
++        private final @Nullable List<ItemEntity> drops;
++        private final @Nullable TreeType treeType;
++        private final @Nullable BlockPos openSign;
++
++        private Result(
++            final Level level,
++            final int modes,
++            final @Nullable LinkedHashMap<BlockPos, CraftBlockState> blockStates,
++            final @Nullable LinkedHashMap<BlockPos, BlockEntity> blockEntities,
++            final @Nullable List<ItemEntity> drops,
++            final @Nullable TreeType treeType,
++            final @Nullable BlockPos openSign
++        ) {
++            this.level = level;
++            this.modes = modes;
++            this.blockStates = blockStates;
++            this.blockEntities = blockEntities;
++            this.drops = drops;
++            this.treeType = treeType;
++            this.openSign = openSign;
++        }
++
++        public Level level() {
++            return this.level;
++        }
++
++        public int modes() {
++            return this.modes;
++        }
++
++        public boolean hasMode(final int mode) {
++            return (this.modes & mode) != 0;
++        }
++
++        public Map<BlockPos, CraftBlockState> blockStates() {
++            return this.blockStates == null ? Collections.emptyMap() : this.blockStates;
++        }
++
++        public Map<BlockPos, BlockEntity> blockEntities() {
++            return this.blockEntities == null ? Collections.emptyMap() : this.blockEntities;
++        }
++
++        public List<ItemEntity> drops() {
++            return this.drops == null ? Collections.emptyList() : this.drops;
++        }
++
++        public @Nullable TreeType treeType() {
++            return this.treeType;
++        }
++
++        public @Nullable BlockPos openSign() {
++            return this.openSign;
++        }
++    }
++}
+diff --git a/net/minecraft/world/level/block/BedBlock.java b/net/minecraft/world/level/block/BedBlock.java
+index fea3df8af41f61e3f91f6cd6bd06dc0a0ced232b..eabf18529003ef778e06a691ef972d85df95586d 100644
+--- a/net/minecraft/world/level/block/BedBlock.java
++++ b/net/minecraft/world/level/block/BedBlock.java
+@@ -338,7 +338,7 @@ public class BedBlock extends HorizontalDirectionalBlock implements EntityBlock
+             BlockPos otherPos = pos.relative(state.getValue(FACING));
+             level.setBlock(otherPos, state.setValue(PART, BedPart.HEAD), Block.UPDATE_ALL);
+             // CraftBukkit start - SPIGOT-7315: Don't updated if we capture block states
+-            if (level.captureBlockStates) {
++            if (level.isCaptureModeActive(net.minecraft.world.level.LevelCaptureContext.BLOCK_STATES)) {
+                 return;
+             }
+             // CraftBukkit end
+diff --git a/net/minecraft/world/level/block/Block.java b/net/minecraft/world/level/block/Block.java
+index 41aab9a526be77b400bed7a74614eceec95345b5..b6c3a83b3d2f357fdc3421b00f2ec9d08ee22123 100644
+--- a/net/minecraft/world/level/block/Block.java
++++ b/net/minecraft/world/level/block/Block.java
+@@ -485,9 +485,7 @@ public class Block extends BlockBehaviour implements ItemLike {
+             ItemEntity entity = entityFactory.get();
+             entity.setDefaultPickUpDelay();
+             // CraftBukkit start
+-            if (level.captureDrops != null) {
+-                level.captureDrops.add(entity);
+-            } else {
++            if (!level.captureItemDrop(entity)) {
+                 level.addFreshEntity(entity);
+             }
+             // CraftBukkit end
+diff --git a/net/minecraft/world/level/block/MushroomBlock.java b/net/minecraft/world/level/block/MushroomBlock.java
+index dd736330ddb1457172774dbcdcffd101f60903ce..d32df4165677ae9ff5feae28756361980f89db0f 100644
+--- a/net/minecraft/world/level/block/MushroomBlock.java
++++ b/net/minecraft/world/level/block/MushroomBlock.java
+@@ -93,7 +93,7 @@ public class MushroomBlock extends VegetationBlock implements BonemealableBlock
+             return false;
+         } else {
+             level.removeBlock(pos, false);
+-            SaplingBlock.treeType = (this == Blocks.BROWN_MUSHROOM) ? org.bukkit.TreeType.BROWN_MUSHROOM : org.bukkit.TreeType.RED_MUSHROOM; // CraftBukkit
++            level.setCapturedTreeType((this == Blocks.BROWN_MUSHROOM) ? org.bukkit.TreeType.BROWN_MUSHROOM : org.bukkit.TreeType.RED_MUSHROOM); // CraftBukkit
+             if (feature.get().value().place(level, level.getChunkSource().getGenerator(), random, pos)) {
+                 return true;
+             } else {
+diff --git a/net/minecraft/world/level/block/NetherFungusBlock.java b/net/minecraft/world/level/block/NetherFungusBlock.java
+index 82ab930bf438e988d637786bdde88e34ea073a2f..1c65a7217d4999195317da5ad965b824e5a45e87 100644
+--- a/net/minecraft/world/level/block/NetherFungusBlock.java
++++ b/net/minecraft/world/level/block/NetherFungusBlock.java
+@@ -84,9 +84,9 @@ public class NetherFungusBlock extends VegetationBlock implements BonemealableBl
+             // CraftBukkit start
+             .map((value) -> {
+                 if (this == Blocks.WARPED_FUNGUS) {
+-                    SaplingBlock.treeType = org.bukkit.TreeType.WARPED_FUNGUS;
++                    level.setCapturedTreeType(org.bukkit.TreeType.WARPED_FUNGUS);
+                 } else if (this == Blocks.CRIMSON_FUNGUS) {
+-                    SaplingBlock.treeType = org.bukkit.TreeType.CRIMSON_FUNGUS;
++                    level.setCapturedTreeType(org.bukkit.TreeType.CRIMSON_FUNGUS);
+                 }
+                 return value;
+             })
+diff --git a/net/minecraft/world/level/block/SaplingBlock.java b/net/minecraft/world/level/block/SaplingBlock.java
+index 61f0c8a9bb5bf9094fbd96d30fc36ed936ab9a2c..14f35c45c28b06269037517c9f32ac53bdb02a5f 100644
+--- a/net/minecraft/world/level/block/SaplingBlock.java
++++ b/net/minecraft/world/level/block/SaplingBlock.java
+@@ -24,7 +24,6 @@ public class SaplingBlock extends VegetationBlock implements BonemealableBlock {
+     public static final IntegerProperty STAGE = BlockStateProperties.STAGE;
+     private static final VoxelShape SHAPE = Block.column(12.0, 0.0, 12.0);
+     protected final TreeGrower treeGrower;
+-    public static org.bukkit.@org.jspecify.annotations.Nullable TreeType treeType; // CraftBukkit
+ 
+     @Override
+     public MapCodec<? extends SaplingBlock> codec() {
+@@ -54,28 +53,36 @@ public class SaplingBlock extends VegetationBlock implements BonemealableBlock {
+             level.setBlock(pos, state.cycle(STAGE), Block.UPDATE_NONE);
+         } else {
+             // CraftBukkit start
+-            if (level.captureTreeGeneration) {
++            if (level.isCaptureModeActive(net.minecraft.world.level.LevelCaptureContext.TREE)) {
+                 this.treeGrower.growTree(level, level.getChunkSource().getGenerator(), pos, state, random);
+             } else {
+-                level.captureTreeGeneration = true;
+-                this.treeGrower.growTree(level, level.getChunkSource().getGenerator(), pos, state, random);
+-                level.captureTreeGeneration = false;
+-                if (!level.capturedBlockStates.isEmpty()) {
+-                    org.bukkit.TreeType treeType = SaplingBlock.treeType;
+-                    SaplingBlock.treeType = null;
+-                    org.bukkit.Location location = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(pos, level);
+-                    java.util.List<org.bukkit.block.BlockState> blocks = new java.util.ArrayList<>(level.capturedBlockStates.values());
+-                    level.capturedBlockStates.clear();
+-                    org.bukkit.event.world.StructureGrowEvent event = null;
+-                    if (treeType != null) {
+-                        event = new org.bukkit.event.world.StructureGrowEvent(location, treeType, false, null, blocks);
+-                        org.bukkit.Bukkit.getPluginManager().callEvent(event);
+-                    }
+-                    if (event == null || !event.isCancelled()) {
+-                        for (org.bukkit.block.BlockState blockstate : blocks) {
+-                            org.bukkit.craftbukkit.block.CraftBlockState craftBlockState = (org.bukkit.craftbukkit.block.CraftBlockState) blockstate;
+-                            craftBlockState.place(craftBlockState.getFlags());
+-                            level.checkCapturedTreeStateForObserverNotify(pos, craftBlockState); // Paper - notify observers even if grow failed
++                try (net.minecraft.world.level.LevelCaptureContext.Scope captureScope = level.beginCaptureContext(net.minecraft.world.level.LevelCaptureContext.TREE)) {
++                    this.treeGrower.growTree(level, level.getChunkSource().getGenerator(), pos, state, random);
++                    final net.minecraft.world.level.LevelCaptureContext.Result captured = captureScope.freeze();
++                    if (!captured.blockStates().isEmpty()) {
++                        final org.bukkit.TreeType treeType = captured.treeType();
++                        final org.bukkit.Location location = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(pos, level);
++                        final java.util.List<org.bukkit.block.BlockState> blocks = new java.util.ArrayList<>(captured.blockStates().values());
++                        final org.bukkit.event.world.StructureGrowEvent event = treeType == null
++                            ? null
++                            : new org.bukkit.event.world.StructureGrowEvent(location, treeType, false, null, blocks);
++                        if (!net.minecraft.server.threading.RegionTickStaging.stageTreeDecision(
++                            event,
++                            null,
++                            blocks,
++                            level,
++                            pos
++                        )) {
++                            if (event != null) {
++                                org.bukkit.Bukkit.getPluginManager().callEvent(event);
++                            }
++                            if (event == null || !event.isCancelled()) {
++                                for (org.bukkit.block.BlockState blockstate : blocks) {
++                                    org.bukkit.craftbukkit.block.CraftBlockState craftBlockState = (org.bukkit.craftbukkit.block.CraftBlockState) blockstate;
++                                    craftBlockState.place(craftBlockState.getFlags());
++                                    level.checkCapturedTreeStateForObserverNotify(pos, craftBlockState); // Paper - notify observers even if grow failed
++                                }
++                            }
+                         }
+                     }
+                 }
+diff --git a/net/minecraft/world/level/block/WitherSkullBlock.java b/net/minecraft/world/level/block/WitherSkullBlock.java
+index 3860a83cdcab3d65a83008851e0e150c01d20ff3..1f516263fca6b7dcef55311984a89863ac4db272 100644
+--- a/net/minecraft/world/level/block/WitherSkullBlock.java
++++ b/net/minecraft/world/level/block/WitherSkullBlock.java
+@@ -49,7 +49,7 @@ public class WitherSkullBlock extends SkullBlock {
+     }
+ 
+     public static void checkSpawn(final Level level, final BlockPos pos, final SkullBlockEntity placedSkull) {
+-        if (level.captureBlockStates) return; // CraftBukkit
++        if (level.isCaptureModeActive(net.minecraft.world.level.LevelCaptureContext.BLOCK_STATES)) return; // CraftBukkit
+         if (!level.isClientSide()) {
+             BlockState blockState = placedSkull.getBlockState();
+             boolean correctBlock = blockState.is(Blocks.WITHER_SKELETON_SKULL) || blockState.is(Blocks.WITHER_SKELETON_WALL_SKULL);
+diff --git a/net/minecraft/world/level/block/grower/TreeGrower.java b/net/minecraft/world/level/block/grower/TreeGrower.java
+index 4fbd75fcb86b5520ceee3218a53a661c9fc0ab44..cb68faa24f5c651030e329b2b9b19f20a749bc48 100644
+--- a/net/minecraft/world/level/block/grower/TreeGrower.java
++++ b/net/minecraft/world/level/block/grower/TreeGrower.java
+@@ -132,7 +132,7 @@ public final class TreeGrower {
+                 .get(megaFeatureKey)
+                 .orElse(null);
+             if (featureHolder != null) {
+-                this.setTreeType(featureHolder); // CraftBukkit
++                this.setTreeType(level, featureHolder); // CraftBukkit
+                 for (int dx = 0; dx >= -1; dx--) {
+                     for (int dz = 0; dz >= -1; dz--) {
+                         if (isTwoByTwoSapling(state, level, pos, dx, dz)) {
+@@ -165,7 +165,7 @@ public final class TreeGrower {
+             if (featureHolder == null) {
+                 return false;
+             } else {
+-                this.setTreeType(featureHolder); // CraftBukkit
++                this.setTreeType(level, featureHolder); // CraftBukkit
+                 ConfiguredFeature<?, ?> feature = featureHolder.value();
+                 BlockState emptyBlock = level.getFluidState(pos).createLegacyBlock();
+                 level.setBlock(pos, emptyBlock, Block.UPDATE_NONE);
+@@ -214,53 +214,53 @@ public final class TreeGrower {
+     }
+ 
+     // CraftBukkit start
+-    private void setTreeType(Holder<ConfiguredFeature<?, ?>> feature) {
++    private void setTreeType(ServerLevel level, Holder<ConfiguredFeature<?, ?>> feature) {
+         if (feature.is(TreeFeatures.OAK) || feature.is(TreeFeatures.OAK_BEES_005)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.TREE;
++            level.setCapturedTreeType(org.bukkit.TreeType.TREE);
+         } else if (feature.is(TreeFeatures.HUGE_RED_MUSHROOM)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.RED_MUSHROOM;
++            level.setCapturedTreeType(org.bukkit.TreeType.RED_MUSHROOM);
+         } else if (feature.is(TreeFeatures.HUGE_BROWN_MUSHROOM)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.BROWN_MUSHROOM;
++            level.setCapturedTreeType(org.bukkit.TreeType.BROWN_MUSHROOM);
+         } else if (feature.is(TreeFeatures.JUNGLE_TREE)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.COCOA_TREE;
++            level.setCapturedTreeType(org.bukkit.TreeType.COCOA_TREE);
+         } else if (feature.is(TreeFeatures.JUNGLE_TREE_NO_VINE)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.SMALL_JUNGLE;
++            level.setCapturedTreeType(org.bukkit.TreeType.SMALL_JUNGLE);
+         } else if (feature.is(TreeFeatures.PINE)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.TALL_REDWOOD;
++            level.setCapturedTreeType(org.bukkit.TreeType.TALL_REDWOOD);
+         } else if (feature.is(TreeFeatures.SPRUCE)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.REDWOOD;
++            level.setCapturedTreeType(org.bukkit.TreeType.REDWOOD);
+         } else if (feature.is(TreeFeatures.ACACIA)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.ACACIA;
++            level.setCapturedTreeType(org.bukkit.TreeType.ACACIA);
+         } else if (feature.is(TreeFeatures.BIRCH) || feature.is(TreeFeatures.BIRCH_BEES_005)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.BIRCH;
++            level.setCapturedTreeType(org.bukkit.TreeType.BIRCH);
+         } else if (feature.is(TreeFeatures.SUPER_BIRCH_BEES_0002)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.TALL_BIRCH;
++            level.setCapturedTreeType(org.bukkit.TreeType.TALL_BIRCH);
+         } else if (feature.is(TreeFeatures.SWAMP_OAK)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.SWAMP;
++            level.setCapturedTreeType(org.bukkit.TreeType.SWAMP);
+         } else if (feature.is(TreeFeatures.FANCY_OAK) || feature.is(TreeFeatures.FANCY_OAK_BEES_005)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.BIG_TREE;
++            level.setCapturedTreeType(org.bukkit.TreeType.BIG_TREE);
+         } else if (feature.is(TreeFeatures.JUNGLE_BUSH)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.JUNGLE_BUSH;
++            level.setCapturedTreeType(org.bukkit.TreeType.JUNGLE_BUSH);
+         } else if (feature.is(TreeFeatures.DARK_OAK)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.DARK_OAK;
++            level.setCapturedTreeType(org.bukkit.TreeType.DARK_OAK);
+         } else if (feature.is(TreeFeatures.MEGA_SPRUCE)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.MEGA_REDWOOD;
++            level.setCapturedTreeType(org.bukkit.TreeType.MEGA_REDWOOD);
+         } else if (feature.is(TreeFeatures.MEGA_PINE)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.MEGA_PINE;
++            level.setCapturedTreeType(org.bukkit.TreeType.MEGA_PINE);
+         } else if (feature.is(TreeFeatures.MEGA_JUNGLE_TREE)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.JUNGLE;
++            level.setCapturedTreeType(org.bukkit.TreeType.JUNGLE);
+         } else if (feature.is(TreeFeatures.AZALEA_TREE)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.AZALEA;
++            level.setCapturedTreeType(org.bukkit.TreeType.AZALEA);
+         } else if (feature.is(TreeFeatures.MANGROVE)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.MANGROVE;
++            level.setCapturedTreeType(org.bukkit.TreeType.MANGROVE);
+         } else if (feature.is(TreeFeatures.TALL_MANGROVE)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.TALL_MANGROVE;
++            level.setCapturedTreeType(org.bukkit.TreeType.TALL_MANGROVE);
+         } else if (feature.is(TreeFeatures.CHERRY) || feature.is(TreeFeatures.CHERRY_BEES_005)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.CHERRY;
++            level.setCapturedTreeType(org.bukkit.TreeType.CHERRY);
+         } else if (feature.is(TreeFeatures.PALE_OAK) || feature.is(TreeFeatures.PALE_OAK_BONEMEAL)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.PALE_OAK;
++            level.setCapturedTreeType(org.bukkit.TreeType.PALE_OAK);
+         } else if (feature.is(TreeFeatures.PALE_OAK_CREAKING)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.PALE_OAK_CREAKING;
++            level.setCapturedTreeType(org.bukkit.TreeType.PALE_OAK_CREAKING);
+         } else {
+             throw new IllegalArgumentException("Unknown tree generator " + feature);
+         }
+diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
+index a4b794781e66e6a054fb437bd0b66712b13320a4..a7c9a0c69c8c6deef275a96102201b139e9fc53b 100644
+--- a/net/minecraft/world/level/chunk/LevelChunk.java
++++ b/net/minecraft/world/level/chunk/LevelChunk.java
+@@ -34,6 +34,7 @@ import net.minecraft.util.profiling.ProfilerFiller;
+ import net.minecraft.world.entity.Entity;
+ import net.minecraft.world.level.ChunkPos;
+ import net.minecraft.world.level.Level;
++import net.minecraft.world.level.LevelCaptureContext;
+ import net.minecraft.world.level.block.BaseRailBlock;
+ import net.minecraft.world.level.block.Block;
+ import net.minecraft.world.level.block.Blocks;
+@@ -422,7 +423,7 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+                 if (!section.getBlockState(localX, localY, localZ).is(newBlock)) {
+                     return null;
+                 } else {
+-                    if (!this.level.isClientSide() && (flags & Block.UPDATE_SKIP_ON_PLACE) == 0 && (!this.level.captureBlockStates || newBlock instanceof net.minecraft.world.level.block.BaseEntityBlock)) { // CraftBukkit - Don't place while processing the BlockPlaceEvent, unless it's a BlockContainer. Prevents blocks such as TNT from activating when cancelled.
++                    if (!this.level.isClientSide() && (flags & Block.UPDATE_SKIP_ON_PLACE) == 0 && (!this.level.isCaptureModeActive(LevelCaptureContext.BLOCK_STATES) || newBlock instanceof net.minecraft.world.level.block.BaseEntityBlock)) { // CraftBukkit - Don't place while processing the BlockPlaceEvent, unless it's a BlockContainer. Prevents blocks such as TNT from activating when cancelled.
+                         state.onPlace(this.level, pos, oldState, movedByPiston);
+                     }
+ 
+@@ -469,7 +470,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+ 
+     public @Nullable BlockEntity getBlockEntity(final BlockPos pos, final LevelChunk.EntityCreationType creationType) {
+         // CraftBukkit start
+-        BlockEntity blockEntity = this.level.capturedTileEntities.get(pos);
++        final LevelCaptureContext.Frame captureContext = this.level.currentCaptureContext();
++        BlockEntity blockEntity = captureContext != null && captureContext.hasMode(LevelCaptureContext.BLOCK_STATES)
++            ? captureContext.getCapturedBlockEntity(pos)
++            : null;
+         if (blockEntity == null) {
+             blockEntity = this.blockEntities.get(pos);
+         }
