@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 11 Jul 2026 00:17:59 +0000
+Subject: [PATCH] Confine hopper tick state
+
+
+diff --git a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+index d149bf927c61b7844443cd67c9863aa529d218e4..5d171b760f8cd80d507e428531325211570f92b6 100644
+--- a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
++++ b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+@@ -116,6 +116,12 @@ public class TickThread extends Thread {
+     // line in the hottest entity path.
+     public volatile Entity currentlyTickingEntity;
+ 
++    // Loom - transient hopper state is confined to the tick thread running the operation. Upstream's
++    // process-wide flags race when independent owner regions move items concurrently.
++    public boolean skipHopperPullEvents;
++    public boolean skipHopperPushEvents;
++    public boolean suppressBlockEntityUpdates;
++
+     public TickThread(final String name) {
+         this(null, name);
+     }

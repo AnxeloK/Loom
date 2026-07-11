@@ -1,0 +1,330 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 11 Jul 2026 00:17:53 +0000
+Subject: [PATCH] Confine hopper tick state
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 562de80d567a72eea522dc13ef5e7cfa28fe0356..52eefa22787c45153feae72a45102ae3ee252375 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -2052,7 +2052,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             level.hasPhysicsEvent = org.bukkit.event.block.BlockPhysicsEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - BlockPhysicsEvent
+             level.hasEntityMoveEvent = io.papermc.paper.event.entity.EntityMoveEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - Add EntityMoveEvent
+             level.updateLagCompensationTick(); // Paper - lag compensation
+-            net.minecraft.world.level.block.entity.HopperBlockEntity.skipHopperEvents = level.paperConfig().hopper.disableMoveEvent || org.bukkit.event.inventory.InventoryMoveItemEvent.getHandlerList().getRegisteredListeners().length == 0; // Paper - Perf: Optimize Hoppers
++            level.skipHopperEvents = level.paperConfig().hopper.disableMoveEvent || org.bukkit.event.inventory.InventoryMoveItemEvent.getHandlerList().getRegisteredListeners().length == 0; // Paper - Perf: Optimize Hoppers; Loom - per-world
+             parallelLevels.add(level);
+         }
+         net.minecraft.server.threading.TickRegions.tickWorldsInParallel(parallelLevels, level -> {
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index dca78a87b16ba370d3b43cf2bc8e3bc55cfe9bdd..feb26eff43ec71f91b8c3e7cf5302146a94f59af 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -173,6 +173,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+ 
+     public static @Nullable BlockPos lastPhysicsProblem; // Spigot
+     public final Map<ServerExplosion.CacheKey, Float> explosionDensityCache = new java.util.HashMap<>(); // Paper - Optimize explosions
++    public boolean skipHopperEvents; // Paper - Perf: Optimize Hoppers; Loom - per-world for parallel ticking
+     public java.util.ArrayDeque<net.minecraft.world.level.block.RedstoneTorchBlock.Toggle> redstoneUpdateInfos; // Paper - Faster redstone torch rapid clock removal; Move from Map in BlockRedstoneTorch to here
+ 
+     public CraftWorld getWorld() {
+diff --git a/net/minecraft/world/level/block/entity/BlockEntity.java b/net/minecraft/world/level/block/entity/BlockEntity.java
+index 865f08c92946010a36947b7766b957f4c0517285..07267cff3eb5ab2dee9e8aa285697639df27d2da 100644
+--- a/net/minecraft/world/level/block/entity/BlockEntity.java
++++ b/net/minecraft/world/level/block/entity/BlockEntity.java
+@@ -1,5 +1,6 @@
+ package net.minecraft.world.level.block.entity;
+ 
++import ca.spottedleaf.moonrise.common.util.TickThread;
+ import com.mojang.logging.LogUtils;
+ import com.mojang.serialization.Codec;
+ import java.util.HashSet;
+@@ -40,7 +41,6 @@ import org.jspecify.annotations.Nullable;
+ import org.slf4j.Logger;
+ 
+ public abstract class BlockEntity implements DebugValueSource, TypedInstance<BlockEntityType<?>> {
+-    static boolean ignoreBlockEntityUpdates; // Paper - Perf: Optimize Hoppers
+     // CraftBukkit start - data containers
+     private static final org.bukkit.craftbukkit.persistence.CraftPersistentDataTypeRegistry DATA_TYPE_REGISTRY = new org.bukkit.craftbukkit.persistence.CraftPersistentDataTypeRegistry();
+     public final org.bukkit.craftbukkit.persistence.CraftPersistentDataContainer persistentDataContainer;
+@@ -230,7 +230,9 @@ public abstract class BlockEntity implements DebugValueSource, TypedInstance<Blo
+ 
+     public void setChanged() {
+         if (this.level != null) {
+-            if (ignoreBlockEntityUpdates) return; // Paper - Perf: Optimize Hoppers
++            if (Thread.currentThread() instanceof TickThread tickThread && tickThread.suppressBlockEntityUpdates) { // Paper - Perf: Optimize Hoppers; Loom - tick-thread confined
++                return;
++            }
+             setChanged(this.level, this.worldPosition, this.blockState);
+         }
+     }
+diff --git a/net/minecraft/world/level/block/entity/HopperBlockEntity.java b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+index 085ed0eecc47cf9c0fa9fc26b3f7b8522610a941..868b5c96d09e6921241ae9d41472a695c5187e74 100644
+--- a/net/minecraft/world/level/block/entity/HopperBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+@@ -1,5 +1,6 @@
+ package net.minecraft.world.level.block.entity;
+ 
++import ca.spottedleaf.moonrise.common.util.TickThread;
+ import java.util.List;
+ import java.util.function.BooleanSupplier;
+ import net.minecraft.core.BlockPos;
+@@ -218,64 +219,73 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+     }
+ 
+     // Paper start - Perf: Optimize Hoppers
+-    public static boolean skipHopperEvents;
+-    private static boolean skipPullModeEventFire;
+-    private static boolean skipPushModeEventFire;
+-
+     private static boolean hopperPush(final Level level, final Container destination, final Direction direction, final HopperBlockEntity hopper) {
+-        skipPushModeEventFire = skipHopperEvents;
+-        boolean foundItem = false;
+-        for (int i = 0; i < hopper.getContainerSize(); ++i) {
+-            final ItemStack item = hopper.getItem(i);
+-            if (!item.isEmpty()) {
+-                foundItem = true;
+-                ItemStack origItemStack = item;
+-                ItemStack movedItem = origItemStack;
+-
+-                final int originalItemCount = origItemStack.getCount();
+-                final int movedItemCount = Math.min(level.spigotConfig.hopperAmount, originalItemCount);
+-                origItemStack.setCount(movedItemCount);
+-
+-                // We only need to fire the event once to give protection plugins a chance to cancel this event
+-                // Because nothing uses getItem, every event call should end up the same result.
+-                if (!skipPushModeEventFire) {
+-                    movedItem = callPushMoveEvent(destination, movedItem, hopper);
+-                    if (movedItem == null) { // cancelled
+-                        origItemStack.setCount(originalItemCount);
+-                        return false;
++        final TickThread tickThread = TickThread.getCurrentTickThread();
++        final boolean previousSkipPush = tickThread.skipHopperPushEvents;
++        tickThread.skipHopperPushEvents = level.skipHopperEvents;
++        try {
++            boolean foundItem = false;
++            for (int i = 0; i < hopper.getContainerSize(); ++i) {
++                final ItemStack item = hopper.getItem(i);
++                if (!item.isEmpty()) {
++                    foundItem = true;
++                    ItemStack origItemStack = item;
++                    ItemStack movedItem = origItemStack;
++
++                    final int originalItemCount = origItemStack.getCount();
++                    final int movedItemCount = Math.min(level.spigotConfig.hopperAmount, originalItemCount);
++                    origItemStack.setCount(movedItemCount);
++
++                    // We only need to fire the event once to give protection plugins a chance to cancel this event
++                    // Because nothing uses getItem, every event call should end up the same result.
++                    if (!tickThread.skipHopperPushEvents) {
++                        movedItem = callPushMoveEvent(destination, movedItem, hopper, tickThread);
++                        if (movedItem == null) { // cancelled
++                            origItemStack.setCount(originalItemCount);
++                            return false;
++                        }
+                     }
+-                }
+ 
+-                final ItemStack remainingItem = addItem(hopper, destination, movedItem, direction);
+-                final int remainingItemCount = remainingItem.getCount();
+-                if (remainingItemCount != movedItemCount) {
+-                    origItemStack = origItemStack.copy(true);
+-                    origItemStack.setCount(originalItemCount);
+-                    if (!origItemStack.isEmpty()) {
+-                        origItemStack.setCount(originalItemCount - movedItemCount + remainingItemCount);
++                    final ItemStack remainingItem = addItem(hopper, destination, movedItem, direction);
++                    final int remainingItemCount = remainingItem.getCount();
++                    if (remainingItemCount != movedItemCount) {
++                        origItemStack = origItemStack.copy(true);
++                        origItemStack.setCount(originalItemCount);
++                        if (!origItemStack.isEmpty()) {
++                            origItemStack.setCount(originalItemCount - movedItemCount + remainingItemCount);
++                        }
++                        hopper.setItem(i, origItemStack);
++                        destination.setChanged();
++                        return true;
+                     }
+-                    hopper.setItem(i, origItemStack);
+-                    destination.setChanged();
+-                    return true;
++                    origItemStack.setCount(originalItemCount);
+                 }
+-                origItemStack.setCount(originalItemCount);
+             }
++            if (foundItem && level.paperConfig().hopper.cooldownWhenFull) { // Inventory was full - cooldown
++                hopper.setCooldown(level.spigotConfig.hopperTransfer);
++            }
++            return false;
++        } finally {
++            tickThread.skipHopperPushEvents = previousSkipPush;
+         }
+-        if (foundItem && level.paperConfig().hopper.cooldownWhenFull) { // Inventory was full - cooldown
+-            hopper.setCooldown(level.spigotConfig.hopperTransfer);
+-        }
+-        return false;
+     }
+ 
+-    private static boolean hopperPull(final Level level, final Hopper hopper, final Container container, ItemStack origItemStack, final int i) {
++    private static boolean hopperPull(
++        final Level level,
++        final Hopper hopper,
++        final Container container,
++        ItemStack origItemStack,
++        final int i,
++        final TickThread tickThread
++    ) {
+         ItemStack movedItem = origItemStack;
+         final int originalItemCount = origItemStack.getCount();
+         final int movedItemCount = Math.min(level.spigotConfig.hopperAmount, originalItemCount);
+         container.setChanged(); // original logic always marks source inv as changed even if no move happens.
+         movedItem.setCount(movedItemCount);
+ 
+-        if (!skipPullModeEventFire) {
+-            movedItem = callPullMoveEvent(hopper, container, movedItem);
++        if (!tickThread.skipHopperPullEvents) {
++            movedItem = callPullMoveEvent(hopper, container, movedItem, tickThread);
+             if (movedItem == null) { // cancelled
+                 origItemStack.setCount(originalItemCount);
+                 // Drastically improve performance by returning true.
+@@ -294,9 +304,7 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+                 origItemStack.setCount(originalItemCount - movedItemCount + remainingItemCount);
+             }
+ 
+-            ignoreBlockEntityUpdates = true;
+-            container.setItem(i, origItemStack);
+-            ignoreBlockEntityUpdates = false;
++            setItemWithoutBlockEntityUpdates(container, i, origItemStack, tickThread);
+             container.setChanged();
+             return true;
+         }
+@@ -310,7 +318,12 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+     }
+ 
+     @Nullable
+-    private static ItemStack callPushMoveEvent(Container destination, ItemStack itemStack, HopperBlockEntity hopper) {
++    private static ItemStack callPushMoveEvent(
++        final Container destination,
++        final ItemStack itemStack,
++        final HopperBlockEntity hopper,
++        final TickThread tickThread
++    ) {
+         final org.bukkit.inventory.Inventory destinationInventory = getInventory(destination);
+         final io.papermc.paper.event.inventory.PaperInventoryMoveItemEvent event = new io.papermc.paper.event.inventory.PaperInventoryMoveItemEvent(
+             hopper.getOwner(false).getInventory(),
+@@ -320,7 +333,7 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+         );
+         final boolean result = event.callEvent();
+         if (!event.calledGetItem && !event.calledSetItem) {
+-            skipPushModeEventFire = true;
++            tickThread.skipHopperPushEvents = true;
+         }
+         if (!result) {
+             applyCooldown(hopper);
+@@ -335,7 +348,12 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+     }
+ 
+     @Nullable
+-    private static ItemStack callPullMoveEvent(final Hopper hopper, final Container container, final ItemStack itemstack) {
++    private static ItemStack callPullMoveEvent(
++        final Hopper hopper,
++        final Container container,
++        final ItemStack itemstack,
++        final TickThread tickThread
++    ) {
+         final org.bukkit.inventory.Inventory sourceInventory = getInventory(container);
+         final org.bukkit.inventory.Inventory destination = getInventory(hopper);
+ 
+@@ -343,7 +361,7 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+         final io.papermc.paper.event.inventory.PaperInventoryMoveItemEvent event = new io.papermc.paper.event.inventory.PaperInventoryMoveItemEvent(sourceInventory, org.bukkit.craftbukkit.inventory.CraftItemStack.asCraftMirror(itemstack), destination, false);
+         final boolean result = event.callEvent();
+         if (!event.calledGetItem && !event.calledSetItem) {
+-            skipPullModeEventFire = true;
++            tickThread.skipHopperPullEvents = true;
+         }
+         if (!result) {
+             applyCooldown(hopper);
+@@ -357,6 +375,21 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+         }
+     }
+ 
++    private static void setItemWithoutBlockEntityUpdates(
++        final Container container,
++        final int slot,
++        final ItemStack itemStack,
++        final TickThread tickThread
++    ) {
++        final boolean previousSuppression = tickThread.suppressBlockEntityUpdates;
++        tickThread.suppressBlockEntityUpdates = true;
++        try {
++            container.setItem(slot, itemStack);
++        } finally {
++            tickThread.suppressBlockEntityUpdates = previousSuppression;
++        }
++    }
++
+     private static org.bukkit.inventory.Inventory getInventory(final Container container) {
+         final org.bukkit.inventory.Inventory sourceInventory;
+         if (container instanceof net.minecraft.world.CompoundContainer compoundContainer) {
+@@ -480,16 +513,20 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+         BlockState blockState = level.getBlockState(blockPos);
+         Container container = getSourceContainer(level, hopper, blockPos, blockState);
+         if (container != null) {
+-            Direction direction = Direction.DOWN;
+-            skipPullModeEventFire = skipHopperEvents; // Paper - Perf: Optimize Hoppers
+-
+-            for (int slot : getSlots(container, direction)) {
+-                if (tryTakeInItemFromSlot(hopper, container, slot, direction, level)) { // Spigot
+-                    return true;
++            final Direction direction = Direction.DOWN;
++            final TickThread tickThread = TickThread.getCurrentTickThread();
++            final boolean previousSkipPull = tickThread.skipHopperPullEvents;
++            tickThread.skipHopperPullEvents = level.skipHopperEvents; // Paper - Perf: Optimize Hoppers
++            try {
++                for (int slot : getSlots(container, direction)) {
++                    if (tryTakeInItemFromSlot(hopper, container, slot, direction, level, tickThread)) { // Spigot
++                        return true;
++                    }
+                 }
++                return false;
++            } finally {
++                tickThread.skipHopperPullEvents = previousSkipPull;
+             }
+-
+-            return false;
+         } else {
+             boolean isBlocked = hopper.isGridAligned()
+                 && blockState.isCollisionShapeFullBlock(level, blockPos)
+@@ -506,10 +543,17 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+         }
+     }
+ 
+-    private static boolean tryTakeInItemFromSlot(final Hopper hopper, final Container container, final int slot, final Direction direction, final Level level) { // Spigot
++    private static boolean tryTakeInItemFromSlot(
++        final Hopper hopper,
++        final Container container,
++        final int slot,
++        final Direction direction,
++        final Level level,
++        final TickThread tickThread
++    ) { // Spigot
+         ItemStack itemStack = container.getItem(slot);
+         if (!itemStack.isEmpty() && canTakeItemFromContainer(hopper, container, itemStack, slot, direction)) {
+-            return hopperPull(level, hopper, container, itemStack, slot); // Paper - Perf: Optimize Hoppers
++            return hopperPull(level, hopper, container, itemStack, slot, tickThread); // Paper - Perf: Optimize Hoppers
+         }
+ 
+         return false;
+@@ -585,9 +629,9 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+                     itemStack = itemStack.split(container.getMaxStackSize());
+                 }
+                 // Spigot end
+-                ignoreBlockEntityUpdates = true; // Paper - Perf: Optimize Hoppers
+-                container.setItem(slot, itemStack);
+-                ignoreBlockEntityUpdates = false; // Paper - Perf: Optimize Hoppers
++                setItemWithoutBlockEntityUpdates(
++                    container, slot, itemStack, TickThread.getCurrentTickThread()
++                ); // Paper - Perf: Optimize Hoppers; Loom - tick-thread confined
+                 itemStack = leftover; // Paper - Make hoppers respect inventory max stack size
+                 success = true;
+             } else if (canMergeItems(current, itemStack)) {
