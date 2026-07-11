@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 11 Jul 2026 10:36:11 +0000
+Subject: [PATCH] Confine transient runtime state
+
+
+diff --git a/net/minecraft/core/Rotations.java b/net/minecraft/core/Rotations.java
+index 5c3271029b0a09a6f3a4bc39e64f65f9ded46097..f0517bf00ca13515aa3d4ca52d8545fc1d93bb0c 100644
+--- a/net/minecraft/core/Rotations.java
++++ b/net/minecraft/core/Rotations.java
+@@ -27,17 +27,24 @@ public record Rotations(float x, float y, float z) {
+         }
+     };
+     // Paper start - add internal method for skipping validation for plugins using userdev
+-    private static boolean SKIP_VALIDATION = false;
++    private static final ThreadLocal<Boolean> SKIP_VALIDATION = new ThreadLocal<>();
+     public static Rotations createWithoutValidityChecks(float x, float y, float z) {
+-        SKIP_VALIDATION = true;
+-        Rotations rotations = new Rotations(x, y, z);
+-        SKIP_VALIDATION = false;
+-        return rotations;
++        final Boolean previous = SKIP_VALIDATION.get();
++        SKIP_VALIDATION.set(Boolean.TRUE);
++        try {
++            return new Rotations(x, y, z);
++        } finally {
++            if (previous == null) {
++                SKIP_VALIDATION.remove();
++            } else {
++                SKIP_VALIDATION.set(previous);
++            }
++        }
+     }
+     // Paper end  - add internal method for skipping validation for plugins using userdev
+ 
+     public Rotations(float x, float y, float z) {
+-        if (!SKIP_VALIDATION) { // Paper - add internal method for skipping validation for plugins using userdev
++        if (SKIP_VALIDATION.get() != Boolean.TRUE) { // Paper - add internal method for skipping validation for plugins using userdev; Loom - thread-confined
+         x = !Float.isInfinite(x) && !Float.isNaN(x) ? x % 360.0F : 0.0F;
+         y = !Float.isInfinite(y) && !Float.isNaN(y) ? y % 360.0F : 0.0F;
+         z = !Float.isInfinite(z) && !Float.isNaN(z) ? z % 360.0F : 0.0F;
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index f17e9acd63a12c5ed6513f375d253f2f169eebea..ebac9d496abef9128eab4c484de774e58bded183 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -914,7 +914,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+                 loomDiagnostics.record(LoomTickSectionDiagnostics.BLOCK_ENTITIES, System.nanoTime() - loomBlockEntitiesStart);
+             }
+             profiler.pop();
+-            this.spigotConfig.currentPrimedTnt = 0; // Spigot
++            this.spigotConfig.currentPrimedTnt.set(0); // Spigot; Loom - reset after all parallel entity workers join
+         }
+ 
+         loomSectionStart = loomDiagnostics == null ? 0L : System.nanoTime();
+diff --git a/net/minecraft/world/entity/item/PrimedTnt.java b/net/minecraft/world/entity/item/PrimedTnt.java
+index 7970c6f9189059e8fc0391709159ef395c56708c..648a9e0855dd3d4aac3a1212d00e42563c0da47a 100644
+--- a/net/minecraft/world/entity/item/PrimedTnt.java
++++ b/net/minecraft/world/entity/item/PrimedTnt.java
+@@ -101,7 +101,7 @@ public class PrimedTnt extends Entity implements TraceableEntity {
+ 
+     @Override
+     public void tick() {
+-        if (this.level().spigotConfig.maxTntTicksPerTick > 0 && ++this.level().spigotConfig.currentPrimedTnt > this.level().spigotConfig.maxTntTicksPerTick) { return; } // Spigot
++        if (!this.level().spigotConfig.acquirePrimedTntTick()) { return; } // Spigot; Loom - exact parallel quota
+         this.handlePortal();
+         this.applyGravity();
+         this.move(MoverType.SELF, this.getDeltaMovement());
+diff --git a/net/minecraft/world/level/block/entity/SculkCatalystBlockEntity.java b/net/minecraft/world/level/block/entity/SculkCatalystBlockEntity.java
+index e75fb2e83c58de051672c8edaf89c7cb8a68cac8..36aba804a3cf0072159fd45ef4f8fa4a1ad1bdfe 100644
+--- a/net/minecraft/world/level/block/entity/SculkCatalystBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/SculkCatalystBlockEntity.java
+@@ -44,9 +44,12 @@ public class SculkCatalystBlockEntity extends BlockEntity implements GameEventLi
+     // Paper end - Fix NPE in SculkBloomEvent world access
+ 
+     public static void serverTick(final Level level, final BlockPos pos, final BlockState state, final SculkCatalystBlockEntity entity) {
+-        org.bukkit.craftbukkit.event.CraftEventFactory.sourceBlockOverride = entity.getBlockPos(); // CraftBukkit - SPIGOT-7068: Add source block override, not the most elegant way but better than passing down a BlockPos up to five methods deep.
+-        entity.catalystListener.getSculkSpreader().updateCursors(level, pos, level.getRandom(), true);
+-        org.bukkit.craftbukkit.event.CraftEventFactory.sourceBlockOverride = null; // CraftBukkit
++        final BlockPos previousSource = org.bukkit.craftbukkit.event.CraftEventFactory.setScopedSourceBlockOverride(entity.getBlockPos()); // CraftBukkit - SPIGOT-7068
++        try {
++            entity.catalystListener.getSculkSpreader().updateCursors(level, pos, level.getRandom(), true);
++        } finally {
++            org.bukkit.craftbukkit.event.CraftEventFactory.restoreScopedSourceBlockOverride(previousSource);
++        }
+     }
+ 
+     @Override
