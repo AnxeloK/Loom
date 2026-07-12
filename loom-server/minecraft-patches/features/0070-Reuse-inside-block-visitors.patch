@@ -1,0 +1,188 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sun, 12 Jul 2026 21:45:38 +0000
+Subject: [PATCH] Reuse inside-block visitors
+
+
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index d56c17f976acf9a8cb3e94054cb32332e5eed76e..8340ebf001cdaeff87fecd5e6d138cfd9112889e 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -437,6 +437,7 @@ public abstract class Entity
+     private final List<Entity.Movement> finalMovementsThisTick = new ObjectArrayList<>();
+     private final LongSet visitedBlocks = new LongOpenHashSet();
+     private final InsideBlockEffectApplier.StepBasedCollector insideEffectCollector = new InsideBlockEffectApplier.StepBasedCollector();
++    private @Nullable InsideBlockTraversal insideBlockTraversal;
+     private CustomData customData = CustomData.EMPTY;
+     // CraftBukkit start
+     public boolean forceDrops;
+@@ -1873,62 +1874,125 @@ public abstract class Entity
+         boolean movedFar = from.distanceToSqr(to) > Mth.square(0.9999900000002526);
+         boolean debugEntityBlockIntersections = this.level instanceof ServerLevel serverLevel
+             && serverLevel.getServer().debugSubscribers().hasAnySubscriberFor(DebugSubscriptions.ENTITY_BLOCK_INTERSECTIONS);
+-        return BlockGetter.forEachBlockIntersectedBetweenWithCount(
++        final InsideBlockTraversal traversal = this.acquireInsideBlockTraversal();
++        traversal.prepare(
+             from,
+             to,
++            effectCollector,
++            visitedBlocks,
++            maxMovementIterations,
+             deflatedBoundingBoxAtTarget,
+-            (blockIntersection, iteration) -> {
+-                if (!this.isAlive()) {
+-                    return false;
+-                } else if (iteration >= maxMovementIterations) {
+-                    return false;
+-                } else {
+-                    BlockState state = this.level().getBlockState(blockIntersection);
+-                    if (state.isAir()) {
+-                        if (debugEntityBlockIntersections) {
+-                            this.debugBlockIntersection((ServerLevel)this.level(), blockIntersection.immutable(), false, false);
+-                        }
++            movedFar,
++            debugEntityBlockIntersections
++        );
++        try {
++            return BlockGetter.forEachBlockIntersectedBetweenWithCount(from, to, deflatedBoundingBoxAtTarget, traversal);
++        } finally {
++            traversal.inUse = false;
++        }
++    }
+ 
+-                        return true;
+-                    } else {
+-                        VoxelShape intersectShape = state.getEntityInsideCollisionShape(this.level(), blockIntersection, this);
+-                        boolean insideBlock = intersectShape == Shapes.block()
+-                            || this.collidedWithShapeMovingFrom(from, to, intersectShape.move(new Vec3(blockIntersection)).toAabbs());
+-                        boolean insideFluid = this.collidedWithFluid(state.getFluidState(), blockIntersection, from, to);
+-                        if ((insideBlock || insideFluid) && visitedBlocks.add(blockIntersection.asLong())) {
+-                            if (insideBlock) {
+-                                try {
+-                                    boolean isPrecise = movedFar || deflatedBoundingBoxAtTarget.intersects(blockIntersection);
+-                                    effectCollector.advanceStep(iteration, blockIntersection); // Paper - track position inside effect was triggered on
+-                                    state.entityInside(this.level(), blockIntersection, this, effectCollector, isPrecise);
+-                                    this.onInsideBlock(state);
+-                                } catch (Throwable var20) {
+-                                    CrashReport report = CrashReport.forThrowable(var20, "Colliding entity with block");
+-                                    CrashReportCategory category = report.addCategory("Block being collided with");
+-                                    CrashReportCategory.populateBlockDetails(category, this.level(), blockIntersection, state);
+-                                    CrashReportCategory entityCategory = report.addCategory("Entity being checked for collision");
+-                                    this.fillCrashReportCategory(entityCategory);
+-                                    throw new ReportedException(report);
+-                                }
+-                            }
++    private InsideBlockTraversal acquireInsideBlockTraversal() {
++        InsideBlockTraversal traversal = this.insideBlockTraversal;
++        if (traversal == null) {
++            this.insideBlockTraversal = traversal = new InsideBlockTraversal();
++        }
++        while (traversal.inUse) {
++            if (traversal.next == null) {
++                traversal.next = new InsideBlockTraversal();
++            }
++            traversal = traversal.next;
++        }
++        traversal.inUse = true;
++        return traversal;
++    }
+ 
+-                            if (insideFluid) {
+-                                effectCollector.advanceStep(iteration, blockIntersection); // Paper - track position inside effect was triggered on
+-                                state.getFluidState().entityInside(this.level(), blockIntersection, this, effectCollector);
+-                            }
++    private final class InsideBlockTraversal implements BlockGetter.BlockStepVisitor {
++        private boolean inUse;
++        private @Nullable InsideBlockTraversal next;
++        private Vec3 from;
++        private Vec3 to;
++        private InsideBlockEffectApplier.StepBasedCollector effectCollector;
++        private LongSet visitedBlocks;
++        private int maxMovementIterations;
++        private AABB deflatedBoundingBoxAtTarget;
++        private boolean movedFar;
++        private boolean debugEntityBlockIntersections;
++
++        private void prepare(
++            final Vec3 from,
++            final Vec3 to,
++            final InsideBlockEffectApplier.StepBasedCollector effectCollector,
++            final LongSet visitedBlocks,
++            final int maxMovementIterations,
++            final AABB deflatedBoundingBoxAtTarget,
++            final boolean movedFar,
++            final boolean debugEntityBlockIntersections
++        ) {
++            this.from = from;
++            this.to = to;
++            this.effectCollector = effectCollector;
++            this.visitedBlocks = visitedBlocks;
++            this.maxMovementIterations = maxMovementIterations;
++            this.deflatedBoundingBoxAtTarget = deflatedBoundingBoxAtTarget;
++            this.movedFar = movedFar;
++            this.debugEntityBlockIntersections = debugEntityBlockIntersections;
++        }
+ 
+-                            if (debugEntityBlockIntersections) {
+-                                this.debugBlockIntersection((ServerLevel)this.level(), blockIntersection.immutable(), insideBlock, insideFluid);
++        @Override
++        public boolean visit(final BlockPos blockIntersection, final int iteration) {
++            if (!Entity.this.isAlive()) {
++                return false;
++            } else if (iteration >= this.maxMovementIterations) {
++                return false;
++            } else {
++                BlockState state = Entity.this.level().getBlockState(blockIntersection);
++                if (state.isAir()) {
++                    if (this.debugEntityBlockIntersections) {
++                        Entity.this.debugBlockIntersection((ServerLevel)Entity.this.level(), blockIntersection.immutable(), false, false);
++                    }
++
++                    return true;
++                } else {
++                    VoxelShape intersectShape = state.getEntityInsideCollisionShape(Entity.this.level(), blockIntersection, Entity.this);
++                    boolean insideBlock = intersectShape == Shapes.block()
++                        || Entity.this.collidedWithShapeMovingFrom(this.from, this.to, intersectShape.move(new Vec3(blockIntersection)).toAabbs());
++                    boolean insideFluid = Entity.this.collidedWithFluid(state.getFluidState(), blockIntersection, this.from, this.to);
++                    if ((insideBlock || insideFluid) && this.visitedBlocks.add(blockIntersection.asLong())) {
++                        if (insideBlock) {
++                            try {
++                                boolean isPrecise = this.movedFar || this.deflatedBoundingBoxAtTarget.intersects(blockIntersection);
++                                this.effectCollector.advanceStep(iteration, blockIntersection); // Paper - track position inside effect was triggered on
++                                state.entityInside(Entity.this.level(), blockIntersection, Entity.this, this.effectCollector, isPrecise);
++                                Entity.this.onInsideBlock(state);
++                            } catch (Throwable var20) {
++                                CrashReport report = CrashReport.forThrowable(var20, "Colliding entity with block");
++                                CrashReportCategory category = report.addCategory("Block being collided with");
++                                CrashReportCategory.populateBlockDetails(category, Entity.this.level(), blockIntersection, state);
++                                CrashReportCategory entityCategory = report.addCategory("Entity being checked for collision");
++                                Entity.this.fillCrashReportCategory(entityCategory);
++                                throw new ReportedException(report);
+                             }
++                        }
++
++                        if (insideFluid) {
++                            this.effectCollector.advanceStep(iteration, blockIntersection); // Paper - track position inside effect was triggered on
++                            state.getFluidState().entityInside(Entity.this.level(), blockIntersection, Entity.this, this.effectCollector);
++                        }
+ 
+-                            return true;
+-                        } else {
+-                            return true;
++                        if (this.debugEntityBlockIntersections) {
++                            Entity.this.debugBlockIntersection(
++                                (ServerLevel)Entity.this.level(), blockIntersection.immutable(), insideBlock, insideFluid
++                            );
+                         }
++
++                        return true;
++                    } else {
++                        return true;
+                     }
+                 }
+             }
+-        );
++        }
+     }
+ 
+     private void debugBlockIntersection(final ServerLevel level, final BlockPos pos, final boolean insideBlock, final boolean insideFluid) {
