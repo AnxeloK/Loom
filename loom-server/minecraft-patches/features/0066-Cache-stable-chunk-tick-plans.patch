@@ -1,0 +1,219 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sun, 12 Jul 2026 20:33:48 +0000
+Subject: [PATCH] Cache stable chunk tick plans
+
+
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index ff4a10c5f858ab9bfea12f2b0c7ee937b13411b5..f2df01d9c197494e0decbee1ac995b387b64d13a 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -8,6 +8,7 @@ import it.unimi.dsi.fastutil.objects.ObjectArrayList;
+ import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
+ import java.io.IOException;
+ import java.nio.file.Path;
++import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.List;
+ import java.util.Objects;
+@@ -159,6 +160,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+     // Paper end - rewrite chunk system
+     // Paper start - chunk tick iteration optimisations
+     private final ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom shuffleRandom = new ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom(0L);
++    private @Nullable ChunkTickPlan chunkTickPlan;
++
+     private void iterateTickingChunksFaster() {
+         final ServerLevel world = this.level;
+         final int randomTickSpeed = world.getGameRules().get(GameRules.RANDOM_TICK_SPEED);
+@@ -174,77 +177,130 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         final int size = entityTickingChunks.size();
+ 
+         java.util.Objects.checkFromToIndex(0, size, raw.length);
+-        // Loom start - intra-world parallel chunk ticking. Avoid building the region map and staging session
+-        // when every ticking chunk belongs to one owner region: that phase has no parallelism to expose.
+-        if (size <= 1) {
++        // Loom start - intra-world parallel chunk ticking. The entity-ticking list is normally stable for
++        // thousands of ticks. Cache its exact identity/order and the resulting region task layout instead of
++        // rebuilding maps, lists, bounds, tasks, and closures every tick. Any list change invalidates the plan.
++        ChunkTickPlan plan = this.chunkTickPlan;
++        if (plan == null || !plan.matches(raw, size)) {
++            this.chunkTickPlan = plan = new ChunkTickPlan(world, raw, size);
++        }
++        if (!plan.isParallel()) {
+             this.tickChunksSerially(raw, size, world, randomTickSpeed);
+             return;
+         }
+-        final int shift = net.minecraft.server.threading.TickRegions.getRegionChunkShift();
+-        final net.minecraft.world.level.ChunkPos firstPos = raw[0].getPos();
+-        final int firstRegionX = firstPos.x() >> shift;
+-        final int firstRegionZ = firstPos.z() >> shift;
+-        boolean multipleRegions = false;
+-        for (int i = 1; i < size; ++i) {
+-            final net.minecraft.world.level.ChunkPos pos = raw[i].getPos();
+-            if ((pos.x() >> shift) != firstRegionX || (pos.z() >> shift) != firstRegionZ) {
+-                multipleRegions = true;
+-                break;
++        plan.tick(randomTickSpeed);
++        // Loom end
++    }
++
++    private static final class ChunkTickPlan {
++        private final ServerLevel world;
++        private final LevelChunk[] sourceChunks;
++        private final List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks;
++        private int randomTickSpeed;
++        private net.minecraft.server.threading.RegionTickStaging.@Nullable Session stagingSession;
++
++        private ChunkTickPlan(final ServerLevel world, final LevelChunk[] chunks, final int size) {
++            this.world = world;
++            this.sourceChunks = Arrays.copyOf(chunks, size);
++            if (size <= 1) {
++                this.tasks = List.of();
++                return;
++            }
++
++            final int shift = net.minecraft.server.threading.TickRegions.getRegionChunkShift();
++            final it.unimi.dsi.fastutil.longs.Long2ObjectMap<ArrayList<LevelChunk>> byRegion =
++                new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
++            for (int i = 0; i < size; ++i) {
++                final LevelChunk chunk = chunks[i];
++                final int regionX = chunk.locX >> shift;
++                final int regionZ = chunk.locZ >> shift;
++                final long key = ((long)regionX << 32) | (regionZ & 0xFFFFFFFFL);
++                byRegion.computeIfAbsent(key, ignored -> new ArrayList<>()).add(chunk);
++            }
++            if (byRegion.size() <= 1) {
++                this.tasks = List.of();
++                return;
++            }
++
++            final List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new ArrayList<>(byRegion.size());
++            for (final ArrayList<LevelChunk> regionChunks : byRegion.values()) {
++                int minX = Integer.MAX_VALUE;
++                int minZ = Integer.MAX_VALUE;
++                int maxX = Integer.MIN_VALUE;
++                int maxZ = Integer.MIN_VALUE;
++                for (int i = 0, len = regionChunks.size(); i < len; ++i) {
++                    final LevelChunk chunk = regionChunks.get(i);
++                    minX = Math.min(minX, chunk.locX);
++                    minZ = Math.min(minZ, chunk.locZ);
++                    maxX = Math.max(maxX, chunk.locX);
++                    maxZ = Math.max(maxZ, chunk.locZ);
++                }
++                // Keep the occupied bounds rather than widening to the whole region cell; widened neighboring
++                // cells would overlap through the scheduler's safety buffer and lose valid parallelism.
++                final ChunkTickGroup group = new ChunkTickGroup(this, regionChunks.toArray(LevelChunk[]::new));
++                tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(minX, minZ, minX, minZ, maxX, maxZ, group));
+             }
++            this.tasks = tasks;
+         }
+-        if (!multipleRegions) {
+-            this.tickChunksSerially(raw, size, world, randomTickSpeed);
+-            return;
++
++        private boolean matches(final LevelChunk[] chunks, final int size) {
++            if (this.sourceChunks.length != size) {
++                return false;
++            }
++            for (int i = 0; i < size; ++i) {
++                if (this.sourceChunks[i] != chunks[i]) {
++                    return false;
++                }
++            }
++            return true;
+         }
+ 
+-        // Group the entity-ticking chunks by region and dispatch ONE task per region (each ticking all of
+-        // its chunks under a single staging buffer), instead of one task per chunk. This keeps the per-tick
+-        // dispatch/staging overhead proportional to the (small) number of regions, not the chunk count.
+-        final it.unimi.dsi.fastutil.longs.Long2ObjectMap<java.util.List<net.minecraft.world.level.chunk.LevelChunk>> byRegion =
+-            new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
+-        for (int i = 0; i < size; ++i) {
+-            final net.minecraft.world.level.chunk.LevelChunk chunk = raw[i];
+-            final net.minecraft.world.level.ChunkPos pos = chunk.getPos();
+-            final long key = (((long) (pos.x() >> shift)) << 32) | ((pos.z() >> shift) & 0xFFFFFFFFL);
+-            byRegion.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(chunk);
+-        }
+-        // One staging session per dispatch: workers register their buffers into THIS session only, so the
+-        // serial replay below drains only this world's buffers — never another world ticking in parallel.
+-        final net.minecraft.server.threading.RegionTickStaging.Session stagingSession =
+-            net.minecraft.server.threading.RegionTickStaging.newSession();
+-        final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(byRegion.size());
+-        for (final java.util.List<net.minecraft.world.level.chunk.LevelChunk> regionChunks : byRegion.values()) {
+-            // Bounds stay the occupied bounding box (NOT snapped to the cell): full-cell bounds always
+-            // touch adjacent occupied cells through the non-adjacency buffer and merge them, costing
+-            // chunk-phase parallelism. The partition cache keys on the exact boxes, which are stable
+-            // under steady load, so caching still hits without widening the leases.
+-            int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+-            for (int j = 0, n = regionChunks.size(); j < n; ++j) {
+-                final net.minecraft.world.level.ChunkPos p = regionChunks.get(j).getPos();
+-                if (p.x() < minX) { minX = p.x(); }
+-                if (p.x() > maxX) { maxX = p.x(); }
+-                if (p.z() < minZ) { minZ = p.z(); }
+-                if (p.z() > maxZ) { maxZ = p.z(); }
++        private boolean isParallel() {
++            return !this.tasks.isEmpty();
++        }
++
++        private void tick(final int randomTickSpeed) {
++            final net.minecraft.server.threading.RegionTickStaging.Session session =
++                net.minecraft.server.threading.RegionTickStaging.newSession();
++            this.randomTickSpeed = randomTickSpeed;
++            this.stagingSession = session;
++            try {
++                net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(this.world, this.tasks, "chunkTick");
++                net.minecraft.server.threading.RegionTickStaging.applyAndClear(session, this.world);
++            } finally {
++                this.stagingSession = null;
+             }
+-            final int fMinX = minX, fMinZ = minZ, fMaxX = maxX, fMaxZ = maxZ;
+-            tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(fMinX, fMinZ, fMinX, fMinZ, fMaxX, fMaxZ, () -> {
+-                // Buffer this region's side effects on the worker; they are replayed serially below.
+-                net.minecraft.server.threading.RegionTickStaging.begin(stagingSession);
+-                try {
+-                    for (int j = 0, n = regionChunks.size(); j < n; ++j) {
+-                        world.tickChunk(regionChunks.get(j), randomTickSpeed);
+-                    }
+-                } finally {
+-                    net.minecraft.server.threading.RegionTickStaging.end();
++        }
++
++        private void tickGroup(final LevelChunk[] chunks) {
++            final net.minecraft.server.threading.RegionTickStaging.Session session = this.stagingSession;
++            if (session == null) {
++                throw new IllegalStateException("Chunk tick plan executed outside its dispatch");
++            }
++            net.minecraft.server.threading.RegionTickStaging.begin(session);
++            try {
++                for (int i = 0, len = chunks.length; i < len; ++i) {
++                    this.world.tickChunk(chunks[i], this.randomTickSpeed);
+                 }
+-            }));
++            } finally {
++                net.minecraft.server.threading.RegionTickStaging.end();
++            }
++        }
++    }
++
++    private static final class ChunkTickGroup implements Runnable {
++        private final ChunkTickPlan plan;
++        private final LevelChunk[] chunks;
++
++        private ChunkTickGroup(final ChunkTickPlan plan, final LevelChunk[] chunks) {
++            this.plan = plan;
++            this.chunks = chunks;
++        }
++
++        @Override
++        public void run() {
++            this.plan.tickGroup(this.chunks);
+         }
+-        // The engine suspends this world's full-level lease, buckets the tasks by region (with the
+-        // non-adjacency buffer), and ticks non-adjacent regions concurrently, then restores the lease.
+-        net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(world, tasks, "chunkTick");
+-        // Apply this session's staged side effects serially on this (the owning) thread, with the full-level lease restored.
+-        net.minecraft.server.threading.RegionTickStaging.applyAndClear(stagingSession, world);
+-        // Loom end
+     }
+ 
+     private void tickChunksSerially(final LevelChunk[] chunks, final int size, final ServerLevel world, final int randomTickSpeed) {
