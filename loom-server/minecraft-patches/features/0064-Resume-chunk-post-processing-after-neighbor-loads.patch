@@ -1,0 +1,311 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sun, 12 Jul 2026 16:51:09 +0000
+Subject: [PATCH] Resume chunk post-processing after neighbor loads
+
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
+index c4fa7ec6c3f311c76c0239008b6e5908d3584d62..7382e40b0175b93aba9c3a234f932a02c1d0e194 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
+@@ -1491,8 +1491,14 @@ public final class RegionizedPlayerChunkLoader {
+                         break;
+                     }
+                     final long postProcessStart = diagnostics == null && phaseBudget == null ? 0L : System.nanoTime();
+-                    chunk.postProcessGeneration(this.world);
++                    final boolean postProcessed = chunk.moonrise$ensurePostProcessing(this.world);
+                     final long postProcessDone = diagnostics != null || phaseBudget != null ? System.nanoTime() : 0L;
++                    if (!postProcessed) {
++                        if (phaseBudget != null) {
++                            phaseBudget.recordPostProcess(postProcessDone - postProcessStart);
++                        }
++                        break;
++                    }
+                     if (diagnostics != null) {
+                         ++diagnostics.postProcessedChunks;
+                         diagnostics.postProcessNanos += postProcessDone - postProcessStart;
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
+index 9a9a599ef178f851ee5c783631a724013a693586..af17f9006e9d3a36b6b25e21651a8dd8d30a406f 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
+@@ -1194,6 +1194,10 @@ public final class NewChunkHolder {
+         this.currentFullChunkStatus = to;
+     }
+ 
++    public void moonrise$requeueFullStatusChange() {
++        this.scheduler.chunkHolderManager.addChangedStatuses(List.of(this));
++    }
++
+     // only to be called on the main thread, no locks need to be held
+     public boolean handleFullStatusChange(final List<NewChunkHolder> changedFullStatus) {
+         TickThread.ensureTickThread(this.world, this.chunkX, this.chunkZ, "Cannot update full status thread off-main");
+@@ -1256,6 +1260,9 @@ public final class NewChunkHolder {
+                     }
+ 
+                     if (!current.isOrAfter(FullChunkStatus.BLOCK_TICKING) && pending.isOrAfter(FullChunkStatus.BLOCK_TICKING)) {
++                        if (!chunk.moonrise$ensurePostProcessing(this.world)) {
++                            return ret;
++                        }
+                         this.updateCurrentState(FullChunkStatus.BLOCK_TICKING);
+                         this.changeEntityChunkStatus(FullChunkStatus.BLOCK_TICKING);
+                         PlatformHooks.get().onChunkTicking(chunk, this.vanillaChunkHolder);
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index f96fd129b740682ce903ef8818368886de1d14a0..e32ec1f1b544a9881dd55cdece8847b0532dab44 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -2203,6 +2203,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             final net.minecraft.server.threading.TickRegions.RegionContext tickRegionContext =
+                 net.minecraft.server.threading.TickRegions.pushLevelContext(level);
+             try {
++                net.minecraft.server.threading.TickRegions.runRegionContinuations(level);
+                 net.minecraft.server.threading.TickRegions.runFullLevelContinuations(level);
+                 level.tick(haveTime);
+             } catch (Throwable throwable) {
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index 67b63540c9b3f17c8bf485530786befab35e3d1f..dcffa1217cebeedb90a48dda8d04ff0c59adcfbe 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -1365,6 +1365,43 @@ public class TickRegions {
+         stateFor(world).drainMailbox();
+     }
+ 
++    public static void runRegionContinuations(final ServerLevel world) {
++        if (!isCurrentThreadOwnerQuiet(
++            world,
++            Integer.MIN_VALUE,
++            Integer.MIN_VALUE,
++            Integer.MAX_VALUE,
++            Integer.MAX_VALUE
++        )) {
++            throw new IllegalStateException("Region continuations require the world's full region owner");
++        }
++        stateFor(world).drainRegionContinuations();
++    }
++
++    public static void sendRegionContinuation(
++        final ServerLevel world,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final Runnable action
++    ) {
++        Objects.requireNonNull(world, "World may not be null");
++        Objects.requireNonNull(action, "Action may not be null");
++        if (maxChunkX < minChunkX || maxChunkZ < minChunkZ) {
++            throw new IllegalArgumentException("Invalid region continuation bounds");
++        }
++        stateFor(world).enqueueRegionContinuation(new RegionBoundTask(
++            minChunkX,
++            minChunkZ,
++            minChunkX,
++            minChunkZ,
++            maxChunkX,
++            maxChunkZ,
++            action
++        ));
++    }
++
+     public static void runFullLevelContinuations(final ServerLevel world) {
+         if (!isCurrentThreadOwnerQuiet(
+             world,
+@@ -1621,6 +1658,7 @@ public class TickRegions {
+         private final Object lock = new Object();
+         private final Map<Long, List<RegionScheduledTask>> tasksByDeadline = new HashMap<>();
+         private final ArrayDeque<CrossRegionMessage> mailbox = new ArrayDeque<>();
++        private final ArrayDeque<RegionBoundTask> regionContinuations = new ArrayDeque<>();
+         private final ArrayDeque<Runnable> fullLevelContinuations = new ArrayDeque<>();
+         private long tickCount;
+         private long scheduledTaskCount;
+@@ -1764,6 +1802,24 @@ public class TickRegions {
+             }
+         }
+ 
++        private void enqueueRegionContinuation(final RegionBoundTask continuation) {
++            synchronized (this.lock) {
++                this.regionContinuations.addLast(continuation);
++            }
++        }
++
++        private void drainRegionContinuations() {
++            final List<RegionBoundTask> continuations;
++            synchronized (this.lock) {
++                if (this.regionContinuations.isEmpty()) {
++                    return;
++                }
++                continuations = new ArrayList<>(this.regionContinuations);
++                this.regionContinuations.clear();
++            }
++            runRegionBoundTasksFromCurrentContext(this.world, continuations, "region-continuation");
++        }
++
+         private void drainFullLevelContinuations() {
+             final List<Runnable> continuations;
+             synchronized (this.lock) {
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index 10e1e24f9518bc0b73dca38ff5a2e149fb5cc168..53802b9fcd6f5ad6d166dcaf52ecb5b241c1da14 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -204,14 +204,24 @@ public final class OwnerDomainExecutor {
+     }
+ 
+     public static boolean isRegionOwner(final ServerLevel level, final int chunkX, final int chunkZ) {
++        return isRegionOwner(level, chunkX, chunkZ, chunkX, chunkZ);
++    }
++
++    public static boolean isRegionOwner(
++        final ServerLevel level,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ
++    ) {
+         for (OwnerContext context = CURRENT_OWNER.get(); context != null; context = context.previous()) {
+             final Owner owner = context.owner();
+             if (owner.domain() == Domain.REGION
+                 && owner.level() == level
+-                && chunkX >= owner.minChunkX()
+-                && chunkX <= owner.maxChunkX()
+-                && chunkZ >= owner.minChunkZ()
+-                && chunkZ <= owner.maxChunkZ()) {
++                && minChunkX >= owner.minChunkX()
++                && maxChunkX <= owner.maxChunkX()
++                && minChunkZ >= owner.minChunkZ()
++                && maxChunkZ <= owner.maxChunkZ()) {
+                 return true;
+             }
+         }
+@@ -393,6 +403,17 @@ public final class OwnerDomainExecutor {
+             TickRegions.sendFullLevelContinuation(level, wrap(owner, task));
+             return;
+         }
++        if (owner.minChunkX() != owner.maxChunkX() || owner.minChunkZ() != owner.maxChunkZ()) {
++            TickRegions.sendRegionContinuation(
++                level,
++                owner.minChunkX(),
++                owner.minChunkZ(),
++                owner.maxChunkX(),
++                owner.maxChunkZ(),
++                wrap(owner, task)
++            );
++            return;
++        }
+         TickRegions.sendCrossRegionMessage(
+             level,
+             owner.chunkX(),
+diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
+index a7c9a0c69c8c6deef275a96102201b139e9fc53b..102516b36b78fa11f06d0a5eb3e8142c1d678f46 100644
+--- a/net/minecraft/world/level/chunk/LevelChunk.java
++++ b/net/minecraft/world/level/chunk/LevelChunk.java
+@@ -106,6 +106,7 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+     // Paper end
+     // Paper start - rewrite chunk system
+     private boolean postProcessingDone;
++    private boolean postProcessingScheduled;
+     private ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder chunkAndHolder;
+ 
+     @Override
+@@ -122,6 +123,103 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+     public final void moonrise$setChunkHolder(final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder holder) {
+         this.chunkAndHolder = holder;
+     }
++
++    // Loom - generation post-processing can reach the one-chunk halo through neighbour shapes, fluids,
++    // and block updates. If that halo is not ready, load it asynchronously and resume under one bounded
++    // REGION owner instead of entering ServerChunkCache's forbidden synchronous wait.
++    public final boolean moonrise$ensurePostProcessing(final ServerLevel level) {
++        if (this.postProcessingDone) {
++            return true;
++        }
++
++        final ChunkPos pos = this.getPos();
++        final int minChunkX = pos.x() - 1;
++        final int minChunkZ = pos.z() - 1;
++        final int maxChunkX = pos.x() + 1;
++        final int maxChunkZ = pos.z() + 1;
++        final boolean haloReady = this.moonrise$isPostProcessingHaloReady(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
++        if (haloReady
++            && net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(
++                level, minChunkX, minChunkZ, maxChunkX, maxChunkZ
++            )
++            && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(
++                level, minChunkX, minChunkZ, maxChunkX, maxChunkZ
++            )) {
++            this.postProcessGeneration(level);
++            return true;
++        }
++
++        if (this.postProcessingScheduled) {
++            return false;
++        }
++        this.postProcessingScheduled = true;
++
++        if (haloReady) {
++            this.moonrise$queuePostProcessingContinuation(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
++        } else {
++            level.moonrise$loadChunksAsync(
++                minChunkX,
++                maxChunkX,
++                minChunkZ,
++                maxChunkZ,
++                ChunkStatus.FULL,
++                ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++                ignored -> this.moonrise$queuePostProcessingContinuation(
++                    level, minChunkX, minChunkZ, maxChunkX, maxChunkZ
++                )
++            );
++        }
++        return false;
++    }
++
++    private boolean moonrise$isPostProcessingHaloReady(
++        final ServerLevel level,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ
++    ) {
++        final ChunkPos pos = this.getPos();
++        for (int chunkX = minChunkX; chunkX <= maxChunkX; ++chunkX) {
++            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; ++chunkZ) {
++                final LevelChunk loaded = level.getChunkSource().getChunkAtIfLoadedImmediately(chunkX, chunkZ);
++                if (loaded == null || (chunkX == pos.x() && chunkZ == pos.z() && loaded != this)) {
++                    return false;
++                }
++            }
++        }
++        return true;
++    }
++
++    private void moonrise$queuePostProcessingContinuation(
++        final ServerLevel level,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ
++    ) {
++        net.minecraft.server.threading.TickRegions.sendRegionContinuation(
++            level,
++            minChunkX,
++            minChunkZ,
++            maxChunkX,
++            maxChunkZ,
++            () -> this.moonrise$resumePostProcessing(level)
++        );
++    }
++
++    private void moonrise$resumePostProcessing(final ServerLevel level) {
++        this.postProcessingScheduled = false;
++        final ChunkPos pos = this.getPos();
++        if (level.getChunkSource().getChunkAtIfLoadedImmediately(pos.x(), pos.z()) == this
++            && !this.moonrise$ensurePostProcessing(level)) {
++            return;
++        }
++        final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder holder = this.chunkAndHolder;
++        if (holder != null) {
++            holder.moonrise$requeueFullStatusChange();
++        }
++    }
+     // Paper end - rewrite chunk system
+     // Paper start - get block chunk optimisation
+     private static final BlockState AIR_BLOCKSTATE = Blocks.AIR.defaultBlockState();
