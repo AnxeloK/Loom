@@ -1,0 +1,736 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sun, 12 Jul 2026 10:49:40 +0000
+Subject: [PATCH] Run saves as owner continuations
+
+Capture mutable player and saved-data state inside its owner domain, then write immutable snapshots through asynchronous I/O. Save commands now complete through a finite region I/O barrier instead of blocking the lifecycle owner or waiting for unrelated future writes.
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/io/MoonriseRegionFileIO.java b/ca/spottedleaf/moonrise/patches/chunk_system/io/MoonriseRegionFileIO.java
+index 3bb9b58ee97464687e348e23b99159226415c267..90dd9c3980f71f4056adf1227267a9c45bb1f43f 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/io/MoonriseRegionFileIO.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/io/MoonriseRegionFileIO.java
+@@ -17,6 +17,7 @@ import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
+ import net.minecraft.nbt.CompoundTag;
+ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerLevel;
++import net.minecraft.world.level.ChunkPos;
+ import net.minecraft.world.level.chunk.storage.RegionFile;
+ import net.minecraft.world.level.chunk.storage.RegionFileStorage;
+ import org.slf4j.Logger;
+@@ -25,6 +26,9 @@ import java.io.DataInputStream;
+ import java.io.DataOutputStream;
+ import java.io.IOException;
+ import java.lang.invoke.VarHandle;
++import java.util.ArrayList;
++import java.util.Collection;
++import java.util.List;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.CompletionException;
+ import java.util.concurrent.atomic.AtomicInteger;
+@@ -169,6 +173,30 @@ public final class MoonriseRegionFileIO {
+         }
+     }
+ 
++    // Loom start - keep durability waits off every mutable owner domain
++    public static CompletableFuture<Void> flushAsync(final MinecraftServer server, final Collection<ServerLevel> worlds) {
++        final List<CompletableFuture<Void>> pendingTasks = new ArrayList<>();
++        for (final ServerLevel world : worlds) {
++            for (final RegionFileType type : CACHED_REGIONFILE_TYPES) {
++                pendingTasks.addAll(getControllerFor(world, type).snapshotTaskCompletions());
++            }
++        }
++
++        // Waiting for a live queue to become globally empty can starve while later ticks schedule
++        // unrelated saves. Snapshot the finite pre-barrier task set, then enqueue flush markers through
++        // each loaded region's ordered I/O lane. Later writes remain independent of this transaction.
++        return CompletableFuture.allOf(pendingTasks.toArray(CompletableFuture[]::new)).thenCompose(ignored -> {
++            final List<CompletableFuture<Void>> regionFlushes = new ArrayList<>();
++            for (final ServerLevel world : worlds) {
++                for (final RegionFileType type : CACHED_REGIONFILE_TYPES) {
++                    regionFlushes.addAll(getControllerFor(world, type).flushLoadedRegionsAsync(server));
++                }
++            }
++            return CompletableFuture.allOf(regionFlushes.toArray(CompletableFuture[]::new));
++        });
++    }
++    // Loom end - keep durability waits off every mutable owner domain
++
+     public static void flush(final ServerLevel world) {
+         for (final RegionFileType regionFileType : CACHED_REGIONFILE_TYPES) {
+             flush(world, regionFileType);
+@@ -962,6 +990,8 @@ public final class MoonriseRegionFileIO {
+         private RegionDataController.ReadData readData;
+         private RegionDataController.WriteData writeData;
+         private boolean failedWrite;
++        private boolean taskComplete;
++        private CompletableFuture<Void> taskCompletion;
+ 
+         public ChunkIOTask(final ServerLevel world, final RegionDataController regionDataController,
+                            final int chunkX, final int chunkZ, final Priority priority, final InProgressRead inProgressRead) {
+@@ -973,6 +1003,29 @@ public final class MoonriseRegionFileIO {
+             this.inProgressRead = inProgressRead;
+         }
+ 
++        private CompletableFuture<Void> taskCompletion() {
++            synchronized (this) {
++                if (this.taskComplete) {
++                    return CompletableFuture.completedFuture(null);
++                }
++                if (this.taskCompletion == null) {
++                    this.taskCompletion = new CompletableFuture<>();
++                }
++                return this.taskCompletion;
++            }
++        }
++
++        private void completeTask() {
++            final CompletableFuture<Void> completion;
++            synchronized (this) {
++                this.taskComplete = true;
++                completion = this.taskCompletion;
++            }
++            if (completion != null) {
++                completion.complete(null);
++            }
++        }
++
+         public Priority getPriority() {
+             synchronized (this) {
+                 return this.priority;
+@@ -1450,9 +1503,57 @@ public final class MoonriseRegionFileIO {
+         }
+ 
+         final void endTask(final ChunkIOTask task) {
++            task.completeTask();
+             this.inProgressTasks.getAndDecrement();
+         }
+ 
++        public List<CompletableFuture<Void>> snapshotTaskCompletions() {
++            final List<CompletableFuture<Void>> completions = new ArrayList<>();
++            for (final ChunkIOTask task : this.chunkTasks.values()) {
++                completions.add(task.taskCompletion());
++            }
++            return completions;
++        }
++
++        public List<CompletableFuture<Void>> flushLoadedRegionsAsync(final MinecraftServer server) {
++            final RegionFileStorage cache = this.getCache();
++            final long[] loadedRegions;
++            synchronized (cache) {
++                loadedRegions = cache.regionCache.keySet().toLongArray();
++            }
++
++            final List<CompletableFuture<Void>> completions = new ArrayList<>(loadedRegions.length);
++            for (final long regionKey : loadedRegions) {
++                final int chunkX = ChunkPos.getX(regionKey) << 5;
++                final int chunkZ = ChunkPos.getZ(regionKey) << 5;
++                final CompletableFuture<Void> completion = new CompletableFuture<>();
++                final PrioritisedExecutor.PrioritisedTask task = this.createRegionIoTask(
++                    chunkX,
++                    chunkZ,
++                    () -> {
++                        try (net.minecraft.server.threading.runtime.OwnerDomainExecutor.Scope ignored =
++                                 net.minecraft.server.threading.runtime.OwnerDomainExecutor.enter(
++                                     net.minecraft.server.threading.runtime.OwnerDomainExecutor.asyncIo(server, "flush-region-file")
++                                 )) {
++                            final RegionFile regionFile = cache.moonrise$getRegionFileIfLoaded(chunkX, chunkZ);
++                            if (regionFile != null) {
++                                regionFile.flush();
++                            }
++                            completion.complete(null);
++                        } catch (final Throwable throwable) {
++                            completion.completeExceptionally(throwable);
++                        }
++                    },
++                    Priority.BLOCKING
++                );
++                if (!task.queue()) {
++                    completion.completeExceptionally(new IllegalStateException("Region I/O executor rejected a durability barrier"));
++                }
++                completions.add(completion);
++            }
++            return completions;
++        }
++
+         public boolean hasTasks() {
+             return this.inProgressTasks.get() != 0L;
+         }
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index d21a2932aff446f65dbdf2beaf0c614b50db19f2..f96fd129b740682ce903ef8818368886de1d14a0 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -38,6 +38,7 @@ import java.util.Map.Entry;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.Executor;
+ import java.util.concurrent.RejectedExecutionException;
++import java.util.concurrent.atomic.AtomicInteger;
+ import java.util.concurrent.atomic.AtomicReference;
+ import java.util.concurrent.locks.LockSupport;
+ import java.util.function.BooleanSupplier;
+@@ -310,7 +311,9 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     public PotionBrewing potionBrewing;
+     private FuelValues fuelValues;
+     private int emptyTicks;
+-    private volatile boolean isSaving;
++    private final AtomicInteger activeSaveOperations = new AtomicInteger();
++    private CompletableFuture<?> pendingAsyncSave = CompletableFuture.completedFuture(null);
++    private boolean shutdownQueuedAfterSave;
+     private final SuppressedExceptionCollector suppressedExceptions = new SuppressedExceptionCollector();
+     private final DiscontinuousFrame tickFrame;
+     private final PacketProcessor packetProcessor;
+@@ -1023,17 +1026,20 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         // Paper - move to saveGlobalData()
+ 
+         if (flush) {
+-            for (ServerLevel level : this.getAllLevels()) {
+-                String storageName = level.getChunkSource().chunkMap.getStorageName();
+-                LOGGER.info("ThreadedAnvilChunkStorage ({}): All chunks are saved", LEGACY_WORLD_NAMES_FOR_REALMS_LOG.getOrDefault(storageName, storageName));
+-            }
+-
+-            LOGGER.info("ThreadedAnvilChunkStorage: All dimensions are saved");
++            this.logChunkSaveCompletion(this.getAllLevels());
+         }
+ 
+         return result;
+     }
+ 
++    private void logChunkSaveCompletion(final Iterable<ServerLevel> levels) {
++        for (final ServerLevel level : levels) {
++            final String storageName = level.getChunkSource().chunkMap.getStorageName();
++            LOGGER.info("ThreadedAnvilChunkStorage ({}): All chunks are saved", LEGACY_WORLD_NAMES_FOR_REALMS_LOG.getOrDefault(storageName, storageName));
++        }
++        LOGGER.info("ThreadedAnvilChunkStorage: All dimensions are saved");
++    }
++
+     // Paper start - split out global level data
+     public void saveGlobalData(final boolean flush) {
+         this.scoreboard.storeToSaveDataIfDirty(this.getDataStorage().computeIfAbsent(ScoreboardSaveData.TYPE));
+@@ -1051,18 +1057,133 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     public boolean saveEverything(final boolean silent, final boolean flush, final boolean force) {
+         boolean var5;
+         try {
+-            this.isSaving = true;
++            this.beginSaving();
+             this.getPlayerList().saveAll(); // Paper - Incremental chunk and player saving; diff on change
+             boolean result = this.saveAllChunks(silent, flush, force);
+             this.warnOnLowDiskSpace();
+             var5 = result;
+         } finally {
+-            this.isSaving = false;
++            this.endSaving();
+         }
+ 
+         return var5;
+     }
+ 
++    // Loom start - owner-domain save transaction
++    public CompletableFuture<Boolean> saveEverythingAsync(final boolean silent, final boolean flush, final boolean force) {
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this, "save-everything-async");
++        final CompletableFuture<Boolean> result = new CompletableFuture<>();
++        final CompletableFuture<?> precedingSave = this.pendingAsyncSave;
++        this.pendingAsyncSave = result;
++        if (precedingSave.isDone()) {
++            this.startAsyncSave(silent, flush, force, result);
++        } else {
++            precedingSave.whenComplete((ignored, failure) -> this.resumeAsyncSave(silent, flush, force, result));
++        }
++        return result;
++    }
++
++    private void resumeAsyncSave(
++        final boolean silent,
++        final boolean flush,
++        final boolean force,
++        final CompletableFuture<Boolean> result
++    ) {
++        try {
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this, "resume-save-everything"),
++                () -> this.startAsyncSave(silent, flush, force, result)
++            );
++        } catch (final RejectedExecutionException rejected) {
++            result.completeExceptionally(rejected);
++        }
++    }
++
++    private void startAsyncSave(
++        final boolean silent,
++        final boolean flush,
++        final boolean force,
++        final CompletableFuture<Boolean> result
++    ) {
++        this.beginSaving();
++        final List<CompletableFuture<?>> barriers = new java.util.ArrayList<>();
++        final List<ServerLevel> levels = ImmutableList.copyOf(this.getAllLevels());
++        boolean savedAny = false;
++        Throwable schedulingFailure = null;
++        try {
++            barriers.add(this.getPlayerList().saveAllAsync());
++            // Capturing chunk and saved-data payloads remains owner-bound. Passing flush=false only
++            // removes the subsequent durability wait; every vanilla save is still scheduled.
++            savedAny = this.saveAllChunks(silent, false, force);
++            if (flush) {
++                barriers.add(this.getDataStorage().scheduleSave());
++                for (final ServerLevel level : levels) {
++                    barriers.add(level.getDataStorage().scheduleSave());
++                }
++                barriers.add(ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.flushAsync(this, levels));
++            }
++        } catch (final Throwable throwable) {
++            schedulingFailure = throwable;
++        }
++
++        final boolean saveResult = savedAny;
++        final Throwable initialFailure = schedulingFailure;
++        CompletableFuture.allOf(barriers.toArray(CompletableFuture[]::new)).whenComplete((ignored, asynchronousFailure) -> {
++            final Throwable failure = initialFailure != null ? initialFailure : asynchronousFailure;
++            try {
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                    net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this, "complete-save-everything"),
++                    () -> this.completeAsyncSave(levels, flush, saveResult, failure, result)
++                );
++            } catch (final RejectedExecutionException rejected) {
++                this.endSaving();
++                result.completeExceptionally(failure == null ? rejected : failure);
++            }
++        });
++    }
++
++    private void completeAsyncSave(
++        final List<ServerLevel> levels,
++        final boolean flush,
++        final boolean saveResult,
++        final @Nullable Throwable failure,
++        final CompletableFuture<Boolean> result
++    ) {
++        Throwable completionFailure = failure;
++        try {
++            if (completionFailure == null) {
++                if (flush) {
++                    this.logChunkSaveCompletion(levels);
++                }
++                this.warnOnLowDiskSpace();
++            }
++        } catch (final Throwable throwable) {
++            completionFailure = throwable;
++        } finally {
++            this.endSaving();
++        }
++
++        if (completionFailure == null) {
++            result.complete(saveResult);
++        } else {
++            LOGGER.error("Asynchronous save transaction failed", completionFailure);
++            result.completeExceptionally(completionFailure);
++        }
++    }
++
++    private void beginSaving() {
++        this.activeSaveOperations.incrementAndGet();
++    }
++
++    private void endSaving() {
++        final int remaining = this.activeSaveOperations.decrementAndGet();
++        if (remaining < 0) {
++            this.activeSaveOperations.set(0);
++            throw new IllegalStateException("Save operation accounting underflow");
++        }
++    }
++    // Loom end - owner-domain save transaction
++
+     @Override
+     public void close() {
+         this.stopServer();
+@@ -1105,7 +1226,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         }
+         // CraftBukkit end
+         this.getConnection().stop();
+-        this.isSaving = true;
++        this.beginSaving();
+         if (this.playerList != null) {
+             LOGGER.info("Saving players");
+             this.playerList.saveAll();
+@@ -1141,7 +1262,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+ 
+         this.saveAllChunks(false, true, false, true); // Paper - rewrite chunk system
+ 
+-        this.isSaving = false;
++        this.endSaving();
+         this.savedDataStorage.close();
+         this.resources.close();
+ 
+@@ -1191,6 +1312,28 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         this.safeShutdown(wait, false);
+     }
+     public void safeShutdown(final boolean wait, final boolean isRestarting) {
++        // Loom start - do not close region storage while a non-blocking durability barrier owns it
++        if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this) && !this.pendingAsyncSave.isDone()) {
++            this.isRestarting |= isRestarting;
++            if (!this.shutdownQueuedAfterSave) {
++                this.shutdownQueuedAfterSave = true;
++                this.pendingAsyncSave.whenComplete((ignored, failure) -> {
++                    try {
++                        net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                            net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this, "shutdown-after-save"),
++                            () -> {
++                                this.shutdownQueuedAfterSave = false;
++                                this.safeShutdown(false, this.isRestarting);
++                            }
++                        );
++                    } catch (final RejectedExecutionException rejected) {
++                        LOGGER.error("Could not resume shutdown after the active save transaction", rejected);
++                    }
++                });
++            }
++            return;
++        }
++        // Loom end - do not close region storage while a non-blocking durability barrier owns it
+         this.isRestarting = isRestarting;
+         this.hasLoggedStop = true; // Paper - Debugging
+         if (this.isDebugging()) io.papermc.paper.util.TraceUtil.dumpTraceForThread("Server stopped"); // Paper - Debugging
+@@ -1864,7 +2007,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         Profiler.get().push("save");
+         final boolean fullSave = this.autosavePeriod > 0 && this.tickCount % this.autosavePeriod == 0;
+         try {
+-            this.isSaving = true;
++            this.beginSaving();
+             if (playerSaveInterval > 0) {
+                 this.playerList.saveAll(playerSaveInterval);
+             }
+@@ -1877,7 +2020,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+                 }
+             }
+         } finally {
+-            this.isSaving = false;
++            this.endSaving();
+         }
+         Profiler.get().pop();
+         // Paper end - Incremental chunk and player saving
+@@ -3089,7 +3232,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     }
+ 
+     public boolean isCurrentlySaving() {
+-        return this.isSaving;
++        return this.activeSaveOperations.get() != 0;
+     }
+ 
+     public boolean isTimeProfilerRunning() {
+diff --git a/net/minecraft/server/PlayerAdvancements.java b/net/minecraft/server/PlayerAdvancements.java
+index 658db8460122db271bbc3c2c0844574b8d75f044..f48ecb35c56bcb7793fe45136aed2cc26b101184 100644
+--- a/net/minecraft/server/PlayerAdvancements.java
++++ b/net/minecraft/server/PlayerAdvancements.java
+@@ -129,19 +129,30 @@ public class PlayerAdvancements {
+     }
+ 
+     public void save() {
+-        if (org.spigotmc.SpigotConfig.disableAdvancementSaving) return; // Spigot
+-        JsonElement json = this.codec.encodeStart(JsonOps.INSTANCE, this.asData()).getOrThrow();
++        final JsonElement snapshot = this.captureSave();
++        if (snapshot != null) {
++            this.writeSave(snapshot);
++        }
++    }
++
++    // Loom start - split owner-bound capture from asynchronous file I/O
++    public @Nullable JsonElement captureSave() {
++        if (org.spigotmc.SpigotConfig.disableAdvancementSaving) return null; // Spigot
++        return this.codec.encodeStart(JsonOps.INSTANCE, this.asData()).getOrThrow();
++    }
+ 
++    public void writeSave(final JsonElement snapshot) {
+         try {
+             FileUtil.createDirectoriesSafe(this.playerSavePath.getParent());
+ 
+             try (Writer outputWriter = Files.newBufferedWriter(this.playerSavePath, StandardCharsets.UTF_8)) {
+-                GSON.toJson(json, GSON.newJsonWriter(outputWriter));
++                GSON.toJson(snapshot, GSON.newJsonWriter(outputWriter));
+             }
+         } catch (JsonIOException | IOException var7) {
+             LOGGER.error("Couldn't save player advancements to {}", this.playerSavePath, var7);
+         }
+     }
++    // Loom end - split owner-bound capture from asynchronous file I/O
+ 
+     private void applyFrom(final ServerAdvancementManager manager, final PlayerAdvancements.Data data) {
+         data.forEach((id, progress) -> {
+diff --git a/net/minecraft/server/commands/SaveAllCommand.java b/net/minecraft/server/commands/SaveAllCommand.java
+index bc6d01996dde0870f6ebbda14176352777938a0c..361aa24d60c4bd937c1dc8256abb692c8b092f53 100644
+--- a/net/minecraft/server/commands/SaveAllCommand.java
++++ b/net/minecraft/server/commands/SaveAllCommand.java
+@@ -1,16 +1,12 @@
+ package net.minecraft.server.commands;
+ 
+ import com.mojang.brigadier.CommandDispatcher;
+-import com.mojang.brigadier.exceptions.CommandSyntaxException;
+-import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
+ import net.minecraft.commands.CommandSourceStack;
+ import net.minecraft.commands.Commands;
+ import net.minecraft.network.chat.Component;
+ import net.minecraft.server.MinecraftServer;
+ 
+ public class SaveAllCommand {
+-    private static final SimpleCommandExceptionType ERROR_FAILED = new SimpleCommandExceptionType(Component.translatable("commands.save.failed"));
+-
+     public static void register(final CommandDispatcher<CommandSourceStack> dispatcher) {
+         dispatcher.register(
+             Commands.literal("save-all")
+@@ -20,15 +16,18 @@ public class SaveAllCommand {
+         );
+     }
+ 
+-    private static int saveAll(final CommandSourceStack source, final boolean flush) throws CommandSyntaxException {
++    private static int saveAll(final CommandSourceStack source, final boolean flush) {
+         source.sendSuccess(() -> Component.translatable("commands.save.saving"), false);
+         MinecraftServer server = source.getServer();
+-        boolean success = server.saveEverything(true, flush, true);
+-        if (!success) {
+-            throw ERROR_FAILED.create();
+-        } else {
+-            source.sendSuccess(() -> Component.translatable("commands.save.success"), true);
+-            return 1;
+-        }
++        // Loom - keep command execution responsive while owner domains capture state and ASYNC_IO
++        // completes durability. The completion future is resolved back inside GLOBAL_CONTROL.
++        server.saveEverythingAsync(true, flush, true).whenComplete((success, failure) -> {
++            if (failure != null || !success) {
++                source.sendFailure(Component.translatable("commands.save.failed"));
++            } else {
++                source.sendSuccess(() -> Component.translatable("commands.save.success"), true);
++            }
++        });
++        return 1;
+     }
+ }
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 933583dd74fed89e719b5dcb67f6f391e57e9b8a..496e34e2f4d09ec502961ae8bcd816f6028980fb 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -3,6 +3,7 @@ package net.minecraft.server.players;
+ import com.google.common.collect.Lists;
+ import com.google.common.collect.Maps;
+ import com.google.common.collect.Sets;
++import com.google.gson.JsonElement;
+ import com.mojang.authlib.GameProfile;
+ import com.mojang.logging.LogUtils;
+ import java.io.File;
+@@ -20,6 +21,9 @@ import java.util.Objects;
+ import java.util.Optional;
+ import java.util.Set;
+ import java.util.UUID;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionException;
++import java.util.concurrent.RejectedExecutionException;
+ import java.util.function.Function;
+ import java.util.function.Predicate;
+ import net.minecraft.ChatFormatting;
+@@ -466,19 +470,79 @@ public abstract class PlayerList {
+     }
+ 
+     protected void save(final ServerPlayer player) {
+-        if (!player.getBukkitEntity().isPersistent()) return; // CraftBukkit
++        final CapturedPlayerSave captured = this.capturePlayerSave(player);
++        if (captured != null) {
++            this.writePlayerSave(captured);
++        }
++    }
++
++    // Loom start - capture player state under PLAYER ownership and write it under ASYNC_IO
++    private @Nullable CapturedPlayerSave capturePlayerSave(final ServerPlayer player) {
++        if (!player.getBukkitEntity().isPersistent()) return null; // CraftBukkit
+         player.lastSave = DomainClock.currentServerTick(this.server); // Paper - Incremental chunk and player saving
+-        this.playerIo.save(player);
+-        ServerStatsCounter stats = player.getStats(); // CraftBukkit
+-        if (stats != null) {
+-            stats.save();
++        final PlayerDataStorage.PendingSave playerData = this.playerIo.captureSave(player);
++        final ServerStatsCounter stats = player.getStats(); // CraftBukkit
++        final JsonElement statsData = stats == null ? null : stats.captureSave();
++        final PlayerAdvancements advancements = player.getAdvancements(); // CraftBukkit
++        final JsonElement advancementData = advancements == null ? null : advancements.captureSave();
++        return new CapturedPlayerSave(playerData, stats, statsData, advancements, advancementData);
++    }
++
++    private void writePlayerSave(final CapturedPlayerSave captured) {
++        if (captured.playerData() != null) {
++            this.playerIo.writeSave(captured.playerData());
+         }
++        if (captured.stats() != null && captured.statsData() != null) {
++            captured.stats().writeSave(captured.statsData());
++        }
++        if (captured.advancements() != null && captured.advancementData() != null) {
++            captured.advancements().writeSave(captured.advancementData());
++        }
++    }
+ 
+-        PlayerAdvancements advancements = player.getAdvancements(); // CraftBukkit
+-        if (advancements != null) {
+-            advancements.save();
++    public CompletableFuture<Void> saveAllAsync() {
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "save-all-players-async");
++        final List<CompletableFuture<Void>> writes = new java.util.ArrayList<>(this.players.size());
++        for (final ServerPlayer player : this.players) {
++            final CompletableFuture<CapturedPlayerSave> capture = net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "capture-player-save"),
++                () -> this.capturePlayerSave(player)
++            );
++            writes.add(
++                capture.handle((captured, failure) -> {
++                    if (failure == null) {
++                        return captured;
++                    }
++                    final Throwable cause = failure instanceof CompletionException && failure.getCause() != null
++                        ? failure.getCause()
++                        : failure;
++                    if (cause instanceof RejectedExecutionException && player.hasDisconnected()) {
++                        return null;
++                    }
++                    throw new CompletionException(cause);
++                }).thenCompose(captured -> {
++                    if (captured == null) {
++                        return CompletableFuture.completedFuture(null);
++                    }
++                    return net.minecraft.server.threading.runtime.OwnerDomainExecutor.submit(
++                        net.minecraft.server.threading.runtime.OwnerDomainExecutor.asyncIo(this.server, "write-player-save"),
++                        () -> this.writePlayerSave(captured)
++                    );
++                })
++            );
+         }
++        return CompletableFuture.allOf(writes.toArray(CompletableFuture[]::new));
++    }
++
++    private record CapturedPlayerSave(
++        PlayerDataStorage.@Nullable PendingSave playerData,
++        @Nullable ServerStatsCounter stats,
++        @Nullable JsonElement statsData,
++        @Nullable PlayerAdvancements advancements,
++        @Nullable JsonElement advancementData
++    ) {
+     }
++    // Loom end - capture player state under PLAYER ownership and write it under ASYNC_IO
+ 
+     public net.kyori.adventure.text.@Nullable Component remove(final ServerPlayer player) { // CraftBukkit - return string // Paper - return Component
+         // Paper start - Fix kick event leave message not being sent
+diff --git a/net/minecraft/stats/ServerStatsCounter.java b/net/minecraft/stats/ServerStatsCounter.java
+index 6764f97ac88d63c1e1d4f62014d4c16b929767e8..0f68dcba8cffbbe330e59423961d8c8e23d8d7cf 100644
+--- a/net/minecraft/stats/ServerStatsCounter.java
++++ b/net/minecraft/stats/ServerStatsCounter.java
+@@ -36,6 +36,7 @@ import net.minecraft.util.StrictJsonParser;
+ import net.minecraft.util.Util;
+ import net.minecraft.util.datafix.DataFixTypes;
+ import net.minecraft.world.entity.player.Player;
++import org.jspecify.annotations.Nullable;
+ import org.slf4j.Logger;
+ 
+ public class ServerStatsCounter extends StatsCounter {
+@@ -89,17 +90,30 @@ public class ServerStatsCounter extends StatsCounter {
+     }
+ 
+     public void save() {
+-        if (org.spigotmc.SpigotConfig.disableStatSaving) return; // Spigot
++        final JsonElement snapshot = this.captureSave();
++        if (snapshot != null) {
++            this.writeSave(snapshot);
++        }
++    }
++
++    // Loom start - split owner-bound capture from asynchronous file I/O
++    public @Nullable JsonElement captureSave() {
++        if (org.spigotmc.SpigotConfig.disableStatSaving) return null; // Spigot
++        return this.toJson();
++    }
++
++    public void writeSave(final JsonElement snapshot) {
+         try {
+             FileUtil.createDirectoriesSafe(this.file.getParent());
+ 
+             try (Writer writer = Files.newBufferedWriter(this.file, StandardCharsets.UTF_8)) {
+-                GSON.toJson(this.toJson(), GSON.newJsonWriter(writer));
++                GSON.toJson(snapshot, GSON.newJsonWriter(writer));
+             }
+         } catch (JsonIOException | IOException var6) {
+             LOGGER.error("Couldn't save stats to {}", this.file, var6);
+         }
+     }
++    // Loom end - split owner-bound capture from asynchronous file I/O
+ 
+     @Override
+     public void setValue(final Player player, final Stat<?> stat, final int count) {
+diff --git a/net/minecraft/world/level/storage/PlayerDataStorage.java b/net/minecraft/world/level/storage/PlayerDataStorage.java
+index c5898bfb8b4f075b08090cba2e9f980174e0a326..55a5b412c48ea7be470c8d5696beff4d7b91c496 100644
+--- a/net/minecraft/world/level/storage/PlayerDataStorage.java
++++ b/net/minecraft/world/level/storage/PlayerDataStorage.java
+@@ -17,6 +17,7 @@ import net.minecraft.util.ProblemReporter;
+ import net.minecraft.util.Util;
+ import net.minecraft.util.datafix.DataFixTypes;
+ import net.minecraft.world.entity.player.Player;
++import org.jspecify.annotations.Nullable;
+ import org.slf4j.Logger;
+ 
+ public class PlayerDataStorage {
+@@ -31,22 +32,42 @@ public class PlayerDataStorage {
+     }
+ 
+     public void save(final Player player) {
+-        if (org.spigotmc.SpigotConfig.disablePlayerDataSaving) return; // Spigot
++        final PendingSave pendingSave = this.captureSave(player);
++        if (pendingSave != null) {
++            this.writeSave(pendingSave);
++        }
++    }
++
++    // Loom start - split owner-bound capture from asynchronous file I/O
++    public @Nullable PendingSave captureSave(final Player player) {
++        if (org.spigotmc.SpigotConfig.disablePlayerDataSaving) return null; // Spigot
+         try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(player.problemPath(), LOGGER)) {
+             TagValueOutput output = TagValueOutput.createWithContext(reporter, player.registryAccess());
+             player.saveWithoutId(output);
++            return new PendingSave(player.getStringUUID(), player.getPlainTextName(), output.buildResult());
++        } catch (Exception exception) {
++            LOGGER.warn("Failed to capture player data for {}", player.getPlainTextName(), exception);
++            return null;
++        }
++    }
++
++    public void writeSave(final PendingSave pendingSave) {
++        try {
+             Path playerDirPath = this.playerDir.toPath();
+-            Path tmpFile = Files.createTempFile(playerDirPath, player.getStringUUID() + "-", ".dat");
+-            CompoundTag dataToStore = output.buildResult();
+-            NbtIo.writeCompressed(dataToStore, tmpFile);
+-            Path realFile = playerDirPath.resolve(player.getStringUUID() + ".dat");
+-            Path oldFile = playerDirPath.resolve(player.getStringUUID() + ".dat_old");
++            Path tmpFile = Files.createTempFile(playerDirPath, pendingSave.playerId() + "-", ".dat");
++            NbtIo.writeCompressed(pendingSave.data(), tmpFile);
++            Path realFile = playerDirPath.resolve(pendingSave.playerId() + ".dat");
++            Path oldFile = playerDirPath.resolve(pendingSave.playerId() + ".dat_old");
+             Util.safeReplaceFile(realFile, tmpFile, oldFile);
+-        } catch (Exception var11) {
+-            LOGGER.warn("Failed to save player data for {}", player.getPlainTextName(), var11); // Paper - Print exception
++        } catch (Exception exception) {
++            LOGGER.warn("Failed to save player data for {}", pendingSave.playerName(), exception); // Paper - Print exception
+         }
+     }
+ 
++    public record PendingSave(String playerId, String playerName, CompoundTag data) {
++    }
++    // Loom end - split owner-bound capture from asynchronous file I/O
++
+     private void backup(final NameAndId nameAndId, final String suffix) {
+         Path playerDirPath = this.playerDir.toPath();
+         String idString = nameAndId.id().toString();
+diff --git a/net/minecraft/world/level/storage/SavedDataStorage.java b/net/minecraft/world/level/storage/SavedDataStorage.java
+index e305e81ad573c0547015a65387dd9b2cf11440c1..07536e20e54dd6f4948bd6415d504bce93b1534c 100644
+--- a/net/minecraft/world/level/storage/SavedDataStorage.java
++++ b/net/minecraft/world/level/storage/SavedDataStorage.java
+@@ -153,7 +153,9 @@ public class SavedDataStorage implements AutoCloseable {
+         } else {
+             Map<SavedDataType<?>, CompoundTag> tagsToSave = this.collectDirtyTagsToSave();
+             if (tagsToSave.isEmpty()) {
+-                return CompletableFuture.completedFuture(null);
++                // Loom - a durability barrier must observe writes scheduled by the immediately preceding
++                // capture pass even though that pass already cleared every dirty flag.
++                return this.pendingWriteFuture;
+             } else {
+                 int threads = Util.maxAllowedExecutorThreads();
+                 int taskCount = tagsToSave.size();
