@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 14 Jul 2026 16:14:14 +0000
+Subject: [PATCH] Make strict-fallback apartment handoff wait for the lease
+
+The dedicated per-plugin fallback thread tried the apartment lease once
+and threw IllegalStateException on contention, failing the whole event
+delivery. Routine concurrency - two async tab-complete threads
+dispatching to the same plugin while a slow completion handler holds
+the lease - spammed 'Could not pass event AsyncTabCompleteEvent' and
+dropped completions. Park on the fallback thread until the holder
+releases (bounded, Loom.CompatApartmentHandoffWaitMillis, default 10s);
+event dispatches degrade to the owner-domain transient-refusal path on
+timeout, service calls still throw since they must return a value.
+
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+index 990f92eb9c33957941c6594b17b269486b68f31e..271f1d993264e9bfa4d0016f5aa5f60d74df4282 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+@@ -42,6 +42,13 @@ class PaperEventManager {
+     private static final long APARTMENT_CONTENTION_WAIT_NANOS = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(
+         Math.max(0L, Long.getLong("Loom.CompatApartmentWaitMillis", 5L))
+     );
++    // Loom - how long the plugin's dedicated strict-fallback thread waits for the apartment lease before
++    // refusing a single dispatch. Unlike the owner-domain budget above, this thread has no phase join to
++    // block, so it can afford to outwait a slow listener (e.g. a tab-complete handler doing disk I/O);
++    // the bound only exists so a leaked lease cannot wedge the fallback thread forever.
++    private static final long APARTMENT_HANDOFF_WAIT_NANOS = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(
++        Math.max(0L, Long.getLong("Loom.CompatApartmentHandoffWaitMillis", 10_000L))
++    );
+ 
+     private final Server server;
+     private final CompatibilityKernel compatibilityKernel;
+@@ -227,9 +234,31 @@ class PaperEventManager {
+                 final long handoffStart = System.nanoTime();
+                 try {
+                     apartment.submitStrictFallback(() -> {
+-                        try (CompatibilityApartment.Scope handoffScope = apartment.enter(transaction, true, path)) {
+-                            if (!handoffScope.acquired()) {
+-                                throw new IllegalStateException("Strict fallback apartment handoff failed: " + handoffScope.busyLease());
++                        // Loom Fix - the handoff must actually wait for the lease, as the enterApartmentBounded
++                        // contract above promises ("hands off to the plugin's strict-fallback thread and blocks
++                        // safely there"). A single non-waiting try turned routine contention — two async threads
++                        // dispatching to the same plugin, e.g. concurrent AsyncTabCompleteEvents while a slow
++                        // completion handler holds the lease — into a thrown IllegalStateException that failed
++                        // the whole event delivery ("Could not pass event ..."). This dedicated per-plugin
++                        // daemon thread has no phase join to deadlock against, so it parks until the holder
++                        // releases; on budget exhaustion it refuses ONLY this dispatch, recorded for
++                        // diagnostics, matching the owner-domain transient-refusal path.
++                        CompatibilityApartment.Scope handoffScope = apartment.enter(transaction, true, path);
++                        if (!handoffScope.acquired() && APARTMENT_HANDOFF_WAIT_NANOS > 0L) {
++                            final long handoffDeadline = System.nanoTime() + APARTMENT_HANDOFF_WAIT_NANOS;
++                            do {
++                                java.util.concurrent.locks.LockSupport.parkNanos(1_000_000L);
++                                handoffScope = apartment.enter(transaction, true, path);
++                            } while (!handoffScope.acquired() && System.nanoTime() < handoffDeadline);
++                        }
++                        try (CompatibilityApartment.Scope scope0 = handoffScope) {
++                            if (!scope0.acquired()) {
++                                this.compatibilityKernel.diagnostics().recordTransientRefusal(
++                                    profile,
++                                    "strict fallback handoff contention for " + event.getEventName()
++                                        + " lane=" + registration.getPriority() + " owner=" + scope0.busyLease()
++                                );
++                                return null;
+                             }
+                             try {
+                                 this.callListener(registration, event, transaction, true, path);
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
+index 282070319db8bfbb15ad37028b2e490e5608efe0..9920c84fc8bd0471866a09c78001b10298337579 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
+@@ -22,6 +22,14 @@ import org.jetbrains.annotations.Nullable;
+ 
+ public final class CompatibilityServicesManager implements ServicesManager {
+ 
++    // Loom - same budget as the event-dispatch handoff (PaperEventManager): the plugin's dedicated
++    // strict-fallback thread waits out a busy lease instead of failing on the first try. A service call
++    // must produce a return value, so on budget exhaustion this path still throws — but only after the
++    // wait, which converts routine transient contention into a delayed successful call.
++    private static final long HANDOFF_WAIT_NANOS = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(
++        Math.max(0L, Long.getLong("Loom.CompatApartmentHandoffWaitMillis", 10_000L))
++    );
++
+     private final SimpleServicesManager delegate = new SimpleServicesManager();
+     private final CompatibilityKernel compatibilityKernel;
+     private final CompatibilityServiceCallGraph callGraph = new CompatibilityServiceCallGraph();
+@@ -199,8 +207,18 @@ public final class CompatibilityServicesManager implements ServicesManager {
+                     try {
+                         return compatibilityKernel.apartmentFor(this.providerPlugin)
+                             .submitStrictFallback(() -> {
+-                                try (CompatibilityApartment.Scope fallbackScope = compatibilityKernel.apartmentFor(this.providerPlugin)
+-                                    .enter(transactionId, true, path)) {
++                                // Loom Fix - wait for the lease on this dedicated thread before giving up;
++                                // see PaperEventManager's handoff for the rationale.
++                                final CompatibilityApartment fallbackApartment = compatibilityKernel.apartmentFor(this.providerPlugin);
++                                CompatibilityApartment.Scope acquiredScope = fallbackApartment.enter(transactionId, true, path);
++                                if (!acquiredScope.acquired() && HANDOFF_WAIT_NANOS > 0L) {
++                                    final long handoffDeadline = System.nanoTime() + HANDOFF_WAIT_NANOS;
++                                    do {
++                                        java.util.concurrent.locks.LockSupport.parkNanos(1_000_000L);
++                                        acquiredScope = fallbackApartment.enter(transactionId, true, path);
++                                    } while (!acquiredScope.acquired() && System.nanoTime() < handoffDeadline);
++                                }
++                                try (CompatibilityApartment.Scope fallbackScope = acquiredScope) {
+                                     if (!fallbackScope.acquired()) {
+                                         throw new IllegalStateException(
+                                             "Strict fallback apartment handoff failed for service "
