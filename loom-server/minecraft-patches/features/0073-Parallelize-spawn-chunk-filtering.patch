@@ -1,0 +1,194 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Thu, 16 Jul 2026 00:26:14 +0000
+Subject: [PATCH] Parallelize spawn chunk filtering
+
+Player-spawn chunk filtering scans every player-ticking chunk before the parallel chunk phase. Cache its spatial plan and filter independent player clusters under bounded region leases, then preserve the original chunk order when collecting the results.
+
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+index 3924448337922c43349cec27158003a363ae60c5..575329db231077f2fe04c6e40ad76163ad14f4b4 100644
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -738,6 +738,8 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+     }
+     // Paper end - optimise chunk tick iteration
+ 
++    private @Nullable SpawningChunkFilterPlan spawningChunkFilterPlan;
++
+     void collectSpawningChunks(final List<LevelChunk> output) {
+         // Paper start - optimise chunk tick iteration
+         final ca.spottedleaf.moonrise.common.list.ReferenceList<net.minecraft.world.level.chunk.LevelChunk> tickingChunks = ((ca.spottedleaf.moonrise.patches.chunk_tick_iteration.ChunkTickServerLevel)this.level).moonrise$getPlayerTickingChunks();
+@@ -746,6 +748,18 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+         final int size = tickingChunks.size();
+ 
+         Objects.checkFromToIndex(0, size, raw.length);
++        // Loom start - filter independent player clusters in parallel. The player-ticking list is normally
++        // stable, so cache both its exact identity/order and the spatial partition. Workers only write their
++        // own result slots; the world owner appends matches afterward in the original order.
++        SpawningChunkFilterPlan plan = this.spawningChunkFilterPlan;
++        if (plan == null || !plan.matches(raw, size)) {
++            this.spawningChunkFilterPlan = plan = new SpawningChunkFilterPlan(this, raw, size);
++        }
++        if (plan.isParallel()) {
++            plan.collect(output);
++            return;
++        }
++        // Loom end
+         for (int i = 0; i < size; ++i) {
+             final LevelChunk levelChunk = raw[i];
+ 
+@@ -758,6 +772,154 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+         // Paper end - optimise chunk tick iteration
+     }
+ 
++    private static final class SpawningChunkFilterPlan {
++        // The SPAWN_RANGE nearby-player map tracks eight chunks. Widening each lease by that radius owns
++        // every player whose state is read while filtering a chunk at the edge of a cluster.
++        private static final int PLAYER_RADIUS_CHUNKS =
++            ca.spottedleaf.moonrise.patches.chunk_tick_iteration.ChunkTickConstants.PLAYER_SPAWN_TRACK_RANGE;
++
++        private final ChunkMap chunkMap;
++        private final LevelChunk[] sourceChunks;
++        private final boolean[] included;
++        private final List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks;
++
++        private SpawningChunkFilterPlan(final ChunkMap chunkMap, final LevelChunk[] chunks, final int size) {
++            this.chunkMap = chunkMap;
++            this.sourceChunks = java.util.Arrays.copyOf(chunks, size);
++            this.included = new boolean[size];
++            if (size <= 1) {
++                this.tasks = List.of();
++                return;
++            }
++
++            final int shift = net.minecraft.server.threading.TickRegions.getRegionChunkShift();
++            final it.unimi.dsi.fastutil.longs.Long2ObjectMap<SpawningChunkFilterGroup> byRegion =
++                new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
++            for (int i = 0; i < size; ++i) {
++                final LevelChunk chunk = chunks[i];
++                final int regionX = chunk.locX >> shift;
++                final int regionZ = chunk.locZ >> shift;
++                final long key = ((long)regionX << 32) | (regionZ & 0xFFFFFFFFL);
++                byRegion.computeIfAbsent(key, ignored -> new SpawningChunkFilterGroup()).add(i, chunk);
++            }
++
++            final List<SpawningChunkFilterGroup> groups = new ArrayList<>(byRegion.values());
++            mergeOverlappingGroups(groups);
++            if (groups.size() <= 1) {
++                this.tasks = List.of();
++                return;
++            }
++            groups.sort(java.util.Comparator
++                .comparingInt((SpawningChunkFilterGroup group) -> group.minChunkX)
++                .thenComparingInt(group -> group.minChunkZ)
++                .thenComparingInt(group -> group.maxChunkX)
++                .thenComparingInt(group -> group.maxChunkZ));
++
++            final List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new ArrayList<>(groups.size());
++            for (int i = 0, len = groups.size(); i < len; ++i) {
++                final SpawningChunkFilterGroup group = groups.get(i);
++                tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(
++                    group.minChunkX,
++                    group.minChunkZ,
++                    group.minChunkX - PLAYER_RADIUS_CHUNKS,
++                    group.minChunkZ - PLAYER_RADIUS_CHUNKS,
++                    group.maxChunkX + PLAYER_RADIUS_CHUNKS,
++                    group.maxChunkZ + PLAYER_RADIUS_CHUNKS,
++                    () -> this.filter(group)
++                ));
++            }
++            this.tasks = tasks;
++        }
++
++        private static void mergeOverlappingGroups(final List<SpawningChunkFilterGroup> groups) {
++            for (int index = 0; index < groups.size(); ++index) {
++                final SpawningChunkFilterGroup target = groups.get(index);
++                boolean merged;
++                do {
++                    merged = false;
++                    for (int otherIndex = groups.size() - 1; otherIndex > index; --otherIndex) {
++                        final SpawningChunkFilterGroup other = groups.get(otherIndex);
++                        if (!target.intersectsWithPlayerRadius(other)) {
++                            continue;
++                        }
++                        target.absorb(other);
++                        groups.remove(otherIndex);
++                        merged = true;
++                    }
++                } while (merged);
++            }
++        }
++
++        private boolean matches(final LevelChunk[] chunks, final int size) {
++            if (this.sourceChunks.length != size) {
++                return false;
++            }
++            for (int i = 0; i < size; ++i) {
++                if (this.sourceChunks[i] != chunks[i]) {
++                    return false;
++                }
++            }
++            return true;
++        }
++
++        private boolean isParallel() {
++            return this.tasks.size() > 1;
++        }
++
++        private void collect(final List<LevelChunk> output) {
++            net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(
++                this.chunkMap.level,
++                this.tasks,
++                "spawningChunkFilter"
++            );
++            for (int i = 0, len = this.sourceChunks.length; i < len; ++i) {
++                if (this.included[i]) {
++                    output.add(this.sourceChunks[i]);
++                }
++            }
++        }
++
++        private void filter(final SpawningChunkFilterGroup group) {
++            final int[] indices = group.indices.elements();
++            for (int i = 0, len = group.indices.size(); i < len; ++i) {
++                final int index = indices[i];
++                this.included[index] = this.chunkMap.isChunkNearPlayer(this.sourceChunks[index]);
++            }
++        }
++    }
++
++    private static final class SpawningChunkFilterGroup {
++        private final it.unimi.dsi.fastutil.ints.IntArrayList indices = new it.unimi.dsi.fastutil.ints.IntArrayList();
++        private int minChunkX = Integer.MAX_VALUE;
++        private int minChunkZ = Integer.MAX_VALUE;
++        private int maxChunkX = Integer.MIN_VALUE;
++        private int maxChunkZ = Integer.MIN_VALUE;
++
++        private void add(final int index, final LevelChunk chunk) {
++            this.indices.add(index);
++            this.minChunkX = Math.min(this.minChunkX, chunk.locX);
++            this.minChunkZ = Math.min(this.minChunkZ, chunk.locZ);
++            this.maxChunkX = Math.max(this.maxChunkX, chunk.locX);
++            this.maxChunkZ = Math.max(this.maxChunkZ, chunk.locZ);
++        }
++
++        private boolean intersectsWithPlayerRadius(final SpawningChunkFilterGroup other) {
++            final int diameter = SpawningChunkFilterPlan.PLAYER_RADIUS_CHUNKS * 2;
++            return this.minChunkX - diameter <= other.maxChunkX
++                && this.maxChunkX + diameter >= other.minChunkX
++                && this.minChunkZ - diameter <= other.maxChunkZ
++                && this.maxChunkZ + diameter >= other.minChunkZ;
++        }
++
++        private void absorb(final SpawningChunkFilterGroup other) {
++            this.indices.addAll(other.indices);
++            this.minChunkX = Math.min(this.minChunkX, other.minChunkX);
++            this.minChunkZ = Math.min(this.minChunkZ, other.minChunkZ);
++            this.maxChunkX = Math.max(this.maxChunkX, other.maxChunkX);
++            this.maxChunkZ = Math.max(this.maxChunkZ, other.maxChunkZ);
++        }
++    }
++
+     void forEachBlockTickingChunk(final Consumer<LevelChunk> tickingChunkConsumer) {
+         this.distanceManager.forEachEntityTickingChunk(chunkPos -> {
+             ChunkHolder holder = this.getVisibleChunkIfPresent(chunkPos); // Paper - rewrite chunk system
