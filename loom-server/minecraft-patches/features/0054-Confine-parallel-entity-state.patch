@@ -4,6 +4,44 @@ Date: Sat, 11 Jul 2026 00:42:18 +0000
 Subject: [PATCH] Confine parallel entity state
 
 
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
+index 4d9655f3858c476c9982654da4681f4a5401a626..0df4c5cc46b2fae40e93a90db0aab513b8155395 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
+@@ -233,7 +233,14 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+ 
+     public void entityStatusChange(final Entity entity, final ChunkEntitySlices slices, final Visibility oldVisibility, final Visibility newVisibility, final boolean moved,
+                                    final boolean created, final boolean destroyed) {
+-        this.checkThread(entity, "Entity status change must only happen on the main thread");
++        this.entityStatusChange(entity, slices, oldVisibility, newVisibility, moved, created, destroyed, true);
++    }
++
++    private void entityStatusChange(final Entity entity, final ChunkEntitySlices slices, final Visibility oldVisibility, final Visibility newVisibility, final boolean moved,
++                                    final boolean created, final boolean destroyed, final boolean checkThread) {
++        if (checkThread) {
++            this.checkThread(entity, "Entity status change must only happen on the main thread");
++        }
+ 
+         if (((ChunkSystemEntity)entity).moonrise$isUpdatingSectionStatus()) {
+             // recursive status update
+@@ -1026,12 +1033,15 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+         // on the world-owning thread. Package-visible so RegionTickStaging.applyAndClear can call it.
+         public void applyRemove(final Entity.RemovalReason reason) {
+             final Entity entity = this.entity;
+-            EntityLookup.this.checkThread(entity, "Cannot remove entity off-main");
+             final Visibility tickingState = EntityLookup.getEntityStatus(entity);
+ 
++            // removeEntity validates the source lookup's stored section before clearing it. A cross-world
++            // entity may already point at its destination level here, so checking the mutable entity level
++            // would validate the wrong owner. Reuse the successful source-section check for the immediately
++            // following status callbacks.
+             EntityLookup.this.removeEntity(entity);
+ 
+-            EntityLookup.this.entityStatusChange(entity, null, tickingState, Visibility.HIDDEN, false, false, reason.shouldDestroy());
++            EntityLookup.this.entityStatusChange(entity, null, tickingState, Visibility.HIDDEN, false, false, reason.shouldDestroy(), false);
+ 
+             EntityLookup.this.removeEntityCallback(entity);
+ 
 diff --git a/io/papermc/paper/entity/activation/ActivationRange.java b/io/papermc/paper/entity/activation/ActivationRange.java
 index f44f9be27f8d3e5f3d9607f3618f40c8074f73cc..d4b69d8199ec4bdb232f72c07c148883f5c0082b 100644
 --- a/io/papermc/paper/entity/activation/ActivationRange.java
@@ -187,7 +225,7 @@ index f44f9be27f8d3e5f3d9607f3618f40c8074f73cc..d4b69d8199ec4bdb232f72c07c148883
              }
          }
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index eb447bc00ac9da3681d3e9cc924d6e25ddff2a52..d6498ffc3b9a902ace8e87076cde73f322ca6758 100644
+index ceaeb1f438c9048716bb9be44ce831d227e02b7b..4a414250ad2ce1034ff5d6c2aa73c823eaff6425 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
 @@ -176,31 +176,114 @@ public abstract class Entity

@@ -171,7 +171,7 @@ index f7390b91fe1866c6a11beb93711d0fcde4293164..d7087b7f9aedd2be6695582c52ea8d19
          if (this.hasDelayedDestroy) {
              BlockState blockState = this.level.getBlockStateIfLoaded(this.delayedDestroyPos); // Paper - Don't allow digging into unloaded chunks
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..eb447bc00ac9da3681d3e9cc924d6e25ddff2a52 100644
+index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..ceaeb1f438c9048716bb9be44ce831d227e02b7b 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
 @@ -1133,7 +1133,7 @@ public abstract class Entity
@@ -227,7 +227,7 @@ index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..eb447bc00ac9da3681d3e9cc924d6e25
  
                  for (int currChunkY = minChunkY; currChunkY <= maxChunkY; ++currChunkY) {
                      final int sectionIdx = currChunkY - minSection;
-@@ -3518,9 +3533,14 @@ public abstract class Entity
+@@ -3518,12 +3533,29 @@ public abstract class Entity
                  if (this.portalProcess.processPortalTeleportation(level, this, this.canUsePortal(false))) {
                      ProfilerFiller profiler = Profiler.get();
                      profiler.push("portal");
@@ -242,8 +242,24 @@ index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..eb447bc00ac9da3681d3e9cc924d6e25
 +                        this.setPortalCooldown();
                          ServerLevel newLevel = teleportTransition.newLevel();
                          if (level.isAllowedToEnterPortal(newLevel) && (newLevel.dimension() == level.dimension() || this.canTeleport(level, newLevel))) {
-                             this.teleport(teleportTransition);
-@@ -3781,10 +3801,11 @@ public abstract class Entity
+-                            this.teleport(teleportTransition);
++                            if (newLevel.dimension() != level.dimension()
++                                && !net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(level.getServer())) {
++                                net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                                    net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(level.getServer(), "cross-dimension-portal-teleport"),
++                                    () -> {
++                                        if (!this.isRemoved() && this.level() == level) {
++                                            this.teleport(teleportTransition);
++                                        }
++                                    }
++                                );
++                            } else {
++                                this.teleport(teleportTransition);
++                            }
+                         }
+                     }
+ 
+@@ -3781,10 +3813,11 @@ public abstract class Entity
          }
  
          // CraftBukkit start
@@ -258,7 +274,7 @@ index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..eb447bc00ac9da3681d3e9cc924d6e25
                  return;
              }
          }
-@@ -3793,7 +3814,7 @@ public abstract class Entity
+@@ -3793,7 +3826,7 @@ public abstract class Entity
              return;
          }
  
@@ -417,7 +433,7 @@ index 391f3048f34edfa3d5759abfd56e17d5b5318309..088a9eaeeaac8e27741ebccac176f82a
          double nx = Mth.clamp(this.getX(), -2.9999999E7, 2.9999999E7);
          double nz = Mth.clamp(this.getZ(), -2.9999999E7, 2.9999999E7);
 diff --git a/net/minecraft/world/level/block/EndPortalBlock.java b/net/minecraft/world/level/block/EndPortalBlock.java
-index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..002420a41c60bebad18d66804c3bcff60716a502 100644
+index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..48e313cf14da53adcf3c2b83ad9acf005dfba193 100644
 --- a/net/minecraft/world/level/block/EndPortalBlock.java
 +++ b/net/minecraft/world/level/block/EndPortalBlock.java
 @@ -2,12 +2,14 @@ package net.minecraft.world.level.block;
@@ -435,7 +451,7 @@ index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..002420a41c60bebad18d66804c3bcff6
  import net.minecraft.util.RandomSource;
  import net.minecraft.world.entity.Entity;
  import net.minecraft.world.entity.InsideBlockEffectApplier;
-@@ -83,37 +85,104 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
+@@ -83,37 +85,158 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
  
      @Override
      public @Nullable TeleportTransition getPortalDestination(final ServerLevel currentLevel, final Entity entity, final BlockPos portalEntryPos) {
@@ -477,11 +493,66 @@ index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..002420a41c60bebad18d66804c3bcff6
 +                    return CompletableFuture.completedFuture(serverPlayer.findRespawnPositionAndUseSpawnBlock(false, TeleportTransition.DO_NOTHING, org.bukkit.event.player.PlayerRespawnEvent.RespawnReason.END_PORTAL)); // CraftBukkit
                  }
  
-                 spawnPos = entity.adjustSpawnLocation(newLevel, spawnBlockPos).getBottomCenter();
+-                spawnPos = entity.adjustSpawnLocation(newLevel, spawnBlockPos).getBottomCenter();
++                return this.createEndExitPortalTransition(
++                    newLevel,
++                    entity,
++                    spawnBlockPos,
++                    yRot,
++                    xRot,
++                    relatives,
++                    fromEnd
++                );
              }
  
-+            return this.createPortalTransitionInEntityContext(OwnerDomainExecutor.entity(entity, "end-portal-event"), newLevel, entity, spawnPos, yRot, xRot, relatives, fromEnd);
 +        }
++    }
++
++    private CompletableFuture<@Nullable TeleportTransition> createEndExitPortalTransition(
++        final ServerLevel newLevel,
++        final Entity entity,
++        final BlockPos spawnBlockPos,
++        final float yRot,
++        final float xRot,
++        final Set<Relative> relatives,
++        final boolean fromEnd
++    ) {
++        final int chunkX = spawnBlockPos.getX() >> 4;
++        final int chunkZ = spawnBlockPos.getZ() >> 4;
++        final CompletableFuture<@Nullable TeleportTransition> destination = new CompletableFuture<>();
++        net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
++            newLevel,
++            chunkX,
++            chunkZ,
++            chunkX,
++            chunkZ,
++            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "end-exit-spawn-ready",
++            chunks -> {
++                final Vec3 spawnPos = entity.adjustSpawnLocation(newLevel, spawnBlockPos).getBottomCenter();
++                this.createPortalTransitionInEntityContext(
++                    OwnerDomainExecutor.entity(entity, "end-portal-event"),
++                    newLevel,
++                    entity,
++                    spawnPos,
++                    yRot,
++                    xRot,
++                    relatives,
++                    fromEnd
++                ).whenComplete((transition, throwable) -> {
++                    if (throwable != null) {
++                        destination.completeExceptionally(throwable);
++                    } else {
++                        destination.complete(transition);
++                    }
++                });
++            }
++        ).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                destination.completeExceptionally(throwable);
++            }
++        });
++        return destination;
 +    }
 +
 +    private CompletableFuture<@Nullable TeleportTransition> createEndPlatformAndPortalTransition(
@@ -543,7 +614,7 @@ index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..002420a41c60bebad18d66804c3bcff6
              // CraftBukkit start
              relatives.removeAll(Relative.ROTATION); // remove relative rotation flags to simplify event mutation
              float absoluteYaw = !fromEnd ? yRot : entity.getYRot() + yRot;
-@@ -128,7 +197,7 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
+@@ -128,7 +251,7 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
                  ((org.bukkit.craftbukkit.CraftWorld) to.getWorld()).getHandle(), org.bukkit.craftbukkit.util.CraftLocation.toVec3(to), Vec3.ZERO, to.getYaw(), to.getPitch(), relatives, TeleportTransition.PLAY_PORTAL_SOUND.then(TeleportTransition.PLACE_PORTAL_TICKET), org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.END_PORTAL
              );
              // CraftBukkit end

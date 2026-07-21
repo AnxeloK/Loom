@@ -43,7 +43,7 @@ index de764da80793d272ff597b4a0742ce785838799a..058f4ec758e470f32d6fe0b552f1adb5
                                          }
                                      }
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 8340ebf001cdaeff87fecd5e6d138cfd9112889e..a0c4ba36f4eaa051084a92f55013fd70564ba0ec 100644
+index 72e1d22d2fb49c1834d1911ad2d9de250c6d4cc7..7eb628dfe292a224b3c8c7797fc52d37dcaa8a37 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
 @@ -1562,11 +1562,13 @@ public abstract class Entity
@@ -132,7 +132,7 @@ index 8340ebf001cdaeff87fecd5e6d138cfd9112889e..a0c4ba36f4eaa051084a92f55013fd70
                                  if (ca.spottedleaf.moonrise.patches.collisions.CollisionUtil.voxelShapeIntersectNoEmpty(collisionShape, toCollide)) {
                                      return true;
                                  }
-@@ -4710,18 +4729,37 @@ public abstract class Entity
+@@ -4722,18 +4741,37 @@ public abstract class Entity
                  maxX = bb.maxX,
                  maxY = bb.maxY,
                  maxZ = bb.maxZ;

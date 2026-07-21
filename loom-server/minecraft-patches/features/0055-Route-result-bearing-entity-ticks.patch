@@ -49,11 +49,31 @@ index 67982abed7b87bf21fee43cc96819ba71e1ce8a4..f17e9acd63a12c5ed6513f375d253f2f
          if (ownerTick != null) {
              for (int i = 0, n = ownerTick.size(); i < n; ++i) {
                  this.tickOneEntity(ownerTick.get(i));
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index fb71e2e6a208752b381130720757ba6266bed87e..bcce0ea7957f11eb44c0abbbe8534dc94bf08478 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -736,6 +736,15 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+         return new ServerItemCooldowns(this);
+     }
+ 
++    @Override
++    public boolean requiresFullLevelTickOwnership() {
++        // A player tick can synchronously complete delayed block destruction, transfer dimensions, and update
++        // player-nearby/chunk-tracking state. Those operations require their immediate result and cannot be
++        // represented by the generic region staging buffer, so keep the player (and its vehicle tree) in the
++        // serial owner phase.
++        return true;
++    }
++
+     @Override
+     public void tick() {
+         // CraftBukkit start
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index d6498ffc3b9a902ace8e87076cde73f322ca6758..3783b83ec942c6e74185a45958b6f9abd15760b7 100644
+index 4a414250ad2ce1034ff5d6c2aa73c823eaff6425..176fbb9c3414b8f00e49b2ca519d62871e774712 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -5273,6 +5273,12 @@ public abstract class Entity
+@@ -5285,6 +5285,12 @@ public abstract class Entity
          return false;
      }
  

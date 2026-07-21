@@ -450,10 +450,10 @@ index 5538a93f1ae5af424432e78d652fcf451b5946b3..a8081eee40c792a49fa300b33be0371d
          return this.portal.getLocalTransition();
      }
 diff --git a/net/minecraft/world/level/block/EndPortalBlock.java b/net/minecraft/world/level/block/EndPortalBlock.java
-index 002420a41c60bebad18d66804c3bcff60716a502..192fc32101e94e8844a4cfa5eae89fd14fa9469b 100644
+index 48e313cf14da53adcf3c2b83ad9acf005dfba193..4e657fcd615839d629b1e54d458824de061dcf4a 100644
 --- a/net/minecraft/world/level/block/EndPortalBlock.java
 +++ b/net/minecraft/world/level/block/EndPortalBlock.java
-@@ -161,14 +161,20 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
+@@ -215,14 +215,20 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
                  });
          });
  

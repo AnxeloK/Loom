@@ -5,7 +5,7 @@ Subject: [PATCH] Reuse block traversal scratch
 
 
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 3783b83ec942c6e74185a45958b6f9abd15760b7..7d4301834cc8a9c594105de9fba96ac9f63a13d5 100644
+index 176fbb9c3414b8f00e49b2ca519d62871e774712..3bca048d19785610ea6e448995558868271359b0 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
 @@ -1838,8 +1838,7 @@ public abstract class Entity

@@ -676,6 +676,32 @@ index 5d08e4e8ff1ac4f253d855f7f126110244d74847..07bd37b7891ec06cc45431ddd57ecd54
      private static int wrapTime(final long ticks) {
          return Math.toIntExact(ticks % 2147483647L);
      }
+diff --git a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java b/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
+index 61c5e78cb39b6bf6caa350cee25f3a15695fa9e3..bfdc72002af8143eb7cbadfb8a4c6626d20f057b 100644
+--- a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
++++ b/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
+@@ -81,8 +81,20 @@ public class MinecartCommandBlock extends AbstractMinecart {
+     @Override
+     public void activateMinecart(final ServerLevel level, final int xt, final int yt, final int zt, final boolean state) {
+         if (state && this.tickCount - this.lastActivated >= 4) {
+-            this.getCommandBlock().performCommand(level);
+             this.lastActivated = this.tickCount;
++            final Runnable command = () -> {
++                if (!this.isRemoved() && this.level() == level) {
++                    this.getCommandBlock().performCommand(level);
++                }
++            };
++            if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(level.getServer())) {
++                command.run();
++            } else {
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                    net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(level.getServer(), "command-minecart-activation"),
++                    command
++                );
++            }
+         }
+     }
+ 
 diff --git a/net/minecraft/world/level/BaseCommandBlock.java b/net/minecraft/world/level/BaseCommandBlock.java
 index ea95136200a320fbebd5ef7dfdf68004787bb6ab..70e2f52aedbadef8df66354e7d084de9bdff763f 100644
 --- a/net/minecraft/world/level/BaseCommandBlock.java
@@ -689,3 +715,31 @@ index ea95136200a320fbebd5ef7dfdf68004787bb6ab..70e2f52aedbadef8df66354e7d084de9
                  BaseCommandBlock.this.lastOutput = Component.literal("[" + TIME_FORMAT.format(ZonedDateTime.now()) + "] ").append(message);
                  BaseCommandBlock.this.onUpdated(this.level);
              }
+diff --git a/net/minecraft/world/level/block/CommandBlock.java b/net/minecraft/world/level/block/CommandBlock.java
+index 1c96b29d823c8979c3c4a08699f6318a063d41a2..38854242073c74017825dbffe000632cdd9aadf6 100644
+--- a/net/minecraft/world/level/block/CommandBlock.java
++++ b/net/minecraft/world/level/block/CommandBlock.java
+@@ -91,6 +91,23 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+ 
+     @Override
+     protected void tick(final BlockState state, final ServerLevel level, final BlockPos pos, final RandomSource random) {
++        if (!net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(level.getServer())) {
++            final BlockPos commandPos = pos.immutable();
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(level.getServer(), "command-block-tick"),
++                () -> {
++                    final BlockState currentState = level.getBlockState(commandPos);
++                    if (currentState.is(this)) {
++                        this.tickOwned(currentState, level, commandPos);
++                    }
++                }
++            );
++            return;
++        }
++        this.tickOwned(state, level, pos);
++    }
++
++    private void tickOwned(final BlockState state, final ServerLevel level, final BlockPos pos) {
+         if (level.getBlockEntity(pos) instanceof CommandBlockEntity commandBlock) {
+             BaseCommandBlock baseCommandBlock = commandBlock.getCommandBlock();
+             boolean commandSet = !StringUtil.isNullOrEmpty(baseCommandBlock.getCommand());
