@@ -1,0 +1,117 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 25 Jul 2026 22:51:52 +0000
+Subject: [PATCH] Test concurrent neighbor update chains
+
+
+diff --git a/src/test/java/org/bukkit/CollectingNeighborUpdaterConcurrencyTest.java b/src/test/java/org/bukkit/CollectingNeighborUpdaterConcurrencyTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c005c0f84d719a1bdcab8c57a2317bc21891ddef
+--- /dev/null
++++ b/src/test/java/org/bukkit/CollectingNeighborUpdaterConcurrencyTest.java
+@@ -0,0 +1,105 @@
++package org.bukkit;
++
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.core.BlockPos;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.level.block.Block;
++import net.minecraft.world.level.block.state.BlockState;
++import net.minecraft.world.level.redstone.CollectingNeighborUpdater;
++import org.bukkit.craftbukkit.CraftServer;
++import org.bukkit.craftbukkit.block.data.CraftBlockData;
++import org.bukkit.plugin.PluginManager;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class CollectingNeighborUpdaterConcurrencyTest {
++
++    @Test
++    void independentThreadsKeepIndependentUpdateLimits() throws InterruptedException {
++        final Level level = Mockito.mock(Level.class);
++        final CraftServer server = Mockito.mock(CraftServer.class);
++        final PluginManager pluginManager = Mockito.mock(PluginManager.class);
++        Mockito.when(level.getCraftServer()).thenReturn(server);
++        Mockito.when(server.getPluginManager()).thenReturn(pluginManager);
++
++        final BlockState firstState = Mockito.mock(BlockState.class);
++        final BlockState secondState = Mockito.mock(BlockState.class);
++        Mockito.when(firstState.asBlockData()).thenReturn(Mockito.mock(CraftBlockData.class));
++        Mockito.when(secondState.asBlockData()).thenReturn(Mockito.mock(CraftBlockData.class));
++
++        final CountDownLatch firstEntered = new CountDownLatch(1);
++        final CountDownLatch releaseFirst = new CountDownLatch(1);
++        final AtomicInteger updates = new AtomicInteger();
++        Mockito.doAnswer(invocation -> {
++            updates.incrementAndGet();
++            firstEntered.countDown();
++            Assertions.assertTrue(releaseFirst.await(5, TimeUnit.SECONDS));
++            return null;
++        }).when(firstState).handleNeighborChanged(
++            Mockito.eq(level),
++            Mockito.any(BlockPos.class),
++            Mockito.any(Block.class),
++            Mockito.isNull(),
++            Mockito.eq(false)
++        );
++        Mockito.doAnswer(invocation -> {
++            updates.incrementAndGet();
++            return null;
++        }).when(secondState).handleNeighborChanged(
++            Mockito.eq(level),
++            Mockito.any(BlockPos.class),
++            Mockito.any(Block.class),
++            Mockito.isNull(),
++            Mockito.eq(false)
++        );
++
++        final CollectingNeighborUpdater updater = new CollectingNeighborUpdater(level, 1);
++        final Block changedBlock = Mockito.mock(Block.class);
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread first = new Thread(
++            () -> runUpdate(updater, firstState, BlockPos.ZERO, changedBlock, failure),
++            "neighbor-update-first"
++        );
++        final Thread second = new Thread(
++            () -> runUpdate(updater, secondState, BlockPos.ZERO.above(), changedBlock, failure),
++            "neighbor-update-second"
++        );
++
++        first.start();
++        Assertions.assertTrue(firstEntered.await(5, TimeUnit.SECONDS));
++        try {
++            second.start();
++            second.join(5_000L);
++            Assertions.assertFalse(second.isAlive(), "Second neighbor chain did not complete");
++        } finally {
++            releaseFirst.countDown();
++            first.join(5_000L);
++        }
++
++        Assertions.assertFalse(first.isAlive(), "First neighbor chain did not complete");
++        if (failure.get() != null) {
++            Assertions.fail(failure.get());
++        }
++        Assertions.assertEquals(2, updates.get(), "Each concurrent chain should receive its own update budget");
++    }
++
++    private static void runUpdate(
++        final CollectingNeighborUpdater updater,
++        final BlockState state,
++        final BlockPos pos,
++        final Block changedBlock,
++        final AtomicReference<Throwable> failure
++    ) {
++        try {
++            updater.neighborChanged(state, pos, changedBlock, null, false);
++        } catch (final Throwable throwable) {
++            failure.compareAndSet(null, throwable);
++        }
++    }
++}

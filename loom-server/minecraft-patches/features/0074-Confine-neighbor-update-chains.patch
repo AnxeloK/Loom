@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 25 Jul 2026 22:51:50 +0000
+Subject: [PATCH] Confine neighbor update chains
+
+
+diff --git a/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java b/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java
+index deb62cf4b878f34ba13f83faf711c0666f12e6fa..8cb763a8f641f98f82844ab3027252d05bcad904 100644
+--- a/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java
++++ b/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java
+@@ -18,10 +18,8 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
+     private static final Logger LOGGER = LogUtils.getLogger();
+     private final Level level;
+     private final int maxChainedNeighborUpdates;
+-    private final ArrayDeque<CollectingNeighborUpdater.NeighborUpdates> stack = new ArrayDeque<>();
+-    private final List<CollectingNeighborUpdater.NeighborUpdates> addedThisLayer = new ArrayList<>();
+-    private int count = 0;
+-    private @Nullable Consumer<BlockPos> debugListener;
++    private final ThreadLocal<UpdateState> updateState = ThreadLocal.withInitial(UpdateState::new);
++    private volatile @Nullable Consumer<BlockPos> debugListener;
+ 
+     public CollectingNeighborUpdater(final Level level, final int maxChainedNeighborUpdates) {
+         this.level = level;
+@@ -66,51 +64,59 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
+     }
+ 
+     private void addAndRun(final BlockPos pos, final CollectingNeighborUpdater.NeighborUpdates update) {
+-        boolean runningAlready = this.count > 0;
+-        boolean tooManyUpdates = this.maxChainedNeighborUpdates >= 0 && this.count >= this.maxChainedNeighborUpdates;
+-        this.count++;
++        final UpdateState state = this.updateState.get();
++        boolean runningAlready = state.count > 0;
++        boolean tooManyUpdates = this.maxChainedNeighborUpdates >= 0 && state.count >= this.maxChainedNeighborUpdates;
++        state.count++;
+         if (!tooManyUpdates) {
+             if (runningAlready) {
+-                this.addedThisLayer.add(update);
++                state.addedThisLayer.add(update);
+             } else {
+-                this.stack.push(update);
++                state.stack.push(update);
+             }
+-        } else if (this.count - 1 == this.maxChainedNeighborUpdates) {
++        } else if (state.count - 1 == this.maxChainedNeighborUpdates) {
+             LOGGER.error("Too many chained neighbor updates. Skipping the rest. First skipped position: {}", pos.toShortString());
+         }
+ 
+         if (!runningAlready) {
+-            this.runUpdates();
++            this.runUpdates(state);
+         }
+     }
+ 
+-    private void runUpdates() {
++    private void runUpdates(final UpdateState state) {
+         try {
+-            while (!this.stack.isEmpty() || !this.addedThisLayer.isEmpty()) {
+-                for (int i = this.addedThisLayer.size() - 1; i >= 0; i--) {
+-                    this.stack.push(this.addedThisLayer.get(i));
++            while (!state.stack.isEmpty() || !state.addedThisLayer.isEmpty()) {
++                for (int i = state.addedThisLayer.size() - 1; i >= 0; i--) {
++                    state.stack.push(state.addedThisLayer.get(i));
+                 }
+ 
+-                this.addedThisLayer.clear();
+-                CollectingNeighborUpdater.NeighborUpdates nextUpdates = this.stack.peek();
+-                if (this.debugListener != null) {
+-                    nextUpdates.forEachUpdatedPos(this.debugListener);
++                state.addedThisLayer.clear();
++                CollectingNeighborUpdater.NeighborUpdates nextUpdates = state.stack.peek();
++                final Consumer<BlockPos> listener = this.debugListener;
++                if (listener != null) {
++                    nextUpdates.forEachUpdatedPos(listener);
+                 }
+ 
+-                while (this.addedThisLayer.isEmpty()) {
++                while (state.addedThisLayer.isEmpty()) {
+                     if (!nextUpdates.runNext(this.level)) {
+-                        this.stack.pop();
++                        state.stack.pop();
+                         break;
+                     }
+                 }
+             }
+         } finally {
+-            this.stack.clear();
+-            this.addedThisLayer.clear();
+-            this.count = 0;
++            state.stack.clear();
++            state.addedThisLayer.clear();
++            state.count = 0;
+         }
+     }
+ 
++    private static final class UpdateState {
++        private final ArrayDeque<CollectingNeighborUpdater.NeighborUpdates> stack = new ArrayDeque<>();
++        private final List<CollectingNeighborUpdater.NeighborUpdates> addedThisLayer = new ArrayList<>();
++        private int count;
++    }
++
+     record FullNeighborUpdate(BlockState state, BlockPos pos, Block block, @Nullable Orientation orientation, boolean movedByPiston)
+         implements CollectingNeighborUpdater.NeighborUpdates {
+         @Override
