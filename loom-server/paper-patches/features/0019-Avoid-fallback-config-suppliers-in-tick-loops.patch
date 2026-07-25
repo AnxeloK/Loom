@@ -1,0 +1,109 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 25 Jul 2026 23:52:33 +0000
+Subject: [PATCH] Avoid fallback config suppliers in tick loops
+
+Store resolved integer values as primitives and branch directly to dynamic fallbacks.
+
+This removes the capturing supplier call from autosave and entity tick paths while preserving live fallback updates.
+
+diff --git a/src/main/java/io/papermc/paper/configuration/type/fallback/FallbackValue.java b/src/main/java/io/papermc/paper/configuration/type/fallback/FallbackValue.java
+index a3a1d398d783c37914fb6d646e11361afee687b8..a8994b726bae4ae92727ea5e194773896b8b048e 100644
+--- a/src/main/java/io/papermc/paper/configuration/type/fallback/FallbackValue.java
++++ b/src/main/java/io/papermc/paper/configuration/type/fallback/FallbackValue.java
+@@ -39,24 +39,23 @@ public sealed abstract class FallbackValue permits FallbackValue.Int {
+ 
+     public non-sealed abstract static class Int extends FallbackValue {
+ 
+-        private final OptionalInt value;
++        private final boolean usesFallback;
++        private final int value;
+ 
+         Int(Map<ContextKey<?>, Object> contextMap, OptionalInt value) {
+             super(contextMap);
+-            if (value.isEmpty()) {
+-                this.value = value;
+-            } else {
+-                this.value = this.process(value.getAsInt());
+-            }
++            final OptionalInt processed = value.isEmpty() ? value : this.process(value.getAsInt());
++            this.usesFallback = processed.isEmpty();
++            this.value = this.usesFallback ? 0 : processed.getAsInt();
+         }
+ 
+         public int value() {
+-            return value.orElseGet(this::fallback);
++            return this.usesFallback ? this.fallback() : this.value;
+         }
+ 
+         @Override
+         protected final String serialize() {
+-            return value.isPresent() ? String.valueOf(this.value.getAsInt()) : DEFAULT_VALUE;
++            return this.usesFallback ? DEFAULT_VALUE : String.valueOf(this.value);
+         }
+ 
+         protected OptionalInt process(int value) {
+diff --git a/src/test/java/io/papermc/paper/configuration/type/fallback/FallbackValueTest.java b/src/test/java/io/papermc/paper/configuration/type/fallback/FallbackValueTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d45ef16e00ac5dfba907cff28312d798239c0d46
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/configuration/type/fallback/FallbackValueTest.java
+@@ -0,0 +1,58 @@
++package io.papermc.paper.configuration.type.fallback;
++
++import java.util.Map;
++import java.util.Set;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.spongepowered.configurate.serialize.SerializationException;
++
++@Normal
++class FallbackValueTest {
++
++    @Test
++    void fallbackRemainsDynamicWithoutAConfiguredValue() throws SerializationException {
++        final AtomicInteger fallback = new AtomicInteger(40);
++        final TestInt value = new TestInt("default", fallback);
++
++        Assertions.assertEquals(40, value.value());
++        fallback.set(80);
++        Assertions.assertEquals(80, value.value());
++        Assertions.assertEquals("default", value.serialized());
++    }
++
++    @Test
++    void configuredValueDoesNotReadFallback() throws SerializationException {
++        final AtomicInteger fallback = new AtomicInteger(40);
++        final TestInt value = new TestInt(120, fallback);
++
++        fallback.set(80);
++        Assertions.assertEquals(120, value.value());
++        Assertions.assertEquals("120", value.serialized());
++    }
++
++    private static final class TestInt extends FallbackValue.Int {
++
++        private final AtomicInteger fallback;
++
++        private TestInt(final Object value, final AtomicInteger fallback) throws SerializationException {
++            super(Map.of(), fromObject(value));
++            this.fallback = fallback;
++        }
++
++        @Override
++        protected Set<ContextKey<?>> required() {
++            return Set.of();
++        }
++
++        @Override
++        protected int fallback() {
++            return this.fallback.get();
++        }
++
++        private String serialized() {
++            return this.serialize();
++        }
++    }
++}
