@@ -5,8 +5,88 @@ Subject: [PATCH] Route portal, dimension change, and player transfer ownership
  flow
 
 
+diff --git a/net/minecraft/server/level/PlayerSpawnFinder.java b/net/minecraft/server/level/PlayerSpawnFinder.java
+index ddffd36d8213a40dc3f6cbb0ef0f33a0a7490ac1..d6592077634d6a13fe88cb0c2552dd3339f4f866 100644
+--- a/net/minecraft/server/level/PlayerSpawnFinder.java
++++ b/net/minecraft/server/level/PlayerSpawnFinder.java
+@@ -63,7 +63,14 @@ public class PlayerSpawnFinder {
+             finder.scheduleNext();
+             return finder.finishedFuture;
+         } else {
+-            return CompletableFuture.completedFuture(fixupSpawnHeight(level, spawnSuggestion));
++            PlayerSpawnFinder finder = new PlayerSpawnFinder(level, spawnSuggestion, 0);
++            finder.scheduleCandidate(
++                spawnSuggestion.getX(),
++                spawnSuggestion.getZ(),
++                0,
++                () -> Optional.of(fixupSpawnHeight(level, spawnSuggestion))
++            );
++            return finder.finishedFuture;
+         }
+     }
+ 
+@@ -115,33 +122,33 @@ public class PlayerSpawnFinder {
+         if (!this.finishedFuture.isDone()) {
+             int chunkX = SectionPos.blockToSectionCoord(candidateX);
+             int chunkZ = SectionPos.blockToSectionCoord(candidateZ);
+-            ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)this.level) // Paper - rewrite chunk system
+-                .moonrise$getChunkTaskScheduler().chunkHolderManager // Paper - rewrite chunk system
+-                .addTicketAndLoadWithRadius(TicketType.SPAWN_SEARCH, new ChunkPos(chunkX, chunkZ), 0, net.minecraft.world.level.chunk.status.ChunkStatus.FULL, ca.spottedleaf.concurrentutil.util.Priority.HIGH) // Paper - rewrite chunk system
+-                .whenCompleteAsync((ignored, throwable) -> {
+-                    if (throwable == null) {
+-                        try {
+-                            Optional<Vec3> spawnPos = candidateChecker.get();
+-                            if (spawnPos.isPresent()) {
+-                                this.finishedFuture.complete(spawnPos.get());
+-                            } else {
+-                                this.scheduleNext();
+-                            }
+-                        } catch (Throwable var9) {
+-                            throwable = var9;
+-                        }
+-                    }
+-
+-                    if (throwable != null) {
+-                        CrashReport report = CrashReport.forThrowable(throwable, "Searching for spawn");
+-                        CrashReportCategory details = report.addCategory("Spawn Lookup");
+-                        details.setDetail("Origin", this.spawnSuggestion::toString);
+-                        details.setDetail("Radius", () -> Integer.toString(this.radius));
+-                        details.setDetail("Candidate", () -> "[" + candidateX + "," + candidateZ + "]");
+-                        details.setDetail("Progress", () -> candidateIndex + " out of " + this.candidateCount);
+-                        this.finishedFuture.completeExceptionally(new ReportedException(report));
++            net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
++                this.level,
++                chunkX,
++                chunkZ,
++                chunkX,
++                chunkZ,
++                ca.spottedleaf.concurrentutil.util.Priority.HIGH,
++                "player-spawn-search",
++                ignored -> {
++                    Optional<Vec3> spawnPos = candidateChecker.get();
++                    if (spawnPos.isPresent()) {
++                        this.finishedFuture.complete(spawnPos.get());
++                    } else {
++                        this.scheduleNext();
+                     }
+-                }, this.level.chunkSource.mainThreadProcessor); // Paper - rewrite chunk system
++                }
++            ).whenComplete((ignored, throwable) -> {
++                if (throwable != null && !this.finishedFuture.isDone()) {
++                    CrashReport report = CrashReport.forThrowable(throwable, "Searching for spawn");
++                    CrashReportCategory details = report.addCategory("Spawn Lookup");
++                    details.setDetail("Origin", this.spawnSuggestion::toString);
++                    details.setDetail("Radius", () -> Integer.toString(this.radius));
++                    details.setDetail("Candidate", () -> "[" + candidateX + "," + candidateZ + "]");
++                    details.setDetail("Progress", () -> candidateIndex + " out of " + this.candidateCount);
++                    this.finishedFuture.completeExceptionally(new ReportedException(report));
++                }
++            });
+         }
+     }
+ 
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..6e391bb0f3625195907e8c05adb826bcb6f0b77b 100644
+index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..f3ecddedbe3a8b963c9bf46e62820cda65de6755 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
 @@ -92,6 +92,7 @@ import net.minecraft.server.MinecraftServer;
@@ -68,7 +148,181 @@ index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..6e391bb0f3625195907e8c05adb826bc
      private void synchronizeSpecialItemUpdates(final ItemStack itemStack) {
          MapId mapId = itemStack.get(DataComponents.MAP_ID);
          MapItemSavedData data = MapItem.getSavedData(mapId, this.level());
-@@ -1548,19 +1575,24 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1339,7 +1366,12 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+     }
+ 
+     // Paper start
+-    public record RespawnResult(TeleportTransition transition, boolean isBedSpawn, boolean isAnchorSpawn) {
++    public record RespawnResult(
++        TeleportTransition transition,
++        boolean isBedSpawn,
++        boolean isAnchorSpawn,
++        @Nullable BlockPos respawnBlockPosition
++    ) {
+     }
+ 
+     public @Nullable TeleportTransition findRespawnPositionAndUseSpawnBlock(
+@@ -1358,6 +1390,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+         boolean isBedSpawn = false;
+         boolean isAnchorSpawn = false;
+         Runnable consumeAnchorCharge = null;
++        BlockPos respawnBlockPosition = null;
+         // Paper end
+         ServerPlayer.RespawnConfig respawnConfig = this.getRespawnConfig();
+         ServerLevel respawnLevel = this.server.getLevel(ServerPlayer.RespawnConfig.getDimensionOrDefault(respawnConfig));
+@@ -1369,6 +1402,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+                 isBedSpawn = respawnPosAngle.isBedSpawn();
+                 isAnchorSpawn = respawnPosAngle.isAnchorSpawn();
+                 consumeAnchorCharge = respawnPosAngle.consumeAnchorCharge();
++                respawnBlockPosition = respawnConfig.respawnData().pos();
+                 teleportTransition = new TeleportTransition(
+                     respawnLevel, respawnPosAngle.position(), Vec3.ZERO, respawnPosAngle.yaw(), respawnPosAngle.pitch(), postTeleportTransition
+                 );
+@@ -1381,6 +1415,131 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+             teleportTransition = TeleportTransition.createDefault(this, postTeleportTransition);
+         }
+ 
++        return this.completeRespawnResult(
++            teleportTransition,
++            isBedSpawn,
++            isAnchorSpawn,
++            consumeAnchorCharge,
++            respawnBlockPosition,
++            respawnReason
++        );
++        // CraftBukkit end
++    }
++
++    public CompletableFuture<@Nullable RespawnResult> findRespawnPositionAndUseSpawnBlockAsync(
++        final boolean consumeSpawnBlock,
++        final TeleportTransition.PostTeleportTransition postTeleportTransition,
++        final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason
++    ) {
++        final ServerPlayer.RespawnConfig respawnConfig = this.getRespawnConfig();
++        if (respawnConfig == null) {
++            return this.findDefaultRespawnAsync(false, postTeleportTransition, respawnReason);
++        }
++
++        return net.minecraft.server.threading.runtime.OwnershipRouter.supplyOnServer(
++            this.server,
++            () -> this.server.getLevel(respawnConfig.respawnData().dimension())
++        ).thenCompose(respawnLevel -> {
++            if (respawnLevel == null) {
++                return this.findDefaultRespawnAsync(false, postTeleportTransition, respawnReason);
++            }
++            return this.findConfiguredRespawnAsync(
++                respawnLevel, respawnConfig, consumeSpawnBlock, postTeleportTransition, respawnReason
++            );
++        });
++    }
++
++    private CompletableFuture<@Nullable RespawnResult> findConfiguredRespawnAsync(
++        final ServerLevel respawnLevel,
++        final ServerPlayer.RespawnConfig respawnConfig,
++        final boolean consumeSpawnBlock,
++        final TeleportTransition.PostTeleportTransition postTeleportTransition,
++        final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason
++    ) {
++        final BlockPos respawnBlockPosition = respawnConfig.respawnData().pos();
++        final int chunkX = respawnBlockPosition.getX() >> 4;
++        final int chunkZ = respawnBlockPosition.getZ() >> 4;
++        final CompletableFuture<@Nullable RespawnPosAngle> positionFuture = new CompletableFuture<>();
++        net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
++            respawnLevel,
++            chunkX - 1,
++            chunkZ - 1,
++            chunkX + 1,
++            chunkZ + 1,
++            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "player-respawn-block",
++            ignored -> positionFuture.complete(
++                findRespawnAndUseSpawnBlock(respawnLevel, respawnConfig, consumeSpawnBlock).orElse(null)
++            )
++        ).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                positionFuture.completeExceptionally(throwable);
++            }
++        });
++
++        return positionFuture.thenCompose(respawnPosAngle -> {
++            if (respawnPosAngle == null) {
++                return this.findDefaultRespawnAsync(true, postTeleportTransition, respawnReason);
++            }
++
++            final TeleportTransition transition = new TeleportTransition(
++                respawnLevel,
++                respawnPosAngle.position(),
++                Vec3.ZERO,
++                respawnPosAngle.yaw(),
++                respawnPosAngle.pitch(),
++                postTeleportTransition
++            );
++            return CompletableFuture.completedFuture(
++                this.completeRespawnResult(
++                    transition,
++                    respawnPosAngle.isBedSpawn(),
++                    respawnPosAngle.isAnchorSpawn(),
++                    respawnPosAngle.consumeAnchorCharge(),
++                    respawnBlockPosition,
++                    respawnReason
++                )
++            );
++        });
++    }
++
++    private CompletableFuture<@Nullable RespawnResult> findDefaultRespawnAsync(
++        final boolean missingRespawnBlock,
++        final TeleportTransition.PostTeleportTransition postTeleportTransition,
++        final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason
++    ) {
++        return net.minecraft.server.threading.runtime.OwnershipRouter.supplyOnServer(
++            this.server,
++            this.server::findRespawnDimension
++        ).thenCompose(respawnLevel -> {
++            final LevelData.RespawnData respawnData = respawnLevel.getRespawnData();
++            return PlayerSpawnFinder.findSpawn(respawnLevel, respawnData.pos()).thenApply(spawnPosition -> {
++                final TeleportTransition transition = new TeleportTransition(
++                    respawnLevel,
++                    spawnPosition,
++                    Vec3.ZERO,
++                    respawnData.yaw(),
++                    respawnData.pitch(),
++                    missingRespawnBlock,
++                    false,
++                    Set.of(),
++                    postTeleportTransition
++                );
++                return this.completeRespawnResult(
++                    transition, false, false, null, null, respawnReason
++                );
++            });
++        });
++    }
++
++    private @Nullable RespawnResult completeRespawnResult(
++        final TeleportTransition teleportTransition,
++        final boolean isBedSpawn,
++        final boolean isAnchorSpawn,
++        final @Nullable Runnable consumeAnchorCharge,
++        final @Nullable BlockPos respawnBlockPosition,
++        final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason
++    ) {
+         org.bukkit.entity.Player respawnPlayer = this.getBukkitEntity();
+         org.bukkit.Location location = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(
+             teleportTransition.position(),
+@@ -1427,9 +1586,9 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+                 teleportTransition.cause()
+             ),
+             isBedSpawn,
+-            isAnchorSpawn
++            isAnchorSpawn,
++            respawnBlockPosition
+         );
+-        // CraftBukkit end
+     }
+ 
+     public boolean isReceivingWaypoints() {
+@@ -1548,19 +1707,24 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
              }
  
              if (newLevel.dimension() == lastDimension) {
@@ -99,7 +353,7 @@ index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..6e391bb0f3625195907e8c05adb826bc
                  this.unsetRemoved();
                  ProfilerFiller profiler = Profiler.get();
                  profiler.push("moving");
-@@ -1570,10 +1602,12 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1570,10 +1734,12 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
  
                  profiler.pop();
                  profiler.push("placing");
@@ -116,7 +370,7 @@ index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..6e391bb0f3625195907e8c05adb826bc
                  profiler.pop();
                  this.triggerDimensionChangeTriggers(oldLevel);
                  this.stopUsingItem();
-@@ -1600,6 +1634,40 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1600,6 +1766,40 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
          }
      }
  
@@ -170,6 +424,338 @@ index f7390b91fe1866c6a11beb93711d0fcde4293164..d7087b7f9aedd2be6695582c52ea8d19
          this.gameTicks = (int) this.level.getLagCompensationTick(); // Paper - lag compensate eating
          if (this.hasDelayedDestroy) {
              BlockState blockState = this.level.getBlockStateIfLoaded(this.delayedDestroyPos); // Paper - Don't allow digging into unloaded chunks
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index e11595a7b1132060c29f760053866f8d123f91de..7da3c00615ed46f013eb1be87d5f79c184e6edf5 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -325,6 +325,7 @@ public class ServerGamePacketListenerImpl
+     private final FutureChain chatMessageChain;
+     private boolean waitingForSwitchToConfig;
+     private boolean waitingForRespawn;
++    private volatile boolean respawnInProgress;
+     private int clientLoadedTimeoutTimer;
+     private static final int MAX_SIGN_LINE_LENGTH = Integer.getInteger("Paper.maxSignLength", 80); // Paper - Limit client sign length
+     private final io.papermc.paper.event.packet.ClientTickEndEvent tickEndEvent; // Paper - add client tick end event
+@@ -3076,25 +3077,44 @@ public class ServerGamePacketListenerImpl
+         ServerboundClientCommandPacket.Action action = packet.getAction();
+         switch (action) {
+             case PERFORM_RESPAWN:
+-                if (this.player.wonGame) {
+-                    this.player.wonGame = false;
+-                    this.player = this.server.getPlayerList().respawn(this.player, true, Entity.RemovalReason.CHANGED_DIMENSION, RespawnReason.END_PORTAL); // CraftBukkit
+-                    this.resetPosition();
+-                    this.restartClientLoadTimerAfterRespawn();
+-                    CriteriaTriggers.CHANGED_DIMENSION.trigger(this.player, Level.END, Level.OVERWORLD);
+-                } else {
+-                    if (this.player.getHealth() > 0.0F) {
+-                        return;
+-                    }
++                final ServerPlayer respawningPlayer = this.player;
++                final boolean returningFromEnd = respawningPlayer.wonGame;
++                if (!returningFromEnd && respawningPlayer.getHealth() > 0.0F) {
++                    return;
++                }
++                if (this.respawnInProgress) {
++                    return;
++                }
++                this.respawnInProgress = true;
++                respawningPlayer.wonGame = false;
++                this.server.getPlayerList().respawnAsync(
++                    respawningPlayer,
++                    returningFromEnd,
++                    returningFromEnd ? Entity.RemovalReason.CHANGED_DIMENSION : Entity.RemovalReason.KILLED,
++                    returningFromEnd ? RespawnReason.END_PORTAL : RespawnReason.DEATH
++                ).whenComplete((respawnedPlayer, throwable) -> {
++                    try {
++                        if (throwable != null) {
++                            LOGGER.error("Failed to respawn player {}", respawningPlayer.getGameProfile().name(), throwable);
++                            return;
++                        }
++                        if (this.isDisconnected() || this.player != respawningPlayer || respawnedPlayer == null) {
++                            return;
++                        }
+ 
+-                    this.player = this.server.getPlayerList().respawn(this.player, false, Entity.RemovalReason.KILLED, RespawnReason.DEATH); // CraftBukkit
+-                    this.resetPosition();
+-                    this.restartClientLoadTimerAfterRespawn();
+-                    if (this.server.isHardcore()) {
+-                        this.player.setGameMode(GameType.SPECTATOR, org.bukkit.event.player.PlayerGameModeChangeEvent.Cause.HARDCORE_DEATH, null); // Paper - Expand PlayerGameModeChangeEvent
+-                        this.player.level().getGameRules().set(GameRules.SPECTATORS_GENERATE_CHUNKS, false, this.player.level()); // CraftBukkit - per-world
++                        this.player = respawnedPlayer;
++                        this.resetPosition();
++                        this.restartClientLoadTimerAfterRespawn();
++                        if (returningFromEnd) {
++                            CriteriaTriggers.CHANGED_DIMENSION.trigger(this.player, Level.END, Level.OVERWORLD);
++                        } else if (this.server.isHardcore()) {
++                            this.player.setGameMode(GameType.SPECTATOR, org.bukkit.event.player.PlayerGameModeChangeEvent.Cause.HARDCORE_DEATH, null); // Paper - Expand PlayerGameModeChangeEvent
++                            this.player.level().getGameRules().set(GameRules.SPECTATORS_GENERATE_CHUNKS, false, this.player.level()); // CraftBukkit - per-world
++                        }
++                    } finally {
++                        this.respawnInProgress = false;
+                     }
+-                }
++                });
+                 break;
+             case REQUEST_STATS:
+                 this.player.getStats().sendStats(this.player);
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 6a358dea5ab373775a541192be246087afc94b5b..a7e9c62b6d74db838347ccd40f18145e0f4cba73 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -87,8 +87,6 @@ import net.minecraft.world.entity.player.Player;
+ import net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl;
+ import net.minecraft.world.item.crafting.RecipeManager;
+ import net.minecraft.world.level.Level;
+-import net.minecraft.world.level.block.Blocks;
+-import net.minecraft.world.level.block.state.BlockState;
+ import net.minecraft.world.level.border.BorderChangeListener;
+ import net.minecraft.world.level.border.WorldBorder;
+ import net.minecraft.world.level.gamerules.GameRules;
+@@ -195,6 +193,90 @@ public abstract class PlayerList {
+         }
+     }
+ 
++    private static void runWithRespawnRegionContext(
++        final ServerLevel level,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final Runnable action
++    ) {
++        try (final net.minecraft.server.threading.runtime.OwnerDomainExecutor.Scope ownerScope =
++                 net.minecraft.server.threading.runtime.OwnerDomainExecutor.enterRegion(
++                     level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, "player-respawn-transfer"
++                 )) {
++            if (net.minecraft.server.threading.TickRegions.currentContext() != null
++                && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(
++                    level, minChunkX, minChunkZ, maxChunkX, maxChunkZ
++                )) {
++                action.run();
++                return;
++            }
++
++            final net.minecraft.server.threading.TickRegions.RegionContext context =
++                net.minecraft.server.threading.TickRegions.pushRegionContext(
++                    level, minChunkX, minChunkZ, maxChunkX, maxChunkZ
++                );
++            try {
++                action.run();
++            } finally {
++                net.minecraft.server.threading.TickRegions.popContext(context);
++            }
++        }
++    }
++
++    private static int getRespawnOwnerRadius(final ServerLevel level) {
++        return Math.max(
++            ca.spottedleaf.moonrise.patches.chunk_tick_iteration.ChunkTickConstants.PLAYER_SPAWN_TRACK_RANGE,
++            Math.max(
++                io.papermc.paper.FeatureHooks.getViewDistance(level),
++                io.papermc.paper.FeatureHooks.getSimulationDistance(level)
++            ) + 1
++        );
++    }
++
++    private static void runWithRespawnOwnerContexts(
++        final ServerPlayer player,
++        final TeleportTransition transition,
++        final Runnable action
++    ) {
++        final ServerLevel sourceLevel = player.level();
++        final net.minecraft.world.level.ChunkPos sourceChunk = player.chunkPosition();
++        final ServerLevel destinationLevel = transition.newLevel();
++        final int destinationChunkX = net.minecraft.util.Mth.floor(transition.position().x()) >> 4;
++        final int destinationChunkZ = net.minecraft.util.Mth.floor(transition.position().z()) >> 4;
++        final int sourceRadius = getRespawnOwnerRadius(sourceLevel);
++        final int destinationRadius = getRespawnOwnerRadius(destinationLevel);
++
++        if (sourceLevel == destinationLevel) {
++            runWithRespawnRegionContext(
++                sourceLevel,
++                Math.min(sourceChunk.x() - sourceRadius, destinationChunkX - destinationRadius),
++                Math.min(sourceChunk.z() - sourceRadius, destinationChunkZ - destinationRadius),
++                Math.max(sourceChunk.x() + sourceRadius, destinationChunkX + destinationRadius),
++                Math.max(sourceChunk.z() + sourceRadius, destinationChunkZ + destinationRadius),
++                action
++            );
++            return;
++        }
++
++        runWithRespawnRegionContext(
++            sourceLevel,
++            sourceChunk.x() - sourceRadius,
++            sourceChunk.z() - sourceRadius,
++            sourceChunk.x() + sourceRadius,
++            sourceChunk.z() + sourceRadius,
++            () -> runWithRespawnRegionContext(
++                destinationLevel,
++                destinationChunkX - destinationRadius,
++                destinationChunkZ - destinationRadius,
++                destinationChunkX + destinationRadius,
++                destinationChunkZ + destinationRadius,
++                action
++            )
++        );
++    }
++
+     public void placeNewPlayer(final Connection connection, final ServerPlayer player, final CommonListenerCookie cookie) {
+         player.isRealPlayer = true; // Paper
+         player.loginTime = System.currentTimeMillis(); // Paper - Replace OfflinePlayer#getLastPlayed
+@@ -650,17 +732,98 @@ public abstract class PlayerList {
+     }
+ 
+     // Paper start - respawn event
++    public CompletableFuture<ServerPlayer> respawnAsync(
++        final ServerPlayer serverPlayer,
++        final boolean keepAllPlayerData,
++        final Entity.RemovalReason removalReason,
++        final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason
++    ) {
++        final CompletableFuture<ServerPlayer> resultFuture = new CompletableFuture<>();
++        serverPlayer.findRespawnPositionAndUseSpawnBlockAsync(
++            !keepAllPlayerData, TeleportTransition.DO_NOTHING, respawnReason
++        ).whenComplete((result, throwable) -> {
++            if (throwable != null) {
++                resultFuture.completeExceptionally(throwable);
++                return;
++            }
++            if (result == null) {
++                resultFuture.complete(serverPlayer);
++                return;
++            }
++
++            final TeleportTransition transition = result.transition();
++            final Vec3 position = transition.position();
++            final net.minecraft.world.phys.AABB destinationBox = serverPlayer.getBoundingBoxAt(
++                position.x(), position.y(), position.z()
++            );
++            net.minecraft.server.threading.runtime.OwnershipRouter.runWhenMoveChunksReady(
++                transition.newLevel(),
++                destinationBox,
++                ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++                "player-respawn-destination",
++                chunks -> {
++                    final net.minecraft.server.level.ServerChunkCache chunkCache = transition.newLevel().getChunkSource();
++                    for (final net.minecraft.world.level.chunk.ChunkAccess chunk : chunks) {
++                        chunkCache.addTicketAtLevel(
++                            net.minecraft.server.level.TicketType.POST_TELEPORT,
++                            chunk.getPos(),
++                            net.minecraft.server.level.ChunkLevel.FULL_CHUNK_LEVEL
++                        );
++                    }
++
++                    net.minecraft.server.threading.runtime.OwnershipRouter.runOnServer(
++                        this.server,
++                        () -> {
++                            if (serverPlayer.connection.isDisconnected()
++                                || this.playersByUUID.get(serverPlayer.getUUID()) != serverPlayer) {
++                                resultFuture.complete(serverPlayer);
++                                return;
++                            }
++
++                            runWithRespawnOwnerContexts(serverPlayer, transition, () -> {
++                                final ServerPlayer respawned = this.respawnWithResult(
++                                    serverPlayer, keepAllPlayerData, removalReason, respawnReason, result
++                                );
++                                resultFuture.complete(respawned);
++                            });
++                        }
++                    ).whenComplete((ignored, dispatchThrowable) -> {
++                        if (dispatchThrowable != null) {
++                            resultFuture.completeExceptionally(dispatchThrowable);
++                        }
++                    });
++                }
++            ).whenComplete((ignored, readinessThrowable) -> {
++                if (readinessThrowable != null) {
++                    resultFuture.completeExceptionally(readinessThrowable);
++                }
++            });
++        });
++        return resultFuture;
++    }
++
+     public ServerPlayer respawn(final ServerPlayer serverPlayer, final boolean keepAllPlayerData, final Entity.RemovalReason removalReason, final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason) {
+         ServerPlayer.RespawnResult result = serverPlayer.findRespawnPositionAndUseSpawnBlock0(!keepAllPlayerData, TeleportTransition.DO_NOTHING, respawnReason);
+         if (result == null) { // disconnected player during the respawn event
+             return serverPlayer;
+         }
++        return this.respawnWithResult(serverPlayer, keepAllPlayerData, removalReason, respawnReason, result);
++    }
++
++    private ServerPlayer respawnWithResult(
++        final ServerPlayer serverPlayer,
++        final boolean keepAllPlayerData,
++        final Entity.RemovalReason removalReason,
++        final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason,
++        final ServerPlayer.RespawnResult result
++    ) {
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "player-respawn-transfer");
+         TeleportTransition respawnInfo = result.transition();
+         Level fromLevel = serverPlayer.level();
+         // Paper end - respawn event
+         this.players.remove(serverPlayer);
+         this.playersByName.remove(serverPlayer.getScoreboardName().toLowerCase(java.util.Locale.ROOT)); // Paper
+-        runWithLevelContext(serverPlayer.level(), () -> serverPlayer.level().removePlayerImmediately(serverPlayer, removalReason));
++        serverPlayer.level().removePlayerImmediately(serverPlayer, removalReason);
+         ServerLevel level = respawnInfo.newLevel();
+         ServerPlayer player = serverPlayer; // Paper - TODO - recreate instance
+         player.connection = serverPlayer.connection;
+@@ -701,7 +864,7 @@ public abstract class PlayerList {
+         this.sendActivePlayerEffects(player);
+         this.sendLevelInfo(player, level);
+         this.sendPlayerPermissionLevel(player);
+-        runWithLevelContext(level, () -> level.addRespawnedPlayer(player));
++        level.addRespawnedPlayer(player);
+         this.players.add(player);
+         this.playersByName.put(player.getScoreboardName().toLowerCase(java.util.Locale.ROOT), player); // Paper
+         this.playersByUUID.put(player.getUUID(), player);
+@@ -712,29 +875,21 @@ public abstract class PlayerList {
+         this.sendAllPlayerInfo(serverPlayer); // Update health
+         serverPlayer.onUpdateAbilities(); // Update inventory, etc
+         // Paper end
+-        ServerPlayer.RespawnConfig respawnConfig = player.getRespawnConfig();
+-        if (!keepAllPlayerData && respawnConfig != null) {
+-            LevelData.RespawnData respawnData = respawnConfig.respawnData();
+-            ServerLevel respawnLevel = this.server.getLevel(respawnData.dimension());
+-            if (respawnLevel != null) {
+-                BlockPos respawnPosition = respawnData.pos();
+-                BlockState blockState = respawnLevel.getBlockState(respawnPosition);
+-                if (blockState.is(Blocks.RESPAWN_ANCHOR)) {
+-                    player.connection
+-                        .send(
+-                            new ClientboundSoundPacket(
+-                                SoundEvents.RESPAWN_ANCHOR_DEPLETE,
+-                                SoundSource.BLOCKS,
+-                                respawnPosition.getX(),
+-                                respawnPosition.getY(),
+-                                respawnPosition.getZ(),
+-                                1.0F,
+-                                1.0F,
+-                                level.getRandom().nextLong()
+-                            )
+-                        );
+-                }
+-            }
++        final BlockPos respawnBlockPosition = result.respawnBlockPosition();
++        if (!keepAllPlayerData && result.isAnchorSpawn() && respawnBlockPosition != null) {
++            player.connection
++                .send(
++                    new ClientboundSoundPacket(
++                        SoundEvents.RESPAWN_ANCHOR_DEPLETE,
++                        SoundSource.BLOCKS,
++                        respawnBlockPosition.getX(),
++                        respawnBlockPosition.getY(),
++                        respawnBlockPosition.getZ(),
++                        1.0F,
++                        1.0F,
++                        level.getRandom().nextLong()
++                    )
++                );
+         }
+ 
+         // Paper start
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
 index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..ceaeb1f438c9048716bb9be44ce831d227e02b7b 100644
 --- a/net/minecraft/world/entity/Entity.java
@@ -433,7 +1019,7 @@ index 391f3048f34edfa3d5759abfd56e17d5b5318309..088a9eaeeaac8e27741ebccac176f82a
          double nx = Mth.clamp(this.getX(), -2.9999999E7, 2.9999999E7);
          double nz = Mth.clamp(this.getZ(), -2.9999999E7, 2.9999999E7);
 diff --git a/net/minecraft/world/level/block/EndPortalBlock.java b/net/minecraft/world/level/block/EndPortalBlock.java
-index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..48e313cf14da53adcf3c2b83ad9acf005dfba193 100644
+index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..60fc900fee1077a797ea3a0ae78f058c52d63c24 100644
 --- a/net/minecraft/world/level/block/EndPortalBlock.java
 +++ b/net/minecraft/world/level/block/EndPortalBlock.java
 @@ -2,12 +2,14 @@ package net.minecraft.world.level.block;
@@ -451,12 +1037,12 @@ index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..48e313cf14da53adcf3c2b83ad9acf00
  import net.minecraft.util.RandomSource;
  import net.minecraft.world.entity.Entity;
  import net.minecraft.world.entity.InsideBlockEffectApplier;
-@@ -83,37 +85,158 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
+@@ -83,37 +85,162 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
  
      @Override
      public @Nullable TeleportTransition getPortalDestination(final ServerLevel currentLevel, final Entity entity, final BlockPos portalEntryPos) {
 +        CompletableFuture<@Nullable TeleportTransition> destination = this.getPortalDestinationAsync(currentLevel, entity, portalEntryPos);
-+        return destination.isDone() ? destination.join() : null;
++        return destination.isDone() ? destination.getNow(null) : null;
 +    }
 +
 +    @Override
@@ -490,7 +1076,11 @@ index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..48e313cf14da53adcf3c2b83ad9acf00
                  relatives = Relative.union(Relative.DELTA, Relative.ROTATION);
                  if (entity instanceof ServerPlayer serverPlayer) {
 -                    return serverPlayer.findRespawnPositionAndUseSpawnBlock(false, TeleportTransition.DO_NOTHING, org.bukkit.event.player.PlayerRespawnEvent.RespawnReason.END_PORTAL); // CraftBukkit
-+                    return CompletableFuture.completedFuture(serverPlayer.findRespawnPositionAndUseSpawnBlock(false, TeleportTransition.DO_NOTHING, org.bukkit.event.player.PlayerRespawnEvent.RespawnReason.END_PORTAL)); // CraftBukkit
++                    return serverPlayer.findRespawnPositionAndUseSpawnBlockAsync(
++                        false,
++                        TeleportTransition.DO_NOTHING,
++                        org.bukkit.event.player.PlayerRespawnEvent.RespawnReason.END_PORTAL
++                    ).thenApply(result -> result == null ? null : result.transition()); // CraftBukkit
                  }
  
 -                spawnPos = entity.adjustSpawnLocation(newLevel, spawnBlockPos).getBottomCenter();
@@ -614,7 +1204,7 @@ index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..48e313cf14da53adcf3c2b83ad9acf00
              // CraftBukkit start
              relatives.removeAll(Relative.ROTATION); // remove relative rotation flags to simplify event mutation
              float absoluteYaw = !fromEnd ? yRot : entity.getYRot() + yRot;
-@@ -128,7 +251,7 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
+@@ -128,7 +255,7 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
                  ((org.bukkit.craftbukkit.CraftWorld) to.getWorld()).getHandle(), org.bukkit.craftbukkit.util.CraftLocation.toVec3(to), Vec3.ZERO, to.getYaw(), to.getPitch(), relatives, TeleportTransition.PLAY_PORTAL_SOUND.then(TeleportTransition.PLACE_PORTAL_TICKET), org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.END_PORTAL
              );
              // CraftBukkit end

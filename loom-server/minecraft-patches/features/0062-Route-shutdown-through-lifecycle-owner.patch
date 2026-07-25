@@ -26,10 +26,10 @@ index cb3dbb2b74c6be2d47848ed5a196fe9e10b3aa29..d21a2932aff446f65dbdf2beaf0c614b
      public void executeIfPossible(final Runnable command) {
          if (this.isStopped()) {
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index 616d70d40c924f907ed279351879ff1bc83101d7..933583dd74fed89e719b5dcb67f6f391e57e9b8a 100644
+index c95020c8b2207f6409c99d41ab99fdc754bf0029..6c9dcc756e128ccf0feb6b8401b42d732a5bc122 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
-@@ -1019,20 +1019,41 @@ public abstract class PlayerList {
+@@ -1174,20 +1174,41 @@ public abstract class PlayerList {
      }
      public void saveAll(final int interval) {
          // Paper end - Incremental chunk and player saving

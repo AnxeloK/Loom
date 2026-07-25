@@ -50,7 +50,7 @@ index 67982abed7b87bf21fee43cc96819ba71e1ce8a4..f17e9acd63a12c5ed6513f375d253f2f
              for (int i = 0, n = ownerTick.size(); i < n; ++i) {
                  this.tickOneEntity(ownerTick.get(i));
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index fb71e2e6a208752b381130720757ba6266bed87e..bcce0ea7957f11eb44c0abbbe8534dc94bf08478 100644
+index d34e038ac6309359116ea65c735b5c69ecc50090..5c04410d946447ab95145218bd62434578b3954f 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
 @@ -736,6 +736,15 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc

@@ -58,7 +58,7 @@ index 0809ea2e5e0975e8549fc3e1cd50dff6f72f90a2..c912bcbd6b0bfd723db88478b21d06c3
      // Paper end - rewrite chunk system
  
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index 6e391bb0f3625195907e8c05adb826bcb6f0b77b..fb71e2e6a208752b381130720757ba6266bed87e 100644
+index f3ecddedbe3a8b963c9bf46e62820cda65de6755..d34e038ac6309359116ea65c735b5c69ecc50090 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
 @@ -939,16 +939,22 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
@@ -86,7 +86,7 @@ index 6e391bb0f3625195907e8c05adb826bcb6f0b77b..fb71e2e6a208752b381130720757ba62
          return true;
      }
  
-@@ -1646,24 +1652,35 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1778,24 +1784,35 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
          final int targetMinChunkZ = targetChunkZ - ownerRadius;
          final int targetMaxChunkX = targetChunkX + ownerRadius;
          final int targetMaxChunkZ = targetChunkZ + ownerRadius;
@@ -140,10 +140,10 @@ index 6e391bb0f3625195907e8c05adb826bcb6f0b77b..fb71e2e6a208752b381130720757ba62
          }
      }
 diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-index e11595a7b1132060c29f760053866f8d123f91de..f854281a6a06118941c910aa56abe281a3f35afe 100644
+index 7da3c00615ed46f013eb1be87d5f79c184e6edf5..346d2368831df6434cdb7fa06c31fee111b62893 100644
 --- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-@@ -1966,16 +1966,22 @@ public class ServerGamePacketListenerImpl
+@@ -1967,16 +1967,22 @@ public class ServerGamePacketListenerImpl
          final PositionMoveRotation absoluteDestination = PositionMoveRotation.calculateAbsolute(PositionMoveRotation.of(this.player), destination, relatives);
          final Vec3 position = absoluteDestination.position();
          final ServerLevel level = this.player.level();
@@ -168,7 +168,7 @@ index e11595a7b1132060c29f760053866f8d123f91de..f854281a6a06118941c910aa56abe281
      }
  
      private boolean waitForPlayerChunkIfUnloaded(final ServerLevel level) {
-@@ -1984,19 +1990,25 @@ public class ServerGamePacketListenerImpl
+@@ -1985,19 +1991,25 @@ public class ServerGamePacketListenerImpl
              return false;
          }
  
@@ -197,10 +197,10 @@ index e11595a7b1132060c29f760053866f8d123f91de..f854281a6a06118941c910aa56abe281
      }
  
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index 6a358dea5ab373775a541192be246087afc94b5b..616d70d40c924f907ed279351879ff1bc83101d7 100644
+index a7e9c62b6d74db838347ccd40f18145e0f4cba73..c95020c8b2207f6409c99d41ab99fdc754bf0029 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
-@@ -164,34 +164,42 @@ public abstract class PlayerList {
+@@ -162,34 +162,42 @@ public abstract class PlayerList {
          final int minChunkZ = chunkPos.z() - radius;
          final int maxChunkX = chunkPos.x() + radius;
          final int maxChunkZ = chunkPos.z() + radius;
@@ -650,10 +650,10 @@ index 5538a93f1ae5af424432e78d652fcf451b5946b3..a8081eee40c792a49fa300b33be0371d
          return this.portal.getLocalTransition();
      }
 diff --git a/net/minecraft/world/level/block/EndPortalBlock.java b/net/minecraft/world/level/block/EndPortalBlock.java
-index 48e313cf14da53adcf3c2b83ad9acf005dfba193..4e657fcd615839d629b1e54d458824de061dcf4a 100644
+index 60fc900fee1077a797ea3a0ae78f058c52d63c24..9320d3c89b7d618766878d8e2d5ee50957c41e6b 100644
 --- a/net/minecraft/world/level/block/EndPortalBlock.java
 +++ b/net/minecraft/world/level/block/EndPortalBlock.java
-@@ -215,14 +215,20 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
+@@ -219,14 +219,20 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
                  });
          });
  

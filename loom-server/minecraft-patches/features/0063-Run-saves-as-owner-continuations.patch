@@ -502,7 +502,7 @@ index bc6d01996dde0870f6ebbda14176352777938a0c..361aa24d60c4bd937c1dc8256abb692c
      }
  }
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index 933583dd74fed89e719b5dcb67f6f391e57e9b8a..496e34e2f4d09ec502961ae8bcd816f6028980fb 100644
+index 6c9dcc756e128ccf0feb6b8401b42d732a5bc122..3f6e029667fde744f6f91607a645012762cb5c65 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
 @@ -3,6 +3,7 @@ package net.minecraft.server.players;
@@ -523,7 +523,7 @@ index 933583dd74fed89e719b5dcb67f6f391e57e9b8a..496e34e2f4d09ec502961ae8bcd816f6
  import java.util.function.Function;
  import java.util.function.Predicate;
  import net.minecraft.ChatFormatting;
-@@ -466,19 +470,79 @@ public abstract class PlayerList {
+@@ -548,19 +552,79 @@ public abstract class PlayerList {
      }
  
      protected void save(final ServerPlayer player) {
