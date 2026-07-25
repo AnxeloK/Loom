@@ -194,18 +194,30 @@ index 10e1e24f9518bc0b73dca38ff5a2e149fb5cc168..53802b9fcd6f5ad6d166dcaf52ecb5b2
              level,
              owner.chunkX(),
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
-index a7c9a0c69c8c6deef275a96102201b139e9fc53b..102516b36b78fa11f06d0a5eb3e8142c1d678f46 100644
+index a7c9a0c69c8c6deef275a96102201b139e9fc53b..6de5efbff3e0d4b9b184626f0b661c671458c7de 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
 +++ b/net/minecraft/world/level/chunk/LevelChunk.java
-@@ -106,6 +106,7 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -12,6 +12,7 @@ import java.util.List;
+ import java.util.Map;
+ import java.util.Objects;
+ import java.util.Map.Entry;
++import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+ import java.util.function.Consumer;
+ import java.util.function.Supplier;
+ import net.minecraft.CrashReport;
+@@ -105,7 +106,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+     boolean loadedTicketLevel;
      // Paper end
      // Paper start - rewrite chunk system
-     private boolean postProcessingDone;
-+    private boolean postProcessingScheduled;
+-    private boolean postProcessingDone;
++    private volatile boolean postProcessingDone;
++    private static final AtomicIntegerFieldUpdater<LevelChunk> POST_PROCESSING_SCHEDULED =
++        AtomicIntegerFieldUpdater.newUpdater(LevelChunk.class, "postProcessingScheduled");
++    private volatile int postProcessingScheduled;
      private ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder chunkAndHolder;
  
      @Override
-@@ -122,6 +123,103 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -122,6 +126,96 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
      public final void moonrise$setChunkHolder(final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder holder) {
          this.chunkAndHolder = holder;
      }
@@ -224,6 +236,14 @@ index a7c9a0c69c8c6deef275a96102201b139e9fc53b..102516b36b78fa11f06d0a5eb3e8142c
 +        final int maxChunkX = pos.x() + 1;
 +        final int maxChunkZ = pos.z() + 1;
 +        final boolean haloReady = this.moonrise$isPostProcessingHaloReady(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
++        if (!POST_PROCESSING_SCHEDULED.compareAndSet(this, 0, 1)) {
++            return false;
++        }
++        if (this.postProcessingDone) {
++            POST_PROCESSING_SCHEDULED.set(this, 0);
++            return true;
++        }
++
 +        if (haloReady
 +            && net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(
 +                level, minChunkX, minChunkZ, maxChunkX, maxChunkZ
@@ -231,30 +251,29 @@ index a7c9a0c69c8c6deef275a96102201b139e9fc53b..102516b36b78fa11f06d0a5eb3e8142c
 +            && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(
 +                level, minChunkX, minChunkZ, maxChunkX, maxChunkZ
 +            )) {
-+            this.postProcessGeneration(level);
++            try {
++                this.postProcessGeneration(level);
++            } finally {
++                POST_PROCESSING_SCHEDULED.set(this, 0);
++            }
 +            return true;
 +        }
 +
-+        if (this.postProcessingScheduled) {
-+            return false;
-+        }
-+        this.postProcessingScheduled = true;
-+
-+        if (haloReady) {
-+            this.moonrise$queuePostProcessingContinuation(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
-+        } else {
-+            level.moonrise$loadChunksAsync(
-+                minChunkX,
-+                maxChunkX,
-+                minChunkZ,
-+                maxChunkZ,
-+                ChunkStatus.FULL,
-+                ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
-+                ignored -> this.moonrise$queuePostProcessingContinuation(
-+                    level, minChunkX, minChunkZ, maxChunkX, maxChunkZ
-+                )
-+            );
-+        }
++        net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
++            level,
++            minChunkX,
++            minChunkZ,
++            maxChunkX,
++            maxChunkZ,
++            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "chunk-post-processing",
++            ignored -> this.moonrise$resumePostProcessing(level)
++        ).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                POST_PROCESSING_SCHEDULED.set(this, 0);
++                LOGGER.error("Failed to resume post-processing for chunk {}", pos, throwable);
++            }
++        });
 +        return false;
 +    }
 +
@@ -277,29 +296,15 @@ index a7c9a0c69c8c6deef275a96102201b139e9fc53b..102516b36b78fa11f06d0a5eb3e8142c
 +        return true;
 +    }
 +
-+    private void moonrise$queuePostProcessingContinuation(
-+        final ServerLevel level,
-+        final int minChunkX,
-+        final int minChunkZ,
-+        final int maxChunkX,
-+        final int maxChunkZ
-+    ) {
-+        net.minecraft.server.threading.TickRegions.sendRegionContinuation(
-+            level,
-+            minChunkX,
-+            minChunkZ,
-+            maxChunkX,
-+            maxChunkZ,
-+            () -> this.moonrise$resumePostProcessing(level)
-+        );
-+    }
-+
 +    private void moonrise$resumePostProcessing(final ServerLevel level) {
-+        this.postProcessingScheduled = false;
-+        final ChunkPos pos = this.getPos();
-+        if (level.getChunkSource().getChunkAtIfLoadedImmediately(pos.x(), pos.z()) == this
-+            && !this.moonrise$ensurePostProcessing(level)) {
-+            return;
++        try {
++            final ChunkPos pos = this.getPos();
++            if (level.getChunkSource().getChunkAtIfLoadedImmediately(pos.x(), pos.z()) == this
++                && !this.postProcessingDone) {
++                this.postProcessGeneration(level);
++            }
++        } finally {
++            POST_PROCESSING_SCHEDULED.set(this, 0);
 +        }
 +        final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder holder = this.chunkAndHolder;
 +        if (holder != null) {

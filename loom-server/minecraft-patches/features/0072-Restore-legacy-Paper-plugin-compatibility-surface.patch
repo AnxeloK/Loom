@@ -208,10 +208,10 @@ index 176754124047d79da83ab9ea8bf7fa8143256998..4d444bedfa3d77724926eb189fdd030d
              this.getChunkAt(pos).addAndRegisterBlockEntity(blockEntity);
          }
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
-index 102516b36b78fa11f06d0a5eb3e8142c1d678f46..81ee695ee6b9d7098f9c6110f6e2879ce54af62d 100644
+index 6de5efbff3e0d4b9b184626f0b661c671458c7de..c40df1c78b86b574fb2e912a4680e006143cd604 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
 +++ b/net/minecraft/world/level/chunk/LevelChunk.java
-@@ -572,6 +572,9 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -568,6 +568,9 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
          BlockEntity blockEntity = captureContext != null && captureContext.hasMode(LevelCaptureContext.BLOCK_STATES)
              ? captureContext.getCapturedBlockEntity(pos)
              : null;

@@ -266,13 +266,15 @@ index 6a358dea5ab373775a541192be246087afc94b5b..616d70d40c924f907ed279351879ff1b
      }
  
 diff --git a/net/minecraft/server/threading/runtime/OwnershipRouter.java b/net/minecraft/server/threading/runtime/OwnershipRouter.java
-index 699ed1f7ee89c5646617368a1c41803bc1533cc5..69c8122401e4f83d3fd651cdfaae476dbfb927ee 100644
+index 699ed1f7ee89c5646617368a1c41803bc1533cc5..de2c6b753e5cacda940c7fd045db26645821a5d7 100644
 --- a/net/minecraft/server/threading/runtime/OwnershipRouter.java
 +++ b/net/minecraft/server/threading/runtime/OwnershipRouter.java
-@@ -1,10 +1,17 @@
+@@ -1,10 +1,21 @@
  package net.minecraft.server.threading.runtime;
  
 +import ca.spottedleaf.concurrentutil.util.Priority;
++import ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkHolderManager;
++import ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler;
 +import java.util.List;
 +import java.util.Objects;
  import java.util.concurrent.CompletableFuture;
@@ -282,12 +284,14 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..69c8122401e4f83d3fd651cdfaae476d
  import net.minecraft.server.level.ServerLevel;
  import net.minecraft.server.level.ServerPlayer;
 +import net.minecraft.util.Mth;
++import net.minecraft.world.level.ChunkPos;
 +import net.minecraft.world.level.chunk.ChunkAccess;
++import net.minecraft.world.level.chunk.status.ChunkStatus;
 +import net.minecraft.world.phys.AABB;
  
  public final class OwnershipRouter {
  
-@@ -46,4 +53,86 @@ public final class OwnershipRouter {
+@@ -46,4 +57,282 @@ public final class OwnershipRouter {
      public static void dispatchToPlayer(final ServerPlayer player, final String operation, final Runnable task) {
          OwnerDomainExecutor.execute(OwnerDomainExecutor.player(player, operation), task);
      }
@@ -315,18 +319,9 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..69c8122401e4f83d3fd651cdfaae476d
 +        final int maxChunkX = maxBlockX >> 4;
 +        final int maxChunkZ = maxBlockZ >> 4;
 +
-+        final CompletableFuture<Void> future = new CompletableFuture<>();
-+        level.loadChunksForMoveAsync(box, priority, chunks -> {
-+            try {
-+                OwnerDomainExecutor.execute(
-+                    OwnerDomainExecutor.region(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation),
-+                    () -> completeChunkReadyCallback(future, chunks, onReady)
-+                );
-+            } catch (final Throwable throwable) {
-+                future.completeExceptionally(throwable);
-+            }
-+        });
-+        return future;
++        return runWhenChunksReady(
++            level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, priority, operation, onReady
++        );
 +    }
 +
 +    public static CompletableFuture<Void> runWhenChunksReady(
@@ -348,17 +343,133 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..69c8122401e4f83d3fd651cdfaae476d
 +        }
 +
 +        final CompletableFuture<Void> future = new CompletableFuture<>();
++        loadAndDispatch(
++            future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, priority, operation, onReady
++        );
++        return future;
++    }
++
++    private static void loadAndDispatch(
++        final CompletableFuture<Void> future,
++        final ServerLevel level,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final Priority priority,
++        final String operation,
++        final Consumer<List<ChunkAccess>> onReady
++    ) {
++        if (future.isDone()) {
++            return;
++        }
++
 +        level.loadChunks(minChunkX, minChunkZ, maxChunkX, maxChunkZ, priority, chunks -> {
++            final ChunkReadyLease lease;
 +            try {
-+                OwnerDomainExecutor.execute(
-+                    OwnerDomainExecutor.region(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation),
-+                    () -> completeChunkReadyCallback(future, chunks, onReady)
++                lease = ChunkReadyLease.acquire(
++                    level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunks
 +                );
 +            } catch (final Throwable throwable) {
 +                future.completeExceptionally(throwable);
++                return;
 +            }
++
++            dispatchReadyCallback(
++                future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation, chunks, onReady, lease
++            );
 +        });
-+        return future;
++    }
++
++    private static void dispatchReadyCallback(
++        final CompletableFuture<Void> future,
++        final ServerLevel level,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final String operation,
++        final List<ChunkAccess> chunks,
++        final Consumer<List<ChunkAccess>> onReady,
++        final ChunkReadyLease lease
++    ) {
++        if (future.isDone()) {
++            lease.close();
++            return;
++        }
++
++        try {
++            OwnerDomainExecutor.execute(
++                OwnerDomainExecutor.region(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation),
++                () -> {
++                    if (future.isDone()) {
++                        lease.close();
++                        return;
++                    }
++                    if (!areChunksReady(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++                        retryReadyCallback(
++                            future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation, chunks, onReady, lease
++                        );
++                        return;
++                    }
++
++                    try (lease) {
++                        completeChunkReadyCallback(future, chunks, onReady);
++                    }
++                }
++            );
++        } catch (final Throwable throwable) {
++            lease.close();
++            future.completeExceptionally(throwable);
++        }
++    }
++
++    private static void retryReadyCallback(
++        final CompletableFuture<Void> future,
++        final ServerLevel level,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final String operation,
++        final List<ChunkAccess> chunks,
++        final Consumer<List<ChunkAccess>> onReady,
++        final ChunkReadyLease lease
++    ) {
++        if (level.getServer().isStopped()) {
++            lease.close();
++            future.completeExceptionally(new IllegalStateException("Server stopped before chunks became owner-ready"));
++            return;
++        }
++
++        try {
++            OwnerDomainExecutor.execute(
++                OwnerDomainExecutor.asyncIo(level.getServer(), operation + "-chunk-ready-retry"),
++                () -> dispatchReadyCallback(
++                    future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation, chunks, onReady, lease
++                )
++            );
++        } catch (final Throwable throwable) {
++            lease.close();
++            future.completeExceptionally(throwable);
++        }
++    }
++
++    private static boolean areChunksReady(
++        final ServerLevel level,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ
++    ) {
++        for (int chunkX = minChunkX; chunkX <= maxChunkX; ++chunkX) {
++            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; ++chunkZ) {
++                if (level.getChunkSource().getChunkAtIfLoadedImmediately(chunkX, chunkZ) == null) {
++                    return false;
++                }
++            }
++        }
++        return true;
 +    }
 +
 +    private static void completeChunkReadyCallback(
@@ -371,6 +482,95 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..69c8122401e4f83d3fd651cdfaae476d
 +            future.complete(null);
 +        } catch (final Throwable throwable) {
 +            future.completeExceptionally(throwable);
++        }
++    }
++
++    private static final class ChunkReadyLease implements AutoCloseable {
++        private final ChunkHolderManager chunkHolderManager;
++        private final List<ChunkAccess> chunks;
++        private final int ticketLevel;
++        private final Long identifier;
++        private boolean closed;
++
++        private ChunkReadyLease(
++            final ChunkHolderManager chunkHolderManager,
++            final List<ChunkAccess> chunks,
++            final int ticketLevel,
++            final Long identifier
++        ) {
++            this.chunkHolderManager = chunkHolderManager;
++            this.chunks = chunks;
++            this.ticketLevel = ticketLevel;
++            this.identifier = identifier;
++        }
++
++        private static ChunkReadyLease acquire(
++            final ServerLevel level,
++            final int minChunkX,
++            final int minChunkZ,
++            final int maxChunkX,
++            final int maxChunkZ,
++            final List<ChunkAccess> chunks
++        ) {
++            final long width = (long)maxChunkX - (long)minChunkX + 1L;
++            final long depth = (long)maxChunkZ - (long)minChunkZ + 1L;
++            if (width > Integer.MAX_VALUE || depth > Integer.MAX_VALUE || width > Integer.MAX_VALUE / depth) {
++                throw new IllegalArgumentException("Chunk readiness bounds are too large");
++            }
++            final long expectedCountLong = width * depth;
++            final int expectedCount = (int)expectedCountLong;
++            if (chunks.size() != expectedCount) {
++                throw new IllegalStateException(
++                    "Chunk load completed without all requested chunks: expected " + expectedCount + ", got " + chunks.size()
++                );
++            }
++
++            final boolean[] positions = new boolean[expectedCount];
++            for (final ChunkAccess chunk : chunks) {
++                final ChunkPos pos = Objects.requireNonNull(chunk, "loaded chunk").getPos();
++                if (pos.x() < minChunkX || pos.x() > maxChunkX || pos.z() < minChunkZ || pos.z() > maxChunkZ) {
++                    throw new IllegalStateException("Chunk load completed with an unexpected or duplicate chunk: " + pos);
++                }
++                final int index = (int)(((long)pos.x() - minChunkX) * depth + ((long)pos.z() - minChunkZ));
++                if (positions[index]) {
++                    throw new IllegalStateException("Chunk load completed with an unexpected or duplicate chunk: " + pos);
++                }
++                positions[index] = true;
++            }
++
++            final ChunkHolderManager chunkHolderManager = level.moonrise$getChunkTaskScheduler().chunkHolderManager;
++            final int ticketLevel = ChunkTaskScheduler.getTicketLevel(ChunkStatus.FULL);
++            final Long identifier = ChunkTaskScheduler.getNextChunkLoadId();
++            int retained = 0;
++            try {
++                for (final ChunkAccess chunk : chunks) {
++                    chunkHolderManager.addTicketAtLevel(
++                        ChunkTaskScheduler.CHUNK_LOAD, chunk.getPos(), ticketLevel, identifier
++                    );
++                    ++retained;
++                }
++            } catch (final Throwable throwable) {
++                for (int index = 0; index < retained; ++index) {
++                    chunkHolderManager.removeTicketAtLevel(
++                        ChunkTaskScheduler.CHUNK_LOAD, chunks.get(index).getPos(), ticketLevel, identifier
++                    );
++                }
++                throw throwable;
++            }
++            return new ChunkReadyLease(chunkHolderManager, chunks, ticketLevel, identifier);
++        }
++
++        @Override
++        public void close() {
++            if (this.closed) {
++                return;
++            }
++            this.closed = true;
++            for (final ChunkAccess chunk : this.chunks) {
++                this.chunkHolderManager.removeTicketAtLevel(
++                    ChunkTaskScheduler.CHUNK_LOAD, chunk.getPos(), this.ticketLevel, this.identifier
++                );
++            }
 +        }
 +    }
  }
