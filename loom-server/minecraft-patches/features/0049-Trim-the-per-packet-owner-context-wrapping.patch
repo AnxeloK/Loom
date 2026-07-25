@@ -13,10 +13,10 @@ level, which is safe because both paths run on the single-threaded
 packet drain.
 
 diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
-index d953bb4edb1ae93667a3c8865cb3d2fc1354ada6..61bfcdde7f4cfb24ba25f6f9f7fdf28200cb64df 100644
+index d953bb4edb1ae93667a3c8865cb3d2fc1354ada6..d31a01572d7427d95e2c82d42631d455a8e7b284 100644
 --- a/net/minecraft/network/Connection.java
 +++ b/net/minecraft/network/Connection.java
-@@ -594,16 +594,36 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -594,26 +594,50 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
      private static int joinAttemptsThisTick; // Paper - Buffer joins to world
      private static int currTick; // Paper - Buffer joins to world
  
@@ -58,8 +58,24 @@ index d953bb4edb1ae93667a3c8865cb3d2fc1354ada6..61bfcdde7f4cfb24ba25f6f9f7fdf282
 +            final int maxChunkZ = this.loomBoundsMaxZ;
              if (net.minecraft.server.threading.TickRegions.currentContext() != null
                  && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
-                 action.run();
-@@ -623,8 +643,8 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+-                action.run();
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.runPlayerNow(
++                    player, "connection-listener-player-context", action
++                );
+                 return;
+             }
+ 
+             final net.minecraft.server.threading.TickRegions.RegionContext context =
+                 net.minecraft.server.threading.TickRegions.pushRegionContext(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
+             try {
+-                action.run();
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.runPlayerNow(
++                    player, "connection-listener-player-context", action
++                );
+             } finally {
+                 net.minecraft.server.threading.TickRegions.popContext(context);
+             }
+@@ -623,8 +647,8 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          action.run();
      }
  
@@ -71,10 +87,10 @@ index d953bb4edb1ae93667a3c8865cb3d2fc1354ada6..61bfcdde7f4cfb24ba25f6f9f7fdf282
  
      public void tick() {
 diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
-index 8a7830dfde27c293266d2c55538167331ca1981d..b20b05abbd8232543abe5a908d8098a5a46187d2 100644
+index 8a7830dfde27c293266d2c55538167331ca1981d..12bde1a921f18f9d60a670fcedcbfdb76c1aa28e 100644
 --- a/net/minecraft/network/PacketProcessor.java
 +++ b/net/minecraft/network/PacketProcessor.java
-@@ -139,16 +139,20 @@ public class PacketProcessor implements AutoCloseable {
+@@ -139,20 +139,28 @@ public class PacketProcessor implements AutoCloseable {
              final int minChunkZ = chunkPos.z() - radius;
              final int maxChunkX = chunkPos.x() + radius;
              final int maxChunkZ = chunkPos.z() + radius;
@@ -84,7 +100,9 @@ index 8a7830dfde27c293266d2c55538167331ca1981d..b20b05abbd8232543abe5a908d8098a5
 +            // no covering lease - establishes the scope, via pushRegionContext itself.
 +            if (net.minecraft.server.threading.TickRegions.currentContext() != null
 +                && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
-+                action.run();
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.runPlayerNow(
++                    player, "packet-listener-player-context", action
++                );
 +                return;
 +            }
 +
@@ -101,3 +119,38 @@ index 8a7830dfde27c293266d2c55538167331ca1981d..b20b05abbd8232543abe5a908d8098a5
                  final net.minecraft.server.threading.TickRegions.RegionContext context =
                      net.minecraft.server.threading.TickRegions.pushRegionContext(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
                  try {
+-                    action.run();
++                    net.minecraft.server.threading.runtime.OwnerDomainExecutor.runPlayerNow(
++                        player, "packet-listener-player-context", action
++                    );
+                 } finally {
+                     net.minecraft.server.threading.TickRegions.popContext(context);
+                 }
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index 91ed7762292545c6bf838561d6263bef8b679a7e..8af9053799f99ad6cb14ecb7a57426b12648b30e 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -116,6 +116,23 @@ public final class OwnerDomainExecutor {
+         return enter(region(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation));
+     }
+ 
++    public static void runPlayerNow(final ServerPlayer player, final String operation, final Runnable task) {
++        Objects.requireNonNull(player, "player");
++        Objects.requireNonNull(operation, "operation");
++        Objects.requireNonNull(task, "task");
++        final ServerLevel level = player.level();
++        final net.minecraft.world.level.ChunkPos chunk = player.chunkPosition();
++        if (!isRegionOwner(level, chunk.x(), chunk.z())) {
++            throw new IllegalStateException(
++                "Player owner entry requires the current region owner for "
++                    + level.dimension().identifier() + " chunk [" + chunk.x() + "," + chunk.z() + "]"
++            );
++        }
++        try (Scope ignored = enter(player(player, operation))) {
++            task.run();
++        }
++    }
++
+     public static Scope enter(final Owner owner) {
+         final OwnerContext previous = CURRENT_OWNER.get();
+         CURRENT_OWNER.set(new OwnerContext(owner, previous));

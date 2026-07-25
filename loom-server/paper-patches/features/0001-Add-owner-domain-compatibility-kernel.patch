@@ -3381,18 +3381,21 @@ index a8638b2b507cecac8ea0808651d2b864bf30d31e..e320bc4229ff63a1485870f233aa7e67
 +}
 diff --git a/src/test/java/org/bukkit/OwnershipRouterCompatibilityTest.java b/src/test/java/org/bukkit/OwnershipRouterCompatibilityTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..d04e5eba398c297985c5417e873175c018a5420d
+index 0000000000000000000000000000000000000000..d41d10dceae8c40c284bacf019d3fd0253ce1096
 --- /dev/null
 +++ b/src/test/java/org/bukkit/OwnershipRouterCompatibilityTest.java
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,119 @@
 +package org.bukkit;
 +
 +import ca.spottedleaf.concurrentutil.util.Priority;
 +import java.util.UUID;
 +import net.minecraft.server.MinecraftServer;
 +import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
 +import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
 +import net.minecraft.server.threading.runtime.OwnershipRouter;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
 +import org.bukkit.support.environment.Normal;
 +import org.junit.jupiter.api.Assertions;
 +import org.junit.jupiter.api.Test;
@@ -3439,6 +3442,34 @@ index 0000000000000000000000000000000000000000..d04e5eba398c297985c5417e873175c0
 +
 +        try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enter(OwnerDomainExecutor.asyncIo(server, "test-async"))) {
 +            Assertions.assertFalse(OwnerDomainExecutor.canRunSynchronousCallbacks(), "Async IO domain should not allow synchronous callbacks");
++        }
++    }
++
++    @Test
++    void playerScopeRequiresAndPreservesRegionOwnership() {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        final ServerPlayer player = Mockito.mock(ServerPlayer.class);
++        final ChunkPos chunk = new ChunkPos(4, 7);
++        Mockito.when(level.getServer()).thenReturn(server);
++        Mockito.when(level.dimension()).thenReturn(Level.OVERWORLD);
++        Mockito.when(player.level()).thenReturn(level);
++        Mockito.when(player.chunkPosition()).thenReturn(chunk);
++        Mockito.when(player.getUUID()).thenReturn(UUID.randomUUID());
++
++        Assertions.assertThrows(
++            IllegalStateException.class,
++            () -> OwnerDomainExecutor.runPlayerNow(player, "test-player-without-region", () -> {
++            })
++        );
++
++        try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enterRegion(level, 3, 6, 5, 8, "test-player-region")) {
++            OwnerDomainExecutor.runPlayerNow(player, "test-player-with-region", () -> {
++                Assertions.assertEquals(OwnerDomainExecutor.Domain.PLAYER, OwnerDomainExecutor.currentDomain());
++                Assertions.assertTrue(OwnerDomainExecutor.isPlayerOwner(player));
++                Assertions.assertTrue(OwnerDomainExecutor.isRegionOwner(level, chunk.x(), chunk.z()));
++            });
++            Assertions.assertEquals(OwnerDomainExecutor.Domain.REGION, OwnerDomainExecutor.currentDomain());
 +        }
 +    }
 +

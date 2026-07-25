@@ -779,10 +779,10 @@ index 65fcc768b6af4bd7df384786a157f08939fd56f3..67b63540c9b3f17c8bf485530786befa
              synchronized (this.lock) {
                  final int available = this.mailbox.size();
 diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
-index 154cef0e1f291d9b8ab0e8644ab79b5782b11f70..61b7b42acbc23d01f6fc1b62fa46cd18ba5ed627 100644
+index a67bae67a5c85fd13509cfaa161fc3375334bbf9..6b7cad2ff1b2490090e18925e4380d3202350527 100644
 --- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 +++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
-@@ -390,6 +390,10 @@ public final class OwnerDomainExecutor {
+@@ -407,6 +407,10 @@ public final class OwnerDomainExecutor {
          if (level == null) {
              throw new RejectedExecutionException("Region owner has no level: " + owner.describe());
          }

@@ -143,10 +143,10 @@ index 67b63540c9b3f17c8bf485530786befab35e3d1f..dcffa1217cebeedb90a48dda8d04ff0c
              final List<Runnable> continuations;
              synchronized (this.lock) {
 diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
-index 10e1e24f9518bc0b73dca38ff5a2e149fb5cc168..53802b9fcd6f5ad6d166dcaf52ecb5b241c1da14 100644
+index ffc7103102639214c60201a213df3ad042a05c85..0b4f17076ea84112c6ae5b93865f08259f98f078 100644
 --- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 +++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
-@@ -204,14 +204,24 @@ public final class OwnerDomainExecutor {
+@@ -221,14 +221,24 @@ public final class OwnerDomainExecutor {
      }
  
      public static boolean isRegionOwner(final ServerLevel level, final int chunkX, final int chunkZ) {
@@ -175,7 +175,7 @@ index 10e1e24f9518bc0b73dca38ff5a2e149fb5cc168..53802b9fcd6f5ad6d166dcaf52ecb5b2
                  return true;
              }
          }
-@@ -393,6 +403,17 @@ public final class OwnerDomainExecutor {
+@@ -410,6 +420,17 @@ public final class OwnerDomainExecutor {
              TickRegions.sendFullLevelContinuation(level, wrap(owner, task));
              return;
          }

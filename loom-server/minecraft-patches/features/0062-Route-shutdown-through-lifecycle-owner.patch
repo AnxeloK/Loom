@@ -81,10 +81,10 @@ index c95020c8b2207f6409c99d41ab99fdc754bf0029..6c9dcc756e128ccf0feb6b8401b42d73
  
      public UserWhiteList getWhiteList() {
 diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
-index 61b7b42acbc23d01f6fc1b62fa46cd18ba5ed627..10e1e24f9518bc0b73dca38ff5a2e149fb5cc168 100644
+index 6b7cad2ff1b2490090e18925e4380d3202350527..ffc7103102639214c60201a213df3ad042a05c85 100644
 --- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 +++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
-@@ -379,10 +379,9 @@ public final class OwnerDomainExecutor {
+@@ -396,10 +396,9 @@ public final class OwnerDomainExecutor {
  
      private static void enqueueGlobal(final Owner owner, final Runnable task) {
          final MinecraftServer server = owner.server();

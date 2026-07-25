@@ -520,10 +520,10 @@ index 1d3095b897c1cd80be812baa2ec0e0866bc42d09..65fcc768b6af4bd7df384786a157f089
  
      public static void cancelTasks(final Plugin plugin) {
 diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
-index 91ed7762292545c6bf838561d6263bef8b679a7e..154cef0e1f291d9b8ab0e8644ab79b5782b11f70 100644
+index 8af9053799f99ad6cb14ecb7a57426b12648b30e..a67bae67a5c85fd13509cfaa161fc3375334bbf9 100644
 --- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 +++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
-@@ -119,7 +119,16 @@ public final class OwnerDomainExecutor {
+@@ -136,7 +136,16 @@ public final class OwnerDomainExecutor {
      public static Scope enter(final Owner owner) {
          final OwnerContext previous = CURRENT_OWNER.get();
          CURRENT_OWNER.set(new OwnerContext(owner, previous));
@@ -541,7 +541,7 @@ index 91ed7762292545c6bf838561d6263bef8b679a7e..154cef0e1f291d9b8ab0e8644ab79b57
      }
  
      public static @Nullable Owner currentOwner() {
-@@ -471,10 +480,12 @@ public final class OwnerDomainExecutor {
+@@ -488,10 +497,12 @@ public final class OwnerDomainExecutor {
  
      public static final class Scope implements AutoCloseable {
          private final @Nullable OwnerContext previous;
@@ -555,7 +555,7 @@ index 91ed7762292545c6bf838561d6263bef8b679a7e..154cef0e1f291d9b8ab0e8644ab79b57
          }
  
          @Override
-@@ -483,7 +494,15 @@ public final class OwnerDomainExecutor {
+@@ -500,7 +511,15 @@ public final class OwnerDomainExecutor {
                  return;
              }
              this.closed = true;
