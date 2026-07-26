@@ -84,14 +84,20 @@ subprojects {
     }
 }
 
-tasks.register("printMinecraftVersion") {
-    doLast {
-        println(providers.gradleProperty("mcVersion").get().trim())
+abstract class PrintValueTask : DefaultTask() {
+    @get:Input
+    abstract val value: Property<String>
+
+    @TaskAction
+    fun printValue() {
+        println(this.value.get())
     }
 }
 
-tasks.register("printLoomVersion") {
-    doLast {
-        println(project.version)
-    }
+tasks.register<PrintValueTask>("printMinecraftVersion") {
+    value.set(providers.gradleProperty("mcVersion").map(String::trim))
+}
+
+tasks.register<PrintValueTask>("printLoomVersion") {
+    value.set(version.toString())
 }
