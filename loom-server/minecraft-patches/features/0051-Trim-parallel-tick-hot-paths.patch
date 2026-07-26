@@ -200,7 +200,7 @@ index ff58b9bab31ff3d86c77c00ed3ffe56a8e379f8b..ff4a10c5f858ab9bfea12f2b0c7ee937
      // Paper end - chunk tick iteration optimisations
  
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 11c6eb40cccc442cf6c5d74079deceb3aceb9ec0..67982abed7b87bf21fee43cc96819ba71e1ce8a4 100644
+index 8cce6fcab93ed20e1f290ad28dc1d43b641e35c3..ebc24e67575ea800494a854df4514cc0dd046d4a 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -28,6 +28,7 @@ import java.util.Set;
@@ -211,7 +211,7 @@ index 11c6eb40cccc442cf6c5d74079deceb3aceb9ec0..67982abed7b87bf21fee43cc96819ba7
  import java.util.function.Function;
  import java.util.function.Predicate;
  import java.util.stream.Collectors;
-@@ -1393,18 +1394,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1446,18 +1447,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      }
  
      // Paper start - log detailed entity tick information
@@ -233,7 +233,7 @@ index 11c6eb40cccc442cf6c5d74079deceb3aceb9ec0..67982abed7b87bf21fee43cc96819ba7
      private void tickOneEntity(final Entity entity) {
          if (entity.isRemoved() || this.tickRateManager().isEntityFrozen(entity)) {
              return;
-@@ -1417,7 +1414,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1470,7 +1467,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              }
              entity.stopRiding();
          }
@@ -242,7 +242,7 @@ index 11c6eb40cccc442cf6c5d74079deceb3aceb9ec0..67982abed7b87bf21fee43cc96819ba7
      }
  
      // Multipart/boss entities (e.g. the Ender Dragon and its EnderDragonPart sub-entities) move and remove
-@@ -1563,9 +1560,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1616,9 +1613,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      public void tickNonPassenger(final Entity entity) {
          // Paper start - log detailed entity tick information
          ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(entity, "Cannot tick an entity off-main");
@@ -255,7 +255,7 @@ index 11c6eb40cccc442cf6c5d74079deceb3aceb9ec0..67982abed7b87bf21fee43cc96819ba7
              }
              // Paper end - log detailed entity tick information
          entity.setOldPosAndRot();
-@@ -1586,8 +1584,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1639,8 +1637,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          }
          // Paper start - log detailed entity tick information
          } finally {

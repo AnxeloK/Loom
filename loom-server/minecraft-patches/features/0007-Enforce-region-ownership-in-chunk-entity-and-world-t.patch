@@ -274,10 +274,18 @@ index 98212080f6407d63207a724e9eb007591b4df092..2f2e0d13dd90e0d40bc56c55c08e797c
              // Paper end - rewrite chunk system
          }
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf21857bf5a 100644
+index 9499f4a859a5af6953c575a2980b77b6d83c22d3..d223e7b15cb14713ee41c772049ae6bc289bade4 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -230,7 +230,6 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -202,6 +202,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     private final GameEventDispatcher gameEventDispatcher;
+     public boolean noSave;
+     private final SleepStatus sleepStatus;
++    private boolean sleepTimeSkipPending;
+     private int emptyTime;
+     private final PortalForcer portalForcer;
+     private final LevelTicks<Block> blockTicks = new LevelTicks<>(this::isPositionTickingWithEntitiesLoaded);
+@@ -230,7 +231,6 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      private final WeatherData weatherData;
      public final net.minecraft.world.level.timers.TimerQueue<net.minecraft.server.MinecraftServer> scheduledEvents;
      public final WorldGenSettings worldGenSettings;
@@ -285,7 +293,7 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
      public boolean hasPhysicsEvent = true; // Paper - BlockPhysicsEvent
      public boolean hasEntityMoveEvent; // Paper - Add EntityMoveEvent
      private final alternate.current.wire.WireHandler wireHandler = new alternate.current.wire.WireHandler(this); // Paper - optimize redstone (Alternate Current)
-@@ -379,7 +378,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -379,7 +379,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
      @Override
      public final int moonrise$getRegionChunkShift() {
@@ -294,7 +302,7 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
      }
  
      @Override
-@@ -647,12 +646,6 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -647,12 +647,6 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          this.serverLevelData = levelData;
          ChunkGenerator generator = levelStem.generator();
          // CraftBukkit start
@@ -307,7 +315,7 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
          if (loadedWorldData.pdc() != null) {
              this.getWorld().readBukkitValues(loadedWorldData.pdc().persistentData().toTagCompound());
          }
-@@ -764,7 +757,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -764,7 +758,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
      @Override
      public ServerClockManager clockManager() {
@@ -316,12 +324,18 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
      }
  
      @Override
-@@ -796,24 +789,24 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -794,28 +788,38 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         }
+ 
          int percentage = this.getGameRules().get(GameRules.PLAYERS_SLEEPING_PERCENTAGE);
-         if (this.sleepStatus.areEnoughSleeping(percentage) && this.sleepStatus.areEnoughDeepSleeping(percentage, this.players)) {
+-        if (this.sleepStatus.areEnoughSleeping(percentage) && this.sleepStatus.areEnoughDeepSleeping(percentage, this.players)) {
++        if (!this.sleepTimeSkipPending
++            && this.sleepStatus.areEnoughSleeping(percentage)
++            && this.sleepStatus.areEnoughDeepSleeping(percentage, this.players)) {
              Optional<Holder<WorldClock>> defaultClock = this.dimensionType().defaultClock();
 -            org.bukkit.event.world.ClockTimeSkipEvent event = null; // Paper - per-world time
 +            org.bukkit.event.world.TimeSkipEvent event = null; // Paper - time skip event
++            boolean timeSkipDispatched = false;
              if (this.getGameRules().get(GameRules.ADVANCE_TIME) && defaultClock.isPresent()) {
 -                // Paper start - per-world time
 -                long currentTime = this.clockManager().getTotalTicks(defaultClock.get());
@@ -338,18 +352,29 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
  
                  if (event.callEvent()) {
 -                    this.clockManager().setTotalTicks(defaultClock.get(), currentTime + event.getSkipAmount());
-+                    this.server.clockManager().setTotalTicks(defaultClock.get(), currentTime + event.getSkipAmount()); // TODO: restore per-world time handling in this path.
++                    timeSkipDispatched = true;
++                    this.dispatchSleepTimeSkip(
++                        defaultClock.get(),
++                        currentTime + event.getSkipAmount(),
++                        this.getGameRules().get(GameRules.ADVANCE_WEATHER) && this.isRaining()
++                    );
                  }
 -                // Paper end - per-world time
 +                // Paper end - time skip event
              }
  
 -            if (event == null || !event.isCancelled()) this.wakeUpAllPlayers(); // Paper - per-world time - only wake up players if time skip event is not cancelled
-+            if (event == null || !event.isCancelled()) this.wakeUpAllPlayers(); // Paper - time skip event - only wake up players if time skip event is not cancelled
-             if (this.getGameRules().get(GameRules.ADVANCE_WEATHER) && this.isRaining()) {
-                 this.resetWeatherCycle();
+-            if (this.getGameRules().get(GameRules.ADVANCE_WEATHER) && this.isRaining()) {
+-                this.resetWeatherCycle();
++            if (!timeSkipDispatched) {
++                if (event == null || !event.isCancelled()) this.wakeUpAllPlayers(); // Paper - time skip event - only wake up players if time skip event is not cancelled
++                if (this.getGameRules().get(GameRules.ADVANCE_WEATHER) && this.isRaining()) {
++                    this.resetWeatherCycle();
++                }
              }
-@@ -892,12 +885,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         }
+ 
+@@ -892,12 +896,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
                          }
                      }
                  );
@@ -362,7 +387,58 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
          }
  
          profiler.push("entityManagement");
-@@ -1373,7 +1363,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -942,7 +943,49 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+ 
+     private void wakeUpAllPlayers() {
+         this.sleepStatus.removeAllSleepers();
+-        this.players.stream().filter(LivingEntity::isSleeping).collect(Collectors.toList()).forEach(player -> player.stopSleepInBed(false, false));
++        this.players.stream().filter(LivingEntity::isSleeping).collect(Collectors.toList()).forEach(player ->
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.runPlayerNow(
++                player,
++                "wake-sleeping-player",
++                () -> player.stopSleepInBed(false, false)
++            )
++        );
++    }
++
++    private void dispatchSleepTimeSkip(
++        final Holder<WorldClock> clock,
++        final long totalTicks,
++        final boolean resetWeather
++    ) {
++        this.sleepTimeSkipPending = true;
++        try {
++            net.minecraft.server.threading.runtime.OwnershipRouter.dispatchToServer(this.server, () -> {
++                this.server.clockManager().setTotalTicks(clock, totalTicks);
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                    net.minecraft.server.threading.runtime.OwnerDomainExecutor.region(
++                        this,
++                        Integer.MIN_VALUE,
++                        Integer.MIN_VALUE,
++                        Integer.MAX_VALUE,
++                        Integer.MAX_VALUE,
++                        "sleep-time-skip-complete"
++                    ),
++                    () -> {
++                        try {
++                            this.wakeUpAllPlayers();
++                            if (resetWeather) {
++                                this.resetWeatherCycle();
++                            }
++                        } finally {
++                            this.sleepTimeSkipPending = false;
++                        }
++                    }
++                );
++            });
++        } catch (final RuntimeException | Error throwable) {
++            this.sleepTimeSkipPending = false;
++            throw throwable;
++        }
+     }
+ 
+     // Paper start - optimise random ticking
+@@ -1373,7 +1416,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
      public void tickNonPassenger(final Entity entity) {
          // Paper start - log detailed entity tick information
@@ -371,7 +447,7 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
          try {
              if (currentlyTickingEntity.get() == null) {
                  currentlyTickingEntity.lazySet(entity);
-@@ -1616,7 +1606,21 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1616,7 +1659,21 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
      // CraftBukkit start
      private boolean addEntity(final Entity entity, final org.bukkit.event.entity.CreatureSpawnEvent.@Nullable SpawnReason spawnReason) {
@@ -394,7 +470,7 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
          entity.generation = false; // Paper - Don't fire sync event during generation; Reset flag if it was added during a ServerLevel generation process
          // Paper start - extra debug info
          if (entity.valid) {
-@@ -2208,7 +2212,18 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2208,7 +2265,18 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          } else {
              for (ServerLevel otherLevel : this.getServer().getAllLevels()) {
                  if (otherLevel != this) {
@@ -414,7 +490,7 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
                      if (otherEntity != null) {
                          return otherEntity;
                      }
-@@ -2336,9 +2351,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2336,9 +2404,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      @Override
      public void setRespawnData(final LevelData.RespawnData respawnData) {
          // Paper start
@@ -427,7 +503,7 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
              this.server.getPlayerList().broadcastAll(new net.minecraft.network.protocol.game.ClientboundSetDefaultSpawnPositionPacket(respawnData), this.dimension());
              this.server.updateEffectiveRespawnData();
              new org.bukkit.event.world.SpawnChangeEvent(this.getWorld(), previousLocation).callEvent();
-@@ -2363,7 +2379,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2363,7 +2432,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      public boolean setChunkForced(final int chunkX, final int chunkZ, final boolean forced) {
          boolean updated = this.chunkSource.updateChunkForced(new ChunkPos(chunkX, chunkZ), forced);
          if (forced && updated) {
@@ -436,7 +512,7 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
          }
  
          return updated;
-@@ -2380,11 +2396,17 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2380,11 +2449,17 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          Optional<Holder<PoiType>> newType = PoiTypes.forState(newState);
          if (!Objects.equals(oldType, newType)) {
              BlockPos immutable = pos.immutable();
@@ -456,7 +532,7 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
                  // Paper start - Remove stale POIs
                  if (oldType.isEmpty() && this.getPoiManager().exists(pos, _ -> true)) {
                      this.getPoiManager().remove(pos);
-@@ -2598,7 +2620,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2598,7 +2673,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
      @Override
      public LevelEntityGetter<Entity> getEntities() {
@@ -465,7 +541,7 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
          return this.moonrise$getEntityLookup(); // Paper - rewrite chunk system
      }
  
-@@ -2625,7 +2647,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2625,7 +2700,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      }
  
      public void onStructureStartsAvailable(final ChunkAccess chunk) {
@@ -477,7 +553,7 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
      }
  
      public PathTypeCache getPathTypeCache() {
-@@ -2849,7 +2874,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2849,7 +2927,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
          @Override
          public void onTrackingStart(final Entity entity) {
@@ -486,7 +562,7 @@ index 9499f4a859a5af6953c575a2980b77b6d83c22d3..72152331e738d7e1141bd3f58103acf2
              // ServerLevel.this.getChunkSource().addEntity(entity); // Paper - ignore and warn about illegal addEntity calls instead of crashing server; moved down below valid=true
              if (entity instanceof ServerPlayer player) {
                  ServerLevel.this.players.add(player);
-@@ -2899,7 +2924,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2899,7 +2977,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
          @Override
          public void onTrackingEnd(final Entity entity) {

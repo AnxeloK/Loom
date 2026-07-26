@@ -326,7 +326,7 @@ index 173a0605cdbbef5a9b672afc5b17f3dc065bba80..c0c5d5f8f26e910274a5be116eddd02c
  
          profiler.pop();
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 72152331e738d7e1141bd3f58103acf21857bf5a..ad9e062e2bd74dc36cda2ab65a11f7cf753605a6 100644
+index d223e7b15cb14713ee41c772049ae6bc289bade4..f46ebc5a29363621cbd2a742288a87319d3af82c 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -193,6 +193,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
@@ -337,7 +337,7 @@ index 72152331e738d7e1141bd3f58103acf21857bf5a..ad9e062e2bd74dc36cda2ab65a11f7cf
      private final MinecraftServer server;
      public final io.papermc.paper.world.saveddata.PaperLevelOverrides serverLevelData; // Paper - type
      private final EntityTickList entityTickList = new EntityTickList();
-@@ -765,6 +766,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -766,6 +767,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          return this.environmentAttributes;
      }
  
@@ -348,7 +348,7 @@ index 72152331e738d7e1141bd3f58103acf21857bf5a..ad9e062e2bd74dc36cda2ab65a11f7cf
      @Deprecated
      @VisibleForTesting
      public EnvironmentAttributeSystem setEnvironmentAttributes(final EnvironmentAttributeSystem environmentAttributes) {
-@@ -774,6 +779,12 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -775,6 +780,12 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      }
  
      public void tick(final BooleanSupplier haveTime) {
@@ -361,7 +361,7 @@ index 72152331e738d7e1141bd3f58103acf21857bf5a..ad9e062e2bd74dc36cda2ab65a11f7cf
          ProfilerFiller profiler = Profiler.get();
          this.handlingTick = true;
          TickRateManager tickRateManager = this.tickRateManager();
-@@ -817,6 +828,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -828,6 +839,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              this.tickTime();
          }
  
@@ -373,7 +373,7 @@ index 72152331e738d7e1141bd3f58103acf21857bf5a..ad9e062e2bd74dc36cda2ab65a11f7cf
          profiler.push("tickPending");
          if (!this.isDebug() && runs) {
              long tick = this.getGameTime();
-@@ -827,18 +843,37 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -838,18 +854,37 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              profiler.pop();
          }
  
@@ -411,7 +411,7 @@ index 72152331e738d7e1141bd3f58103acf21857bf5a..ad9e062e2bd74dc36cda2ab65a11f7cf
          this.handlingTick = false;
          profiler.pop();
          boolean isActive = !paperConfig().unsupportedSettings.disableWorldTickingWhenEmpty || this.chunkSource.hasActiveTickets(); // CraftBukkit - this prevents entity cleanup, other issues on servers with no players // Paper - restore this
-@@ -852,6 +887,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -863,6 +898,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
          if (this.emptyTime < 300) {
              profiler.push("entities");
@@ -419,7 +419,7 @@ index 72152331e738d7e1141bd3f58103acf21857bf5a..ad9e062e2bd74dc36cda2ab65a11f7cf
              if (this.dragonFight != null && runs) {
                  profiler.push("dragonFight");
                  this.dragonFight.tick();
-@@ -859,13 +895,22 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -870,13 +906,22 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              }
  
              io.papermc.paper.entity.activation.ActivationRange.activateEntities(this); // Paper - EAR
@@ -442,7 +442,7 @@ index 72152331e738d7e1141bd3f58103acf21857bf5a..ad9e062e2bd74dc36cda2ab65a11f7cf
                                  profiler.pop();
                                  if (true) { // Paper - rewrite chunk system
                                      Entity vehicle = entity.getVehicle();
-@@ -878,7 +923,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -889,7 +934,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
                                      }
  
                                      profiler.push("tick");
@@ -454,7 +454,7 @@ index 72152331e738d7e1141bd3f58103acf21857bf5a..ad9e062e2bd74dc36cda2ab65a11f7cf
                                      profiler.pop();
                                  }
                              }
-@@ -886,13 +935,23 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -897,13 +946,23 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
                      }
                  );
              profiler.popPush("blockEntities");
@@ -478,7 +478,7 @@ index 72152331e738d7e1141bd3f58103acf21857bf5a..ad9e062e2bd74dc36cda2ab65a11f7cf
          profiler.push("debugSynchronizers");
          if (this.debugSynchronizers.hasAnySubscriberFor(DebugSubscriptions.NEIGHBOR_UPDATES)) {
              this.neighborUpdater
-@@ -903,7 +962,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -914,7 +973,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
          this.debugSynchronizers.tick(this.server.debugSubscribers());
          profiler.pop();

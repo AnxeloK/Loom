@@ -95,10 +95,10 @@ index 52eefa22787c45153feae72a45102ae3ee252375..cb3dbb2b74c6be2d47848ed5a196fe9e
              } catch (Throwable throwable) {
                  CrashReport report = CrashReport.forThrowable(throwable, "Exception ticking world");
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index ebac9d496abef9128eab4c484de774e58bded183..8c557df764378dacc6afa223828f20d68bcafef2 100644
+index 05a0aee7954828da19db6ee420c2f05c3744f404..5d45b22ccf161072032f5da1b41ddf514ccbf7a4 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -1849,8 +1849,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1902,8 +1902,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          } else {
              if (entity instanceof net.minecraft.world.entity.item.ItemEntity item && item.getItem().isEmpty()) return false; // Paper - Prevent empty items from being added
              // Paper start - capture all item additions to the world
@@ -108,7 +108,7 @@ index ebac9d496abef9128eab4c484de774e58bded183..8c557df764378dacc6afa223828f20d6
                  return true;
              }
              // Paper end - capture all item additions to the world
-@@ -2106,13 +2105,13 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2159,13 +2158,13 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              return;
          }
          // CraftBukkit end

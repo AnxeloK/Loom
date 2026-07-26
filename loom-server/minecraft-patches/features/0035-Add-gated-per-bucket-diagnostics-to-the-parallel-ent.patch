@@ -8,10 +8,10 @@ Logs each dispatch's bucket entity counts and task wall times under
 to one dominant bucket versus even per-entity cost.
 
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 4954b3eb10d50afa7dce75b8ffafee7ec5f6f1d4..11c6eb40cccc442cf6c5d74079deceb3aceb9ec0 100644
+index efbeb483ab9f314435b29038675ece19088f6dfb..8cce6fcab93ed20e1f290ad28dc1d43b641e35c3 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -1435,6 +1435,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1488,6 +1488,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      // ticks, spawns) are staged and replayed serially after the parallel phase. Entities that are unsafe to
      // tick off-main (see mustTickOnRegionOwner) are excluded from the parallel buckets and ticked serially on
      // the world-owning thread after the parallel phase joins.
@@ -20,7 +20,7 @@ index 4954b3eb10d50afa7dce75b8ffafee7ec5f6f1d4..11c6eb40cccc442cf6c5d74079deceb3
      private void tickEntitiesInParallel() {
          final java.util.List<Entity> toTick = new java.util.ArrayList<>();
          this.entityTickList.forEach(toTick::add);
-@@ -1469,6 +1471,13 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1522,6 +1524,13 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          final net.minecraft.server.threading.RegionTickStaging.Session stagingSession =
              net.minecraft.server.threading.RegionTickStaging.newSession();
          final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(byRegion.size());
@@ -34,7 +34,7 @@ index 4954b3eb10d50afa7dce75b8ffafee7ec5f6f1d4..11c6eb40cccc442cf6c5d74079deceb3
          final int regionChunks = 1 << shift;
          for (final it.unimi.dsi.fastutil.longs.Long2ObjectMap.Entry<java.util.List<Entity>> regionEntry :
              byRegion.long2ObjectEntrySet()) {
-@@ -1490,7 +1499,12 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1543,7 +1552,12 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              final ChunkPos dispatchPos = regionEntities.get(0).chunkPosition();
              final int dispatchX = dispatchPos.x();
              final int dispatchZ = dispatchPos.z();
@@ -47,7 +47,7 @@ index 4954b3eb10d50afa7dce75b8ffafee7ec5f6f1d4..11c6eb40cccc442cf6c5d74079deceb3
                  net.minecraft.server.threading.RegionTickStaging.begin(stagingSession);
                  try {
                      for (int i = 0, n = regionEntities.size(); i < n; ++i) {
-@@ -1498,12 +1512,36 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1551,12 +1565,36 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
                      }
                  } finally {
                      net.minecraft.server.threading.RegionTickStaging.end();

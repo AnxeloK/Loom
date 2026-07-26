@@ -101,10 +101,10 @@ index 777211d28f12f134d7ec05f4553db221aa73622b..3924448337922c43349cec27158003a3
          double zd = zPos - pos.z;
          return xd * xd + zd * zd;
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 8c557df764378dacc6afa223828f20d68bcafef2..c7af4b4ee63d6e00011267ee4b6d4f54918d19fc 100644
+index 5d45b22ccf161072032f5da1b41ddf514ccbf7a4..123c87f56a00c3cb29149c21ff2644f387a01df2 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -988,9 +988,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1041,9 +1041,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          final net.minecraft.util.RandomSource simpleRandom = net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom);
          final boolean doubleTickFluids = !ca.spottedleaf.moonrise.common.PlatformHooks.get().configFixMC224294();
  
@@ -116,7 +116,7 @@ index 8c557df764378dacc6afa223828f20d68bcafef2..c7af4b4ee63d6e00011267ee4b6d4f54
  
          for (int sectionIndex = 0, sectionsLen = sections.length; sectionIndex < sectionsLen; sectionIndex++) {
              final int offsetY = (sectionIndex + minSection) << 4;
-@@ -1033,9 +1032,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1086,9 +1085,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
      public void tickChunk(final LevelChunk chunk, final int tickSpeed) {
          final net.minecraft.util.RandomSource simpleRandom = net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom); // Loom - per-domain RNG (was this.simpleRandom; torn seed under parallel ticking)
@@ -128,7 +128,7 @@ index 8c557df764378dacc6afa223828f20d68bcafef2..c7af4b4ee63d6e00011267ee4b6d4f54
          ProfilerFiller profiler = Profiler.get();
          profiler.push("iceandsnow");
  
-@@ -1056,10 +1054,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1109,10 +1107,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      }
  
      public void tickThunder(final LevelChunk chunk) {

@@ -40,10 +40,10 @@ index 5c3271029b0a09a6f3a4bc39e64f65f9ded46097..f0517bf00ca13515aa3d4ca52d8545fc
          y = !Float.isInfinite(y) && !Float.isNaN(y) ? y % 360.0F : 0.0F;
          z = !Float.isInfinite(z) && !Float.isNaN(z) ? z % 360.0F : 0.0F;
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index f17e9acd63a12c5ed6513f375d253f2f169eebea..ebac9d496abef9128eab4c484de774e58bded183 100644
+index 87d356f0f1d8f37ae40b78d5e58c78ead23691c8..05a0aee7954828da19db6ee420c2f05c3744f404 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -914,7 +914,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -925,7 +925,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
                  loomDiagnostics.record(LoomTickSectionDiagnostics.BLOCK_ENTITIES, System.nanoTime() - loomBlockEntitiesStart);
              }
              profiler.pop();
