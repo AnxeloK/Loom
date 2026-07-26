@@ -5,10 +5,10 @@ Subject: [PATCH] Use cooperative region dispatch
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index b1e3fc29c6b53f72276aac474faa9b7a71d6adaa..562de80d567a72eea522dc13ef5e7cfa28fe0356 100644
+index 21f21651bd92c39939f2d33423a27425f96ffaf6..802c4c91e0f076cc1c4a043f294887e6321b53a6 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2042,10 +2042,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2008,10 +2008,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.updateEffectiveRespawnData();
  
          this.isIteratingOverLevels = true; // Paper - Throw exception on world create while being ticked
@@ -23,10 +23,10 @@ index b1e3fc29c6b53f72276aac474faa9b7a71d6adaa..562de80d567a72eea522dc13ef5e7cfa
          // main-thread only; each world's own tick still records into its thread-local profiler.
          final java.util.List<ServerLevel> parallelLevels = new java.util.ArrayList<>();
          for (ServerLevel level : this.getAllLevels()) {
-@@ -2069,7 +2069,15 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
-                 net.minecraft.server.threading.TickRegions.popContext(tickRegionContext);
+@@ -2037,7 +2037,15 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              }
              net.minecraft.server.threading.TickRegions.postWorldTick(level);
+ 
 -            level.explosionDensityCache.clear(); // Paper - Optimize explosions
 +            // Reacquire the full world owner after bounded mailbox shards complete before mutating the
 +            // per-world explosion cache. Multi-world workers no longer inherit a permissive global owner.

@@ -5,10 +5,10 @@ Subject: [PATCH] Reuse collision scratch buffers
 
 
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 3bca048d19785610ea6e448995558868271359b0..281c1fe13e43e1b3da9120565d7a2f27bc54a5fa 100644
+index b63602ab4b60bb04f234bbe1a99b1c09893fa64e..d7214a66b68351200e4b5f8f04c906a43b78de7a 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -1637,6 +1637,37 @@ public abstract class Entity
+@@ -1699,6 +1699,37 @@ public abstract class Entity
          return colliders.isEmpty() ? maxDistance : -Shapes.collide(Direction.Axis.Y, aabb, colliders, -maxDistance);
      }
  
@@ -46,7 +46,7 @@ index 3bca048d19785610ea6e448995558868271359b0..281c1fe13e43e1b3da9120565d7a2f27
      private Vec3 collide(final Vec3 movement) {
          // Paper start - optimise collisions
          final boolean xZero = movement.x == 0.0;
-@@ -1647,66 +1678,70 @@ public abstract class Entity
+@@ -1709,66 +1740,70 @@ public abstract class Entity
          }
  
          final AABB currentBox = this.getBoundingBox();

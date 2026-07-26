@@ -7,7 +7,7 @@ Subject: [PATCH] Revert "Coalesce play-phase flushes for packets sent off the
 This reverts commit f0839ff80bca98f52dd91ac30235bf1ce7333dbd.
 
 diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
-index 5d98833d368c60b76566828695c8ac4814658b76..d953bb4edb1ae93667a3c8865cb3d2fc1354ada6 100644
+index f2144fb078eedec3dd55de3e714ffa6db19cecd4..e36483369fa969ee887fbfde9b068df24ae9611e 100644
 --- a/net/minecraft/network/Connection.java
 +++ b/net/minecraft/network/Connection.java
 @@ -70,12 +70,6 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
@@ -24,14 +24,14 @@ index 5d98833d368c60b76566828695c8ac4814658b76..d953bb4edb1ae93667a3c8865cb3d2fc
      public SocketAddress address;
      // Spigot start
 @@ -354,7 +348,6 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
-             }
- 
-             boolean isLoginProtocol = protocol.id() == ConnectionProtocol.LOGIN;
--            this.loomFlushBatchable = protocol.id() == ConnectionProtocol.PLAY; // Loom - see field
-             syncAfterConfigurationChange(this.channel.writeAndFlush(configMessage.andThen(ctx -> this.sendLoginDisconnect = isLoginProtocol)));
          }
+ 
+         boolean isLoginProtocol = protocol.id() == ConnectionProtocol.LOGIN;
+-        this.loomFlushBatchable = protocol.id() == ConnectionProtocol.PLAY; // Loom - see field
+         syncAfterConfigurationChange(this.channel.writeAndFlush(configMessage.andThen(ctx -> this.sendLoginDisconnect = isLoginProtocol)));
      }
-@@ -481,28 +474,15 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+ 
+@@ -480,28 +473,15 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          if (this.channel.eventLoop().inEventLoop()) {
              this.doSendPacket(packet, listener, flush);
          } else {

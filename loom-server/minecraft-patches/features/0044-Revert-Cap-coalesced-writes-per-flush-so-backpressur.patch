@@ -7,7 +7,7 @@ Subject: [PATCH] Revert "Cap coalesced writes per flush so backpressure stays
 This reverts commit cf6f0608704ef2bc9d197d7f9edba4b8cbe73184.
 
 diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
-index 11a3c9730c3e9e540f7065d0a6b795f26bb77f3d..5d98833d368c60b76566828695c8ac4814658b76 100644
+index 96c0a20ff6acd89a74e4799b2113db6050f5f332..f2144fb078eedec3dd55de3e714ffa6db19cecd4 100644
 --- a/net/minecraft/network/Connection.java
 +++ b/net/minecraft/network/Connection.java
 @@ -76,10 +76,6 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
@@ -21,7 +21,7 @@ index 11a3c9730c3e9e540f7065d0a6b795f26bb77f3d..5d98833d368c60b76566828695c8ac48
      public Channel channel;
      public SocketAddress address;
      // Spigot start
-@@ -496,12 +492,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -495,12 +491,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
              try {
                  this.channel.eventLoop().execute(() -> {
                      try {
@@ -35,7 +35,7 @@ index 11a3c9730c3e9e540f7065d0a6b795f26bb77f3d..5d98833d368c60b76566828695c8ac48
                      } finally {
                          this.loomPendingEventLoopWrites.decrementAndGet();
                      }
-@@ -509,7 +500,6 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -508,7 +499,6 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
                  if (batchFlush && this.loomFlushScheduled.compareAndSet(false, true)) {
                      this.channel.eventLoop().execute(() -> {
                          this.loomFlushScheduled.set(false);

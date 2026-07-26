@@ -43,7 +43,7 @@ index 66d6af2833d76af28fbeb2ce70c194a559572460..7a260cf3b908b1752031d2feb35d9b95
  
              for (KeepAliveResponse response : this.responses) {
 diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
-index 5a23f95aff982ecc58d2e2bc994f4e495285069c..f278e1371fb73157010bcb117058239e4546a12a 100644
+index 01e5ff70c70dd7fab089d8965bd1c237fa239f45..45673626b7acd09cac5111cc24d2ed997d484c5d 100644
 --- a/net/minecraft/network/Connection.java
 +++ b/net/minecraft/network/Connection.java
 @@ -43,6 +43,7 @@ import net.minecraft.network.protocol.handshake.ServerHandshakePacketListener;
@@ -62,7 +62,7 @@ index 5a23f95aff982ecc58d2e2bc994f4e495285069c..f278e1371fb73157010bcb117058239e
      public static final Marker ROOT_MARKER = MarkerFactory.getMarker("NETWORK");
      public static final Marker PACKET_MARKER = Util.make(MarkerFactory.getMarker("NETWORK_PACKETS"), m -> m.add(ROOT_MARKER));
      public static final Marker PACKET_RECEIVED_MARKER = Util.make(MarkerFactory.getMarker("PACKET_RECEIVED"), m -> m.add(PACKET_MARKER));
-@@ -554,23 +556,59 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -553,23 +555,59 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
      private static final int MAX_PER_TICK = io.papermc.paper.configuration.GlobalConfiguration.get().misc.maxJoinsPerTick; // Paper - Buffer joins to world
      private static int joinAttemptsThisTick; // Paper - Buffer joins to world
      private static int currTick; // Paper - Buffer joins to world
@@ -128,7 +128,7 @@ index 5a23f95aff982ecc58d2e2bc994f4e495285069c..f278e1371fb73157010bcb117058239e
              } finally {
                  net.minecraft.network.PacketProcessor.packetProcessing.pop();
              } // Paper end - detailed watchdog information
-@@ -578,7 +616,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -577,7 +615,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          }
  
          if (!this.isConnected() && !this.disconnectionHandled) {
@@ -137,7 +137,7 @@ index 5a23f95aff982ecc58d2e2bc994f4e495285069c..f278e1371fb73157010bcb117058239e
          }
  
          if (this.channel != null) {
-@@ -664,7 +702,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -663,7 +701,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
                  } catch (ChannelException var3) {
                  }
  
@@ -146,7 +146,7 @@ index 5a23f95aff982ecc58d2e2bc994f4e495285069c..f278e1371fb73157010bcb117058239e
                  Connection.configureSerialization(pipeline, PacketFlow.CLIENTBOUND, false, connection.bandwidthDebugMonitor);
                  connection.configurePacketHandler(pipeline);
              }
-@@ -856,6 +894,12 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -858,6 +896,12 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          }
      }
  
@@ -160,7 +160,7 @@ index 5a23f95aff982ecc58d2e2bc994f4e495285069c..f278e1371fb73157010bcb117058239e
          return this.averageReceivedPackets;
      }
 diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
-index 197adf43de3618fbd4c72bb2a4736b1cd61fbee7..ce2d08456ed4ca4c2d349bd9043fa573bc9992b3 100644
+index 408cb996fc8ff77785da8919f19baff2cf4bd789..f2fb701db8c171e1639c53d437f18c9104dfe07b 100644
 --- a/net/minecraft/network/PacketProcessor.java
 +++ b/net/minecraft/network/PacketProcessor.java
 @@ -35,8 +35,8 @@ public class PacketProcessor implements AutoCloseable {
@@ -174,7 +174,7 @@ index 197adf43de3618fbd4c72bb2a4736b1cd61fbee7..ce2d08456ed4ca4c2d349bd9043fa573
      }
  
      public <T extends PacketListener> void scheduleIfPossible(final T listener, final Packet<T> packet) {
-@@ -66,6 +66,10 @@ public class PacketProcessor implements AutoCloseable {
+@@ -65,6 +65,10 @@ public class PacketProcessor implements AutoCloseable {
          }
      }
  
@@ -185,7 +185,7 @@ index 197adf43de3618fbd4c72bb2a4736b1cd61fbee7..ce2d08456ed4ca4c2d349bd9043fa573
      @Override
      public void close() {
          this.closed = true;
-@@ -87,25 +91,58 @@ public class PacketProcessor implements AutoCloseable {
+@@ -86,25 +90,58 @@ public class PacketProcessor implements AutoCloseable {
  
          return listeners;
      }
@@ -228,23 +228,23 @@ index 197adf43de3618fbd4c72bb2a4736b1cd61fbee7..ce2d08456ed4ca4c2d349bd9043fa573
 -            if (this.listener.shouldHandleMessage(this.packet)) {
 -                try {
 -                    this.packet.handle(this.listener);
--                } catch (Exception var3) {
--                    if (var3 instanceof ReportedException re && re.getCause() instanceof OutOfMemoryError) {
--                        throw PacketUtils.makeReportedException(var3, this.packet, this.listener);
+-                } catch (Exception e) {
+-                    if (e instanceof ReportedException re && re.getCause() instanceof OutOfMemoryError) {
+-                        throw PacketUtils.makeReportedException(e, this.packet, this.listener);
 +            runListenerInOwnerContext(this.listener, () -> {
 +                if (this.listener instanceof net.minecraft.server.network.ServerCommonPacketListenerImpl serverCommonPacketListener && serverCommonPacketListener.processedDisconnect) return; // Paper - Don't handle sync packets for kicked players
 +                if (this.listener.shouldHandleMessage(this.packet)) {
 +                    try {
 +                        this.packet.handle(this.listener);
-+                    } catch (Exception var3) {
-+                        if (var3 instanceof ReportedException re && re.getCause() instanceof OutOfMemoryError) {
-+                            throw PacketUtils.makeReportedException(var3, this.packet, this.listener);
++                    } catch (Exception e) {
++                        if (e instanceof ReportedException re && re.getCause() instanceof OutOfMemoryError) {
++                            throw PacketUtils.makeReportedException(e, this.packet, this.listener);
 +                        }
 +
-+                        this.listener.onPacketError(this.packet, var3);
++                        this.listener.onPacketError(this.packet, e);
                      }
 -
--                    this.listener.onPacketError(this.packet, var3);
+-                    this.listener.onPacketError(this.packet, e);
 +                } else {
 +                    PacketProcessor.LOGGER.debug("Ignoring packet due to disconnection: {}", this.packet);
                  }
@@ -292,12 +292,12 @@ index 144c18c08bf8f03d907b97f968aa171a9fbf997f..2757948dc4ddd040c812e7aabacc43a4
              throw RunningOnDifferentThreadException.RUNNING_ON_DIFFERENT_THREAD;
          }
 diff --git a/net/minecraft/server/network/LegacyTextFilter.java b/net/minecraft/server/network/LegacyTextFilter.java
-index 43d6640a5e6afdf3e269be121b888b56f80e690a..d710a6a0a74935686dffb20dc8e956a7636e71ae 100644
+index ec89274b5871a3a61849424d34faeba5bfa65a5b..b3d41b1e94dd3c1148746a126ef7bdeeb3ee69e5 100644
 --- a/net/minecraft/server/network/LegacyTextFilter.java
 +++ b/net/minecraft/server/network/LegacyTextFilter.java
-@@ -128,7 +128,7 @@ public class LegacyTextFilter extends ServerTextFilter {
-             }
- 
+@@ -123,7 +123,7 @@ public class LegacyTextFilter extends ServerTextFilter {
+     public TextFilter createContext(final GameProfile gameProfile) {
+         return new ServerTextFilter.PlayerContext(gameProfile) {
              @Override
 -            public void join() {
 +            public void joinFilter() {
@@ -305,7 +305,7 @@ index 43d6640a5e6afdf3e269be121b888b56f80e690a..d710a6a0a74935686dffb20dc8e956a7
                      this.profile, LegacyTextFilter.this.joinEndpoint, LegacyTextFilter.this.joinEncoder, this.streamExecutor
                  );
 diff --git a/net/minecraft/server/network/PlayerSafetyServiceTextFilter.java b/net/minecraft/server/network/PlayerSafetyServiceTextFilter.java
-index 607c4923fef6bcba0cc5e8f2b5a0eb9b29aed94b..aa80bd235ac56130999252df057bc92604082d7f 100644
+index 4264e149ff49e18cb8c1080b9959960a5f823b26..08f963ba1ffe5597d0552042b4646f15aaa1b8b4 100644
 --- a/net/minecraft/server/network/PlayerSafetyServiceTextFilter.java
 +++ b/net/minecraft/server/network/PlayerSafetyServiceTextFilter.java
 @@ -19,6 +19,7 @@ import java.util.HashSet;
@@ -326,7 +326,7 @@ index 607c4923fef6bcba0cc5e8f2b5a0eb9b29aed94b..aa80bd235ac56130999252df057bc926
  
      @Override
 diff --git a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
-index 7ed50fc00c58c7781c958df1d828a67adf696f3e..67662f842d30ffc9582d7f925ae845479234f022 100644
+index 5dbb2849f32ac3418f8fdf76c04022d7e9dc165b..2f53471af0337c5735ec56d8324b00f36f9fbcec 100644
 --- a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
 @@ -49,6 +49,7 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
@@ -491,29 +491,20 @@ index 7ed50fc00c58c7781c958df1d828a67adf696f3e..67662f842d30ffc9582d7f925ae84547
      }
  
      // Paper start - add proper async disconnect
-@@ -447,16 +458,6 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
-     }
- 
-     protected CommonListenerCookie createCookie(final ClientInformation clientInformation) {
--        // Paper start - listener handoff should reset pending keepalive expectations
--        return new CommonListenerCookie(
--            this.playerProfile(),
--            this.latency,
--            clientInformation,
--            this.transferred,
--            this.playerBrand,
--            this.pluginMessagerChannels,
+@@ -455,7 +466,7 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+             this.transferred,
+             this.clientBrand,
+             this.pluginMessagerChannels,
 -            this.keepAlive.copyForListenerHandoff()
--        );
--        // Paper end - listener handoff should reset pending keepalive expectations
-+        return new CommonListenerCookie(this.playerProfile(), this.latency, clientInformation, this.transferred, this.playerBrand, this.pluginMessagerChannels, this.keepAlive); // Paper // Paper
++            this.keepAlive
+         );
+         // Paper end - listener handoff should reset pending keepalive expectations
      }
- }
 diff --git a/net/minecraft/server/network/ServerConfigurationPacketListenerImpl.java b/net/minecraft/server/network/ServerConfigurationPacketListenerImpl.java
-index 02eeb819e2e6c38fafe401585ca3264f8f6326fb..7f397d80e5e80e2b1464abe34502ee6a8182076e 100644
+index f99c2b69ed8022914a18fd286274a67354ea82a2..d8ec7c332174f32a6991001ddc8526deb7cef766 100644
 --- a/net/minecraft/server/network/ServerConfigurationPacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerConfigurationPacketListenerImpl.java
-@@ -260,15 +260,16 @@ public class ServerConfigurationPacketListenerImpl extends ServerCommonPacketLis
+@@ -262,15 +262,16 @@ public class ServerConfigurationPacketListenerImpl extends ServerCommonPacketLis
      // Paper start
      @Override
      public void disconnectAsync(final net.minecraft.network.DisconnectionDetails disconnectionInfo) {
@@ -535,10 +526,10 @@ index 02eeb819e2e6c38fafe401585ca3264f8f6326fb..7f397d80e5e80e2b1464abe34502ee6a
  
      @Override
 diff --git a/net/minecraft/server/network/ServerConnectionListener.java b/net/minecraft/server/network/ServerConnectionListener.java
-index 19a77c8269c3f1998985d533d9099c7e6cf76af4..92bda2d0638411ed23cc4a2499b8100ca8f7adfb 100644
+index e84e243f35b09691d03e9a9cf3de0c093b1d5cfb..735873cdf172f190e1a0ea7b33dacffe5934baf0 100644
 --- a/net/minecraft/server/network/ServerConnectionListener.java
 +++ b/net/minecraft/server/network/ServerConnectionListener.java
-@@ -35,6 +35,7 @@ import net.minecraft.network.chat.Component;
+@@ -37,6 +37,7 @@ import net.minecraft.network.chat.Component;
  import net.minecraft.network.protocol.PacketFlow;
  import net.minecraft.network.protocol.common.ClientboundDisconnectPacket;
  import net.minecraft.server.MinecraftServer;
@@ -546,7 +537,7 @@ index 19a77c8269c3f1998985d533d9099c7e6cf76af4..92bda2d0638411ed23cc4a2499b8100c
  import org.jspecify.annotations.Nullable;
  import org.slf4j.Logger;
  
-@@ -99,7 +100,7 @@ public class ServerConnectionListener {
+@@ -98,7 +99,7 @@ public class ServerConnectionListener {
                                      }
  
                                      if (!disableFlushConsolidation) channel.pipeline().addFirst(new io.netty.handler.flush.FlushConsolidationHandler()); // Paper - Optimize network
@@ -555,7 +546,7 @@ index 19a77c8269c3f1998985d533d9099c7e6cf76af4..92bda2d0638411ed23cc4a2499b8100c
                                      if (ServerConnectionListener.this.server.repliesToStatus()) {
                                          pipeline.addLast(HandlerNames.LEGACY_QUERY, new LegacyQueryHandler(ServerConnectionListener.this.getServer()));
                                      }
-@@ -225,7 +226,7 @@ public class ServerConnectionListener {
+@@ -261,7 +262,7 @@ public class ServerConnectionListener {
              // Spigot start
              this.addPending(); // Paper - prevent blocking on adding a new connection while the server is ticking
              // This prevents players from 'gaming' the server, and strategically relogging to increase their position in the tick order
@@ -564,7 +555,7 @@ index 19a77c8269c3f1998985d533d9099c7e6cf76af4..92bda2d0638411ed23cc4a2499b8100c
                  Collections.shuffle(this.connections);
              }
              // Spigot end
-@@ -235,13 +236,6 @@ public class ServerConnectionListener {
+@@ -271,13 +272,6 @@ public class ServerConnectionListener {
                  Connection connection = iterator.next();
                  if (!connection.isConnecting()) {
                      if (connection.isConnected()) {
@@ -577,8 +568,8 @@ index 19a77c8269c3f1998985d533d9099c7e6cf76af4..92bda2d0638411ed23cc4a2499b8100c
 -                        // Paper end - Force kill connection ticking
                          try {
                              connection.tick();
-                         } catch (Exception var7) {
-@@ -257,7 +251,7 @@ public class ServerConnectionListener {
+                         } catch (Exception e) {
+@@ -293,7 +287,7 @@ public class ServerConnectionListener {
                      } else {
                          if (connection.preparing) continue; // Spigot - Fix a race condition where a Connection could be unregistered just before connection
                          iterator.remove();
@@ -588,7 +579,7 @@ index 19a77c8269c3f1998985d533d9099c7e6cf76af4..92bda2d0638411ed23cc4a2499b8100c
                  }
              }
 diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d123f91de 100644
+index f936da2a1ffef5fd84d8d63be3575fd06ac9a7b2..dfd353f9cd557be6c791d51c2a2a8cc0ce56ffda 100644
 --- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 @@ -150,6 +150,7 @@ import net.minecraft.server.level.ServerLevel;
@@ -607,13 +598,13 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
 +    private int lastTick = DomainClock.currentServerTick();
      private int allowedPlayerTicks = 1;
 -    private int lastDropTick = MinecraftServer.currentTick;
--    private int lastBookTick  = MinecraftServer.currentTick;
+-    private int lastBookTick = MinecraftServer.currentTick;
 +    private int lastDropTick = DomainClock.currentServerTick();
-+    private int lastBookTick  = DomainClock.currentServerTick();
++    private int lastBookTick = DomainClock.currentServerTick();
      private int dropCount = 0;
  
      private boolean hasMoved = false;
-@@ -335,7 +336,7 @@ public class ServerGamePacketListenerImpl
+@@ -337,7 +338,7 @@ public class ServerGamePacketListenerImpl
          this.chunkSender = new PlayerChunkSender(connection.isMemoryConnection());
          this.player = player;
          player.connection = this;
@@ -622,7 +613,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
          this.signedMessageDecoder = SignedMessageChain.Decoder.unsigned(player.getUUID(), server::enforceSecureProfile);
          this.chatMessageChain = new FutureChain(server.chatExecutor); // CraftBukkit - async chat
          this.tickEndEvent = new io.papermc.paper.event.packet.ClientTickEndEvent(player.getBukkitEntity()); // Paper - add client tick end event
-@@ -356,6 +357,7 @@ public class ServerGamePacketListenerImpl
+@@ -358,6 +359,7 @@ public class ServerGamePacketListenerImpl
  
      @Override
      public void tick() {
@@ -630,7 +621,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
          if (this.ackBlockChangesUpTo > -1) {
              this.send(new ClientboundBlockChangedAckPacket(this.ackBlockChangesUpTo));
              this.ackBlockChangesUpTo = -1;
-@@ -879,8 +881,10 @@ public class ServerGamePacketListenerImpl
+@@ -882,8 +884,10 @@ public class ServerGamePacketListenerImpl
                  return;
              }
  
@@ -643,7 +634,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
          } else if (!completions.isEmpty()) {
              final com.mojang.brigadier.suggestion.SuggestionsBuilder builder0 = new com.mojang.brigadier.suggestion.SuggestionsBuilder(packet.getCommand(), command.getTotalLength());
              final com.mojang.brigadier.suggestion.SuggestionsBuilder builder = builder0.createOffset(builder0.getInput().lastIndexOf(' ') + 1);
-@@ -893,7 +897,7 @@ public class ServerGamePacketListenerImpl
+@@ -896,7 +900,7 @@ public class ServerGamePacketListenerImpl
                  }
              }
              // Paper start - Brigadier API
@@ -652,7 +643,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
              com.destroystokyo.paper.event.brigadier.AsyncPlayerSendSuggestionsEvent suggestEvent = new com.destroystokyo.paper.event.brigadier.AsyncPlayerSendSuggestionsEvent(this.getCraftPlayer(), suggestions, packet.getCommand());
              suggestEvent.setCancelled(suggestions.isEmpty());
              if (suggestEvent.callEvent()) {
-@@ -1333,7 +1337,7 @@ public class ServerGamePacketListenerImpl
+@@ -1339,7 +1343,7 @@ public class ServerGamePacketListenerImpl
      public void handleEditBook(final ServerboundEditBookPacket packet) {
          // Paper start - Book size limits
          final io.papermc.paper.configuration.type.number.IntOr.Disabled pageMax = io.papermc.paper.configuration.GlobalConfiguration.get().itemValidation.bookSize.pageMax;
@@ -661,7 +652,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
              final List<String> pageList = packet.pages();
              long byteTotal = 0;
              final int maxBookPageSize = pageMax.intValue();
-@@ -1370,11 +1374,12 @@ public class ServerGamePacketListenerImpl
+@@ -1376,11 +1380,12 @@ public class ServerGamePacketListenerImpl
          }
          // Paper end - Book size limits
          // CraftBukkit start
@@ -676,7 +667,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
          // CraftBukkit end
          int slot = packet.slot();
          if (Inventory.isHotbarSlot(slot) || slot == 40) {
-@@ -1462,6 +1467,9 @@ public class ServerGamePacketListenerImpl
+@@ -1468,6 +1473,9 @@ public class ServerGamePacketListenerImpl
              this.disconnect(Component.translatable("multiplayer.disconnect.invalid_player_movement"), org.bukkit.event.player.PlayerKickEvent.Cause.INVALID_PLAYER_MOVEMENT); // Paper - kick event cause
          } else {
              ServerLevel level = this.player.level();
@@ -686,7 +677,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
              if (!this.player.wonGame && !this.player.isImmobile()) { // CraftBukkit
                  if (this.tickCount == 0) {
                      this.resetPosition();
-@@ -1919,7 +1927,7 @@ public class ServerGamePacketListenerImpl
+@@ -1898,7 +1906,7 @@ public class ServerGamePacketListenerImpl
      }
  
      public void internalTeleport(PositionMoveRotation destination, Set<Relative> relatives) {
@@ -695,7 +686,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
          // Paper start - Prevent teleporting dead entities
          if (this.player.isRemoved()) {
              LOGGER.info("Attempt to teleport removed player {} restricted", this.player.getScoreboardName());
-@@ -1941,6 +1949,7 @@ public class ServerGamePacketListenerImpl
+@@ -1920,6 +1928,7 @@ public class ServerGamePacketListenerImpl
              this.awaitingTeleport = 0;
          }
  
@@ -703,7 +694,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
          this.player.teleportSetPosition(destination, relatives);
          this.awaitingPositionFromClient = this.player.position();
          // CraftBukkit start - update last location
-@@ -1953,6 +1962,44 @@ public class ServerGamePacketListenerImpl
+@@ -1932,6 +1941,44 @@ public class ServerGamePacketListenerImpl
          this.send(ClientboundPlayerPositionPacket.of(this.awaitingTeleport, destination, relatives));
      }
  
@@ -748,7 +739,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
      @Override
      public void handlePlayerAction(final ServerboundPlayerActionPacket packet) {
          PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
-@@ -2009,9 +2056,10 @@ public class ServerGamePacketListenerImpl
+@@ -1988,9 +2035,10 @@ public class ServerGamePacketListenerImpl
                      if (!this.player.isSpectator()) {
                          // limit how quickly items can be dropped
                          // If the ticks aren't the same then the count starts from 0 and we update the lastDropTick.
@@ -761,7 +752,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
                          } else {
                              // Else we increment the drop count and check the amount.
                              this.dropCount++;
-@@ -2288,6 +2336,20 @@ public class ServerGamePacketListenerImpl
+@@ -2267,6 +2315,20 @@ public class ServerGamePacketListenerImpl
  
      @Override
      public void onDisconnect(final DisconnectionDetails details) {
@@ -782,7 +773,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
          LOGGER.info("{} lost connection: {}", this.player.getPlainTextName(), details.reason().getString());
          // Paper start - Fix kick event leave message not being sent
          final net.kyori.adventure.text.Component quitMessage = details.quitMessage().map(io.papermc.paper.adventure.PaperAdventure::asAdventure).orElse(null);
-@@ -2381,7 +2443,9 @@ public class ServerGamePacketListenerImpl
+@@ -2360,7 +2422,9 @@ public class ServerGamePacketListenerImpl
                  CompletableFuture<Component> decoratedFuture = this.server.getChatDecorator().decorate(this.player, null, signedMessage.decoratedContent()); // Paper - Adventure
  
                  this.chatMessageChain.append(CompletableFuture.allOf(filteredFuture, decoratedFuture), ($) -> { // Paper - Adventure
@@ -793,7 +784,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
                      this.broadcastChatMessage(filteredMessage);
                  });
              }, false); // CraftBukkit - async chat
-@@ -2553,7 +2617,12 @@ public class ServerGamePacketListenerImpl
+@@ -2532,7 +2596,12 @@ public class ServerGamePacketListenerImpl
              this.player.resetLastActionTime();
              // CraftBukkit start
              if (sync) {
@@ -807,7 +798,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
              } else {
                  chatHandler.run();
              }
-@@ -2597,8 +2666,8 @@ public class ServerGamePacketListenerImpl
+@@ -2576,8 +2645,8 @@ public class ServerGamePacketListenerImpl
              // Do nothing, this is coming from a plugin
              // Paper start
          } else {
@@ -818,7 +809,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
              }
              new io.papermc.paper.adventure.ChatProcessor(this.server, this.player, original, async).process();
              // Paper end
-@@ -2617,7 +2686,11 @@ public class ServerGamePacketListenerImpl
+@@ -2596,7 +2665,11 @@ public class ServerGamePacketListenerImpl
          This method should ONLY be used if you need to execute a command WITHOUT
          an actual player's input.
          */
@@ -831,7 +822,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
          // Paper end
      }
      // CraftBukkit end
-@@ -2634,7 +2707,10 @@ public class ServerGamePacketListenerImpl
+@@ -2613,7 +2686,10 @@ public class ServerGamePacketListenerImpl
              LOGGER.warn("{} tried to send an empty message", this.player.getScoreboardName());
          } else if (this.getCraftPlayer().isConversing()) {
              final String conversationInput = rawMessage;
@@ -843,7 +834,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
          } else if (this.player.getChatVisibility() == ChatVisiblity.SYSTEM) { // Re-add "Command Only" flag check
              this.send(new ClientboundSystemChatPacket(Component.translatable("chat.cannotSend").withStyle(ChatFormatting.RED), false));
          } else {
-@@ -3395,7 +3471,7 @@ public class ServerGamePacketListenerImpl
+@@ -3384,7 +3460,7 @@ public class ServerGamePacketListenerImpl
      @Override
      public void handlePlaceRecipe(final ServerboundPlaceRecipePacket packet) {
          // Paper start - auto recipe limit
@@ -852,7 +843,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
              if (!this.recipeSpamPackets.isIncrementAndUnderThreshold()) {
                  this.disconnectAsync(net.minecraft.network.chat.Component.translatable("disconnect.spam"), org.bukkit.event.player.PlayerKickEvent.Cause.SPAM); // Paper - kick event cause // Paper - add proper async disconnect
                  return;
-@@ -3642,7 +3718,7 @@ public class ServerGamePacketListenerImpl
+@@ -3631,7 +3707,7 @@ public class ServerGamePacketListenerImpl
      @Override
      public void handleChangeGameMode(final ServerboundChangeGameModePacket packet) {
          PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
@@ -861,7 +852,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
              LOGGER.warn(
                  "Player {} tried to change game mode to {} without required permissions",
                  this.player.getGameProfile().name(),
-@@ -3822,23 +3898,26 @@ public class ServerGamePacketListenerImpl
+@@ -3811,23 +3887,26 @@ public class ServerGamePacketListenerImpl
  
      @Override
      public void disconnectAsync(final net.minecraft.network.DisconnectionDetails disconnectionInfo) {
@@ -897,7 +888,7 @@ index 5b779bd2a5d836bebbc31718df6e9c735f12e41e..e11595a7b1132060c29f760053866f8d
  
      @Override
 diff --git a/net/minecraft/server/network/ServerLoginPacketListenerImpl.java b/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
-index 3a0d47a716ce5c5345640ed67ac306101791892b..bc5aae6da8798b1543712ef37a05cbe247285bcb 100644
+index fb5a84d2a00528d5c8f549f238abb6aa20d1ccad..8b6c2ca84f62a95c9b27edee2a45cd4138ad630b 100644
 --- a/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
 @@ -48,15 +48,17 @@ import org.slf4j.Logger;
@@ -969,8 +960,8 @@ index 3a0d47a716ce5c5345640ed67ac306101791892b..bc5aae6da8798b1543712ef37a05cbe2
              this.connection.send(new ClientboundLoginDisconnectPacket(component));
              this.connection.disconnect(component);
 +            this.disconnecting = true; // Paper - Fix disconnect still ticking login
-         } catch (Exception var3) {
-             LOGGER.error("Error whilst disconnecting player", (Throwable)var3);
+         } catch (Exception e) {
+             LOGGER.error("Error whilst disconnecting player", e);
          }
 @@ -187,20 +181,32 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
                      return;
@@ -1010,25 +1001,28 @@ index 3a0d47a716ce5c5345640ed67ac306101791892b..bc5aae6da8798b1543712ef37a05cbe2
              }
          }
      }
-@@ -214,7 +220,7 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+@@ -214,9 +220,9 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
          PlayerList playerList = this.server.getPlayerList();
          Component error = org.bukkit.craftbukkit.event.CraftEventFactory.handleLoginResult(playerList.canPlayerLogin(this.connection.getRemoteAddress(), new NameAndId(profile)), this.paperLoginConnection, this.connection, profile, this.server, true); // Paper
          if (error != null) {
 -            this.disconnectAsync(error); // Paper
 +            this.disconnect(error);
+         } else if (this.connection.getIntendedProfileId() != null && !profile.id().equals(this.connection.getIntendedProfileId())) {
+-            this.disconnectAsync(CommonComponents.CONNECT_FAILED); // Paper
++            this.disconnect(CommonComponents.CONNECT_FAILED);
          } else {
              if (this.server.getCompressionThreshold() >= 0 && !this.connection.isMemoryConnection()) {
                  this.connection
-@@ -258,7 +264,7 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
-             throw new IllegalStateException("Protocol error", var7);
+@@ -260,7 +266,7 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+             throw new IllegalStateException("Protocol error", e);
          }
  
 -        // Paper start - Virtual authenticator threads
 +        // Paper start - Cache authenticator threads
          authenticatorPool.execute(new Runnable() {
-             {
-                 Objects.requireNonNull(ServerLoginPacketListenerImpl.this);
-@@ -279,11 +285,21 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+             @Override
+             public void run() {
+@@ -277,11 +283,21 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
                          if (!ServerLoginPacketListenerImpl.this.connection.isConnected()) {
                              return;
                          }
@@ -1055,7 +1049,7 @@ index 3a0d47a716ce5c5345640ed67ac306101791892b..bc5aae6da8798b1543712ef37a05cbe2
                      } else if (ServerLoginPacketListenerImpl.this.server.isSingleplayer()) {
                          ServerLoginPacketListenerImpl.LOGGER.warn("Failed to verify username but will let them in anyway!");
                          ServerLoginPacketListenerImpl.this.startClientVerification(ServerLoginPacketListenerImpl.this.createOfflineProfile(name)); // Spigot
-@@ -314,57 +330,66 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+@@ -312,57 +328,66 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
                      : null;
              }
          });
@@ -1163,7 +1157,7 @@ index 3a0d47a716ce5c5345640ed67ac306101791892b..bc5aae6da8798b1543712ef37a05cbe2
      }
      // CraftBukkit end
  
-@@ -413,9 +438,19 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+@@ -411,9 +436,19 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
              // Proceed with login
              authenticatorPool.execute(() -> {
                  try {
@@ -1204,32 +1198,40 @@ index b696220de3b74fbc277d7152b38b84c5a973ec40..6bdfc6fa06fe90da7bc556fdb203af74
  
      default void leave() {
 diff --git a/net/minecraft/server/network/config/PrepareSpawnTask.java b/net/minecraft/server/network/config/PrepareSpawnTask.java
-index 8b318dd8aa918284c5fa89e990b13bec425102cb..cf0a9f1b983b6e964704fdfb095c84a69e953b2c 100644
+index d91d7d438dd79c64827de7cdfbaeb8c8b0896a48..ef8af4be69ce5beceac4f481750b429423df7c0b 100644
 --- a/net/minecraft/server/network/config/PrepareSpawnTask.java
 +++ b/net/minecraft/server/network/config/PrepareSpawnTask.java
-@@ -185,7 +185,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
-             if (!this.spawnPosition.isDone()) {
+@@ -1,6 +1,7 @@
+ package net.minecraft.server.network.config;
+ 
+ import com.mojang.logging.LogUtils;
++import java.util.Objects;
+ import java.util.Optional;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.function.Consumer;
+@@ -182,7 +183,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
                  return null;
-             } else {
--                Vec3 spawnPosition = this.spawnPosition.join();
-+                Vec3 spawnPosition = Objects.requireNonNull(this.spawnPosition.getNow(null), "spawn position");
-                 if (this.chunkLoadFuture == null) {
-                     // Paper start - PlayerSpawnLocationEvent
-                     if (this.eventFuture == null && org.spigotmc.event.player.PlayerSpawnLocationEvent.getHandlerList().getRegisteredListeners().length != 0) {
-@@ -228,7 +228,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
-                         if (!this.eventFuture.isDone()) {
-                             return null;
-                         }
--                        org.bukkit.Location location = this.eventFuture.join();
-+                        org.bukkit.Location location = Objects.requireNonNull(this.eventFuture.getNow(null), "spawn location");
-                         spawnPosition = io.papermc.paper.util.MCUtil.toVec3(location);
-                         this.spawnLevel = ((org.bukkit.craftbukkit.CraftWorld) location.getWorld()).getHandle();
-                         this.spawnPosition = CompletableFuture.completedFuture(spawnPosition);
+             }
+ 
+-            Vec3 spawnPosition = this.spawnPosition.join();
++            Vec3 spawnPosition = Objects.requireNonNull(this.spawnPosition.getNow(null), "spawn position");
+             if (this.chunkLoadFuture == null) {
+                 // Paper start - PlayerSpawnLocationEvent
+                 if (this.eventFuture == null && org.spigotmc.event.player.PlayerSpawnLocationEvent.getHandlerList().getRegisteredListeners().length != 0) {
+@@ -225,7 +226,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
+                     if (!this.eventFuture.isDone()) {
+                         return null;
+                     }
+-                    org.bukkit.Location location = this.eventFuture.join();
++                    org.bukkit.Location location = Objects.requireNonNull(this.eventFuture.getNow(null), "spawn location");
+                     spawnPosition = io.papermc.paper.util.MCUtil.toVec3(location);
+                     this.spawnLevel = ((org.bukkit.craftbukkit.CraftWorld) location.getWorld()).getHandle();
+                     this.spawnPosition = CompletableFuture.completedFuture(spawnPosition);
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index 82748af2479b0f8f15e39d1ad1ccd2a0e583bcdd..6a358dea5ab373775a541192be246087afc94b5b 100644
+index baec5d072b8f2d9379dba850b04e881e5267ca6b..c934baa7936d4529d7c8e24fc177ca1c8b0b8961 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
-@@ -72,6 +72,7 @@ import net.minecraft.server.network.CommonListenerCookie;
+@@ -71,6 +71,7 @@ import net.minecraft.server.network.CommonListenerCookie;
  import net.minecraft.server.network.ServerGamePacketListenerImpl;
  import net.minecraft.server.notifications.NotificationService;
  import net.minecraft.server.permissions.LevelBasedPermissionSet;
@@ -1237,7 +1239,7 @@ index 82748af2479b0f8f15e39d1ad1ccd2a0e583bcdd..6a358dea5ab373775a541192be246087
  import net.minecraft.sounds.SoundEvents;
  import net.minecraft.sounds.SoundSource;
  import net.minecraft.stats.ServerStatsCounter;
-@@ -156,6 +157,44 @@ public abstract class PlayerList {
+@@ -155,6 +156,44 @@ public abstract class PlayerList {
  
      abstract public void loadAndSaveFiles(); // Paper - fix converting txt to json file; moved from DedicatedPlayerList constructor
  
@@ -1307,8 +1309,8 @@ index 82748af2479b0f8f15e39d1ad1ccd2a0e583bcdd..6a358dea5ab373775a541192be246087
          // Paper end - Use single player info update packet on join
          player.sentListPacket = true;
          player.suppressTrackerForLogin = false; // Paper - Fire PlayerJoinEvent when Player is actually ready
--        ((ServerLevel)player.level()).getChunkSource().chunkMap.addEntity(player); // Paper - Fire PlayerJoinEvent when Player is actually ready; track entity now
-+        runWithLevelContext(player.level(), () -> player.level().getChunkSource().chunkMap.addEntity(player)); // Paper - Fire PlayerJoinEvent when Player is actually ready; track entity now
+-        player.level().getChunkSource().addEntity(player); // Paper - Fire PlayerJoinEvent when Player is actually ready; track entity now
++        runWithLevelContext(player.level(), () -> player.level().getChunkSource().addEntity(player)); // Paper - Fire PlayerJoinEvent when Player is actually ready; track entity now
          // CraftBukkit end
  
          //player.refreshEntityData(player); // CraftBukkit - BungeeCord#2321, send complete data to self on spawn // Paper - THIS IS NOT NEEDED ANYMORE
@@ -1322,7 +1324,7 @@ index 82748af2479b0f8f15e39d1ad1ccd2a0e583bcdd..6a358dea5ab373775a541192be246087
              this.server.getCustomBossEvents().onPlayerConnect(player);
          }
  
-@@ -418,7 +459,7 @@ public abstract class PlayerList {
+@@ -414,7 +455,7 @@ public abstract class PlayerList {
  
      protected void save(final ServerPlayer player) {
          if (!player.getBukkitEntity().isPersistent()) return; // CraftBukkit
@@ -1331,7 +1333,7 @@ index 82748af2479b0f8f15e39d1ad1ccd2a0e583bcdd..6a358dea5ab373775a541192be246087
          this.playerIo.save(player);
          ServerStatsCounter stats = player.getStats(); // CraftBukkit
          if (stats != null) {
-@@ -449,6 +490,20 @@ public abstract class PlayerList {
+@@ -445,6 +486,20 @@ public abstract class PlayerList {
          this.cserver.getPluginManager().callEvent(playerQuitEvent);
          player.getBukkitEntity().disconnect();
  
@@ -1352,16 +1354,16 @@ index 82748af2479b0f8f15e39d1ad1ccd2a0e583bcdd..6a358dea5ab373775a541192be246087
          // CraftBukkit end
  
          // Paper start - Configurable player collision; Remove from collideRule team if needed
-@@ -498,7 +553,7 @@ public abstract class PlayerList {
+@@ -494,7 +549,7 @@ public abstract class PlayerList {
              // Paper end - Allow using old ender pearl behavior
          }
  
 -        level.removePlayerImmediately(player, Entity.RemovalReason.UNLOADED_WITH_PLAYER);
 +        runWithLevelContext(level, () -> level.removePlayerImmediately(player, Entity.RemovalReason.UNLOADED_WITH_PLAYER));
          player.retireScheduler(); // Paper - Folia schedulers
-         player.getAdvancements().stopListening();
+         player.getAdvancements().clearTriggers();
          this.players.remove(player);
-@@ -605,7 +660,7 @@ public abstract class PlayerList {
+@@ -603,7 +658,7 @@ public abstract class PlayerList {
          // Paper end - respawn event
          this.players.remove(serverPlayer);
          this.playersByName.remove(serverPlayer.getScoreboardName().toLowerCase(java.util.Locale.ROOT)); // Paper
@@ -1370,7 +1372,7 @@ index 82748af2479b0f8f15e39d1ad1ccd2a0e583bcdd..6a358dea5ab373775a541192be246087
          ServerLevel level = respawnInfo.newLevel();
          ServerPlayer player = serverPlayer; // Paper - TODO - recreate instance
          player.connection = serverPlayer.connection;
-@@ -639,14 +694,14 @@ public abstract class PlayerList {
+@@ -637,14 +692,14 @@ public abstract class PlayerList {
          ServerLevel playerLevel = player.level();
          LevelData levelData = playerLevel.getLevelData();
          player.connection.send(new ClientboundRespawnPacket(player.createCommonSpawnInfo(playerLevel), dataToKeep));

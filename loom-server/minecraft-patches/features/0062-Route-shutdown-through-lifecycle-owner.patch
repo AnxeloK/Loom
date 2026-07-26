@@ -5,10 +5,10 @@ Subject: [PATCH] Route shutdown through lifecycle owner
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index cb3dbb2b74c6be2d47848ed5a196fe9e10b3aa29..d21a2932aff446f65dbdf2beaf0c614b50db19f2 100644
+index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..084353670c8be6a0438914d476af7abd630142e9 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2472,6 +2472,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2449,6 +2449,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          return super.scheduleExecutables() && !this.isStopped();
      }
  
@@ -26,7 +26,7 @@ index cb3dbb2b74c6be2d47848ed5a196fe9e10b3aa29..d21a2932aff446f65dbdf2beaf0c614b
      public void executeIfPossible(final Runnable command) {
          if (this.isStopped()) {
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index c95020c8b2207f6409c99d41ab99fdc754bf0029..6c9dcc756e128ccf0feb6b8401b42d732a5bc122 100644
+index d114bf9e3e82bcb528b12e1c768c53b9b8a6de2e..f93a12c8e49d7d4da7ea7ddc622b29b711bc07d8 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
 @@ -1174,20 +1174,41 @@ public abstract class PlayerList {

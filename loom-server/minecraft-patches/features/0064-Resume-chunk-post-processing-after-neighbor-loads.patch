@@ -50,12 +50,12 @@ index 9a9a599ef178f851ee5c783631a724013a693586..af17f9006e9d3a36b6b25e21651a8dd8
                          this.changeEntityChunkStatus(FullChunkStatus.BLOCK_TICKING);
                          PlatformHooks.get().onChunkTicking(chunk, this.vanillaChunkHolder);
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index f96fd129b740682ce903ef8818368886de1d14a0..e32ec1f1b544a9881dd55cdece8847b0532dab44 100644
+index 81f10744a0fcf32a750b07feec863c18bac0350c..08157a2715fde6887043ff7f55e5f5bf6b233a58 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2203,6 +2203,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
-             final net.minecraft.server.threading.TickRegions.RegionContext tickRegionContext =
+@@ -2170,6 +2170,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
                  net.minecraft.server.threading.TickRegions.pushLevelContext(level);
+ 
              try {
 +                net.minecraft.server.threading.TickRegions.runRegionContinuations(level);
                  net.minecraft.server.threading.TickRegions.runFullLevelContinuations(level);
@@ -194,18 +194,18 @@ index ffc7103102639214c60201a213df3ad042a05c85..0b4f17076ea84112c6ae5b93865f0825
              level,
              owner.chunkX(),
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
-index a7c9a0c69c8c6deef275a96102201b139e9fc53b..6de5efbff3e0d4b9b184626f0b661c671458c7de 100644
+index 72cd3eb5cd0832abccdfb15f985d1ca306bbe49e..991cdd627fedb14cbd658ef83373d4be24f18842 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
 +++ b/net/minecraft/world/level/chunk/LevelChunk.java
-@@ -12,6 +12,7 @@ import java.util.List;
+@@ -11,6 +11,7 @@ import java.util.Collections;
+ import java.util.List;
  import java.util.Map;
- import java.util.Objects;
  import java.util.Map.Entry;
 +import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
  import java.util.function.Consumer;
  import java.util.function.Supplier;
  import net.minecraft.CrashReport;
-@@ -105,7 +106,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -104,7 +105,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
      boolean loadedTicketLevel;
      // Paper end
      // Paper start - rewrite chunk system
@@ -217,7 +217,7 @@ index a7c9a0c69c8c6deef275a96102201b139e9fc53b..6de5efbff3e0d4b9b184626f0b661c67
      private ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder chunkAndHolder;
  
      @Override
-@@ -122,6 +126,96 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -121,6 +125,96 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
      public final void moonrise$setChunkHolder(final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder holder) {
          this.chunkAndHolder = holder;
      }

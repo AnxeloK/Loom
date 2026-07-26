@@ -13,7 +13,7 @@ unaffected; a packet racing a pending flush is picked up by the next
 trigger at worst one tick later.
 
 diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
-index d953bb4edb1ae93667a3c8865cb3d2fc1354ada6..72a747fddd7ca985fa994e496ef2387d39e7fe6d 100644
+index e36483369fa969ee887fbfde9b068df24ae9611e..164e6c0ba59fdcebee02437666e17f60d2340db3 100644
 --- a/net/minecraft/network/Connection.java
 +++ b/net/minecraft/network/Connection.java
 @@ -70,6 +70,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
@@ -24,7 +24,7 @@ index d953bb4edb1ae93667a3c8865cb3d2fc1354ada6..72a747fddd7ca985fa994e496ef2387d
      public Channel channel;
      public SocketAddress address;
      // Spigot start
-@@ -474,15 +475,29 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -473,15 +474,29 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          if (this.channel.eventLoop().inEventLoop()) {
              this.doSendPacket(packet, listener, flush);
          } else {

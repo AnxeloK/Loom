@@ -165,10 +165,10 @@ index 56de9e0ec3ef2dd8d2df8d780fcd89f5accbafb9..02c979c382284d03735ac8389b08f22a
                  s.level().addFreshEntity(s.entity(), s.reason());
              }
 diff --git a/net/minecraft/world/entity/ai/village/poi/PoiManager.java b/net/minecraft/world/entity/ai/village/poi/PoiManager.java
-index ab92bb9a3c5c1900e5d77fd3885e2c9dde64d339..739cc04033bbfa5cd80434849217e7cda6501620 100644
+index 3b07e731e8d16c2b71cb55b85163029cf56fd02e..49adade0ff76c830990dc555ce83f5eacda6eb81 100644
 --- a/net/minecraft/world/entity/ai/village/poi/PoiManager.java
 +++ b/net/minecraft/world/entity/ai/village/poi/PoiManager.java
-@@ -74,7 +74,15 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
+@@ -73,7 +73,15 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
          final int chunkY = ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkSectionY(pos);
          final int chunkZ = ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkSectionZ(pos);
  
@@ -185,7 +185,7 @@ index ab92bb9a3c5c1900e5d77fd3885e2c9dde64d339..739cc04033bbfa5cd80434849217e7cd
  
          final ca.spottedleaf.moonrise.patches.chunk_system.level.poi.PoiChunk ret = ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)this.world).moonrise$getChunkTaskScheduler().chunkHolderManager.getPoiChunkIfLoaded(chunkX, chunkZ, true);
  
-@@ -87,7 +95,10 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
+@@ -86,7 +94,10 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
          final int chunkY = ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkSectionY(pos);
          final int chunkZ = ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkSectionZ(pos);
  
@@ -197,7 +197,7 @@ index ab92bb9a3c5c1900e5d77fd3885e2c9dde64d339..739cc04033bbfa5cd80434849217e7cd
  
          final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkHolderManager manager = ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)this.world).moonrise$getChunkTaskScheduler().chunkHolderManager;
  
-@@ -95,9 +106,15 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
+@@ -94,9 +105,15 @@ public class PoiManager extends SectionStorage<PoiSection, PoiSection.Packed> im
              final ca.spottedleaf.moonrise.patches.chunk_system.level.poi.PoiChunk ret = manager.getPoiChunkIfLoaded(chunkX, chunkZ, true);
              if (ret != null) {
                  return ret.getSectionForVanilla(chunkY);

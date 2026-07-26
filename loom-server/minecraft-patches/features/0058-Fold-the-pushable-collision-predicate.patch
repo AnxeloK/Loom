@@ -5,55 +5,58 @@ Subject: [PATCH] Fold the pushable collision predicate
 
 
 diff --git a/net/minecraft/world/entity/EntitySelector.java b/net/minecraft/world/entity/EntitySelector.java
-index 050e1ba6cdc4c50aa188cef88f421a9a6c5f0836..44b28e9f1b8120b9a476e5969bb6d4c1259f6bda 100644
+index a3c13e421768f5e1a703b5b1167fa1c912b6f126..f46bf91053417527e63dbd6fc63b304aac89c5e4 100644
 --- a/net/minecraft/world/entity/EntitySelector.java
 +++ b/net/minecraft/world/entity/EntitySelector.java
-@@ -45,30 +45,29 @@ public final class EntitySelector {
+@@ -45,32 +45,31 @@ public final class EntitySelector {
      public static Predicate<Entity> pushableBy(final Entity entity) {
          Team ownTeam = entity.getTeam();
          Team.CollisionRule ownCollisionRule = ownTeam == null ? Team.CollisionRule.ALWAYS : ownTeam.getCollisionRule();
--        return (Predicate<Entity>)(ownCollisionRule == Team.CollisionRule.NEVER
+-        return ownCollisionRule == Team.CollisionRule.NEVER
 -            ? Predicates.alwaysFalse()
 -            : NO_SPECTATORS.and(
 -                input -> {
 -                    if (!input.isPushable() || !input.canCollideWithBukkit(entity) || !entity.canCollideWithBukkit(input)) { // CraftBukkit - collidable API // Paper - Climbing should not bypass cramming gamerule
 -                        return false;
--                    } else if (!entity.level().isClientSide() || input instanceof Player player && player.isLocalPlayer()) {
+-                    }
+-
+-                    if (!entity.level().isClientSide() || input instanceof Player player && player.isLocalPlayer()) {
 -                        Team theirTeam = input.getTeam();
 -                        Team.CollisionRule theirCollisionRule = theirTeam == null ? Team.CollisionRule.ALWAYS : theirTeam.getCollisionRule();
 -                        if (theirCollisionRule == Team.CollisionRule.NEVER || (input instanceof Player && !io.papermc.paper.configuration.GlobalConfiguration.get().collisions.enablePlayerCollisions)) { // Paper - Configurable player collision
 -                            return false;
--                        } else {
--                            boolean sameTeam = ownTeam != null && ownTeam.isAlliedTo(theirTeam);
--                            return (ownCollisionRule != Team.CollisionRule.PUSH_OWN_TEAM && theirCollisionRule != Team.CollisionRule.PUSH_OWN_TEAM || !sameTeam)
--                                && (
--                                    ownCollisionRule != Team.CollisionRule.PUSH_OTHER_TEAMS && theirCollisionRule != Team.CollisionRule.PUSH_OTHER_TEAMS
--                                        || sameTeam
--                                );
 -                        }
--                    } else {
--                        return false;
--                    }
 +        if (ownCollisionRule == Team.CollisionRule.NEVER) {
 +            return Predicates.alwaysFalse();
 +        }
 +        return input -> {
 +            if (input.isSpectator() || !input.isPushable() || !input.canCollideWithBukkit(entity) || !entity.canCollideWithBukkit(input)) { // CraftBukkit - collidable API // Paper - Climbing should not bypass cramming gamerule
 +                return false;
-+            } else if (!entity.level().isClientSide() || input instanceof Player player && player.isLocalPlayer()) {
++            }
+ 
+-                        boolean sameTeam = ownTeam != null && ownTeam.isAlliedTo(theirTeam);
+-                        return (ownCollisionRule != Team.CollisionRule.PUSH_OWN_TEAM && theirCollisionRule != Team.CollisionRule.PUSH_OWN_TEAM || !sameTeam)
+-                            && (
+-                                ownCollisionRule != Team.CollisionRule.PUSH_OTHER_TEAMS && theirCollisionRule != Team.CollisionRule.PUSH_OTHER_TEAMS
+-                                    || sameTeam
+-                            );
+-                    } else {
+-                        return false;
+-                    }
++            if (!entity.level().isClientSide() || input instanceof Player player && player.isLocalPlayer()) {
 +                Team theirTeam = input.getTeam();
 +                Team.CollisionRule theirCollisionRule = theirTeam == null ? Team.CollisionRule.ALWAYS : theirTeam.getCollisionRule();
 +                if (theirCollisionRule == Team.CollisionRule.NEVER || (input instanceof Player && !io.papermc.paper.configuration.GlobalConfiguration.get().collisions.enablePlayerCollisions)) { // Paper - Configurable player collision
 +                    return false;
-+                } else {
-+                    boolean sameTeam = ownTeam != null && ownTeam.isAlliedTo(theirTeam);
-+                    return (ownCollisionRule != Team.CollisionRule.PUSH_OWN_TEAM && theirCollisionRule != Team.CollisionRule.PUSH_OWN_TEAM || !sameTeam)
-+                        && (
-+                            ownCollisionRule != Team.CollisionRule.PUSH_OTHER_TEAMS && theirCollisionRule != Team.CollisionRule.PUSH_OTHER_TEAMS
-+                                || sameTeam
-+                        );
                  }
--            ));
+-            );
++
++                boolean sameTeam = ownTeam != null && ownTeam.isAlliedTo(theirTeam);
++                return (ownCollisionRule != Team.CollisionRule.PUSH_OWN_TEAM && theirCollisionRule != Team.CollisionRule.PUSH_OWN_TEAM || !sameTeam)
++                    && (
++                        ownCollisionRule != Team.CollisionRule.PUSH_OTHER_TEAMS && theirCollisionRule != Team.CollisionRule.PUSH_OTHER_TEAMS
++                            || sameTeam
++                    );
 +            } else {
 +                return false;
 +            }

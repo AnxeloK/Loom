@@ -18,10 +18,10 @@ index e20531becd31cb37b0d1780630d7428ab6dd1380..9f2e09e7a21d591c037ab7d6d3cee24d
              ctx.pipeline().remove(ctx.name());
          }
 diff --git a/net/minecraft/network/protocol/BundlerInfo.java b/net/minecraft/network/protocol/BundlerInfo.java
-index 891d7d573fdd542c0adbd34ab1ffcb05281bab22..5452a522620f71f8f0bdb642fb480de4863404cf 100644
+index d2488b2648860b8d511103b227c47d7e77651c8e..b7c8af728cd4e14094553d419fe84d9ea5e33d72 100644
 --- a/net/minecraft/network/protocol/BundlerInfo.java
 +++ b/net/minecraft/network/protocol/BundlerInfo.java
-@@ -29,6 +29,20 @@ public interface BundlerInfo {
+@@ -28,6 +28,20 @@ public interface BundlerInfo {
                  }
              }
  
@@ -42,7 +42,7 @@ index 891d7d573fdd542c0adbd34ab1ffcb05281bab22..5452a522620f71f8f0bdb642fb480de4
              @Override
              public BundlerInfo.@Nullable Bundler startPacketBundling(final Packet<?> packet) {
                  return packet == delimiterPacket ? new BundlerInfo.Bundler() {
-@@ -57,6 +71,10 @@ public interface BundlerInfo {
+@@ -54,6 +68,10 @@ public interface BundlerInfo {
  
      void unbundlePacket(Packet<?> packet, Consumer<Packet<?>> output);
  
@@ -52,4 +52,4 @@ index 891d7d573fdd542c0adbd34ab1ffcb05281bab22..5452a522620f71f8f0bdb642fb480de4
 +
      BundlerInfo.@Nullable Bundler startPacketBundling(Packet<?> packet);
  
-     public interface Bundler {
+     interface Bundler {

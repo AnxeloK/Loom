@@ -6,10 +6,10 @@ Subject: [PATCH] Revert "Consolidate flushes issued outside channel reads"
 This reverts commit 327c4248cfb42cad977236256d7b9cdcea72332b.
 
 diff --git a/net/minecraft/server/network/ServerConnectionListener.java b/net/minecraft/server/network/ServerConnectionListener.java
-index b33f970a0e28866de33311d76a0c98520213e375..92bda2d0638411ed23cc4a2499b8100ca8f7adfb 100644
+index f219fa6597912c5d60697b93430c5f6f32ac7a1b..735873cdf172f190e1a0ea7b33dacffe5934baf0 100644
 --- a/net/minecraft/server/network/ServerConnectionListener.java
 +++ b/net/minecraft/server/network/ServerConnectionListener.java
-@@ -99,7 +99,7 @@ public class ServerConnectionListener {
+@@ -98,7 +98,7 @@ public class ServerConnectionListener {
                                      } catch (ChannelException var5) {
                                      }
  

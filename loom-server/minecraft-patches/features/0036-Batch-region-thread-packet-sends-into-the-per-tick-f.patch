@@ -17,7 +17,7 @@ join, so tick-thread writes always flush the same tick. Non-tick
 senders keep the immediate flush.
 
 diff --git a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
-index f8c0298b33f7115b633780fd634eaff6378b5910..80bd2124714f15de00ae25155b942538a3b30b56 100644
+index 3a40c5086415bc3aff4f23c9967406c632d0f7ed..92cbb59c063e7386e52e245b478c0ed54a84591a 100644
 --- a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
 @@ -337,8 +337,14 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack

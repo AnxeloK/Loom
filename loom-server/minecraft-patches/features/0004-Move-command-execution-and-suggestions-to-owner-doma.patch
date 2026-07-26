@@ -6,10 +6,10 @@ Subject: [PATCH] Move command execution and suggestions to owner-domain
 
 
 diff --git a/net/minecraft/commands/Commands.java b/net/minecraft/commands/Commands.java
-index a882caec9d4ad21605eaafeb2872786eef5c3031..1c2fde77c9cc58516ec28b8d217154e041eba5a5 100644
+index d210f991366796d84e947df0a057c1adc62824f8..452546c8eca9de2a5a297d9594e20a48b200bb2e 100644
 --- a/net/minecraft/commands/Commands.java
 +++ b/net/minecraft/commands/Commands.java
-@@ -366,9 +366,9 @@ public class Commands {
+@@ -367,9 +367,9 @@ public class Commands {
      }
  
      public void performCommand(final ParseResults<CommandSourceStack> command, final String commandString, final boolean throwCommandError) {
@@ -22,10 +22,10 @@ index a882caec9d4ad21605eaafeb2872786eef5c3031..1c2fde77c9cc58516ec28b8d217154e0
          ContextChain<CommandSourceStack> commandChain = finishParsing(command, commandString, sender);
  
 diff --git a/net/minecraft/server/commands/FetchProfileCommand.java b/net/minecraft/server/commands/FetchProfileCommand.java
-index 8fdd8b2ef3e07341719d44cc829fc1c4dbd28306..1c91efb8b0e5e8ae7a3043743bb928a440ec4856 100644
+index 2963f5b9125e9592fe6daa87b87e1280f27d1147..1f3eaeeaad26fc01468d406515624f59bdd24f30 100644
 --- a/net/minecraft/server/commands/FetchProfileCommand.java
 +++ b/net/minecraft/server/commands/FetchProfileCommand.java
-@@ -126,7 +126,8 @@ public class FetchProfileCommand {
+@@ -127,7 +127,8 @@ public class FetchProfileCommand {
                  () -> {
                      Component nameComponent = Component.literal(name);
                      Optional<GameProfile> result = resolver.fetchByName(name);
@@ -35,7 +35,7 @@ index 8fdd8b2ef3e07341719d44cc829fc1c4dbd28306..1c91efb8b0e5e8ae7a3043743bb928a4
                          () -> result.ifPresentOrElse(
                              profile -> reportResolvedProfile(source, profile, "commands.fetchprofile.name.success", nameComponent),
                              () -> source.sendFailure(Component.translatable("commands.fetchprofile.name.failure", nameComponent))
-@@ -145,7 +146,8 @@ public class FetchProfileCommand {
+@@ -146,7 +147,8 @@ public class FetchProfileCommand {
                  () -> {
                      Component idComponent = Component.translationArg(id);
                      Optional<GameProfile> result = resolver.fetchById(id);
@@ -46,46 +46,31 @@ index 8fdd8b2ef3e07341719d44cc829fc1c4dbd28306..1c91efb8b0e5e8ae7a3043743bb928a4
                              profile -> reportResolvedProfile(source, profile, "commands.fetchprofile.id.success", idComponent),
                              () -> source.sendFailure(Component.translatable("commands.fetchprofile.id.failure", idComponent))
 diff --git a/net/minecraft/server/commands/FillCommand.java b/net/minecraft/server/commands/FillCommand.java
-index 57311adc7fb1cd4921cbae669b7bac9cec0deaed..6a73253b3d17d52a0ab5ed730909c82cdf8f828b 100644
+index c8c8ee85004d965f77a00edb033e1863fc03833a..4f4722bfc709e3cf78487658a9626a953e8857a7 100644
 --- a/net/minecraft/server/commands/FillCommand.java
 +++ b/net/minecraft/server/commands/FillCommand.java
-@@ -168,56 +168,82 @@ public class FillCommand {
-         if (area > limit) {
+@@ -169,11 +169,37 @@ public class FillCommand {
              throw ERROR_AREA_TOO_LARGE.create(limit, area);
-         } else {
--            record UpdatedPosition(BlockPos pos, BlockState oldState) {
-+            final ServerLevel level = source.getLevel();
-+            final int minChunkX = region.minX() >> 4;
-+            final int minChunkZ = region.minZ() >> 4;
-+            final int maxChunkX = region.maxX() >> 4;
-+            final int maxChunkZ = region.maxZ() >> 4;
-+            if (!net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
-+                final net.minecraft.server.threading.TickRegions.RegionContext context =
-+                    net.minecraft.server.threading.TickRegions.pushRegionContext(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
-+                try {
-+                    return fillBlocksOwned(source, level, region, target, mode, predicate, strict);
-+                } finally {
-+                    net.minecraft.server.threading.TickRegions.popContext(context);
-+                }
-             }
+         }
  
--            List<UpdatedPosition> updatePositions = Lists.newArrayList();
--            ServerLevel level = source.getLevel();
--            if (level.isDebug()) {
--                throw ERROR_FAILED.create();
--            } else {
--                int count = 0;
-+            return fillBlocksOwned(source, level, region, target, mode, predicate, strict);
++        final ServerLevel level = source.getLevel();
++        final int minChunkX = region.minX() >> 4;
++        final int minChunkZ = region.minZ() >> 4;
++        final int maxChunkX = region.maxX() >> 4;
++        final int maxChunkZ = region.maxZ() >> 4;
++        if (!net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++            final net.minecraft.server.threading.TickRegions.RegionContext context =
++                net.minecraft.server.threading.TickRegions.pushRegionContext(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
++            try {
++                return fillBlocksOwned(source, level, region, target, mode, predicate, strict);
++            } finally {
++                net.minecraft.server.threading.TickRegions.popContext(context);
++            }
 +        }
++
++        return fillBlocksOwned(source, level, region, target, mode, predicate, strict);
 +    }
- 
--                for (BlockPos pos : BlockPos.betweenClosed(region.minX(), region.minY(), region.minZ(), region.maxX(), region.maxY(), region.maxZ())) {
--                    if (predicate == null || predicate.test(new BlockInWorld(level, pos, true))) {
--                        BlockState oldState = level.getBlockState(pos);
--                        boolean affected = false;
--                        if (mode.affector.affect(level, pos)) {
--                            affected = true;
--                        }
++
 +    private static int fillBlocksOwned(
 +        final CommandSourceStack source,
 +        final ServerLevel level,
@@ -95,82 +80,14 @@ index 57311adc7fb1cd4921cbae669b7bac9cec0deaed..6a73253b3d17d52a0ab5ed730909c82c
 +        final @Nullable Predicate<BlockInWorld> predicate,
 +        final boolean strict
 +    ) throws CommandSyntaxException {
-+        record UpdatedPosition(BlockPos pos, BlockState oldState) {
-+        }
- 
--                        BlockInput block = mode.filter.filter(region, pos, target, level);
--                        if (block == null) {
--                            if (affected) {
--                                count++;
--                            }
--                        } else if (!block.place(
--                            level, pos, Block.UPDATE_CLIENTS | (strict ? Block.UPDATE_SKIP_ALL_SIDEEFFECTS : Block.UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS)
--                        )) {
--                            if (affected) {
--                                count++;
--                            }
--                        } else {
--                            if (!strict) {
--                                updatePositions.add(new UpdatedPosition(pos.immutable(), oldState));
--                            }
-+        List<UpdatedPosition> updatePositions = Lists.newArrayList();
-+        if (level.isDebug()) {
-+            throw ERROR_FAILED.create();
-+        } else {
-+            int count = 0;
-+
-+            for (BlockPos pos : BlockPos.betweenClosed(region.minX(), region.minY(), region.minZ(), region.maxX(), region.maxY(), region.maxZ())) {
-+                if (predicate == null || predicate.test(new BlockInWorld(level, pos, true))) {
-+                    BlockState oldState = level.getBlockState(pos);
-+                    boolean affected = false;
-+                    if (mode.affector.affect(level, pos)) {
-+                        affected = true;
-+                    }
- 
-+                    BlockInput block = mode.filter.filter(region, pos, target, level);
-+                    if (block == null) {
-+                        if (affected) {
-                             count++;
-                         }
-+                    } else if (!block.place(
-+                        level, pos, Block.UPDATE_CLIENTS | (strict ? Block.UPDATE_SKIP_ALL_SIDEEFFECTS : Block.UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS)
-+                    )) {
-+                        if (affected) {
-+                            count++;
-+                        }
-+                    } else {
-+                        if (!strict) {
-+                            updatePositions.add(new UpdatedPosition(pos.immutable(), oldState));
-+                        }
-+
-+                        count++;
-                     }
-                 }
-+            }
- 
--                for (UpdatedPosition posx : updatePositions) {
--                    level.updateNeighboursOnBlockSet(posx.pos, posx.oldState);
--                }
-+            for (UpdatedPosition posx : updatePositions) {
-+                level.updateNeighboursOnBlockSet(posx.pos, posx.oldState);
-+            }
- 
--                if (count == 0) {
--                    throw ERROR_FAILED.create();
--                } else {
--                    int finalCount = count;
--                    source.sendSuccess(() -> Component.translatable("commands.fill.success", finalCount), true);
--                    return count;
--                }
-+            if (count == 0) {
-+                throw ERROR_FAILED.create();
-+            } else {
-+                int finalCount = count;
-+                source.sendSuccess(() -> Component.translatable("commands.fill.success", finalCount), true);
-+                return count;
-             }
+         record UpdatedPosition(BlockPos pos, BlockState oldState) {
          }
-     }
+ 
+         List<UpdatedPosition> updatePositions = Lists.newArrayList();
+-        ServerLevel level = source.getLevel();
+         if (level.isDebug()) {
+             throw ERROR_FAILED.create();
+         }
 diff --git a/net/minecraft/server/commands/KillCommand.java b/net/minecraft/server/commands/KillCommand.java
 index ceef214b551114ba030f0f4b4aaf28aaa8013a3f..62d6c60deba45b63a8fa524cf9563e157fe805e9 100644
 --- a/net/minecraft/server/commands/KillCommand.java
@@ -213,10 +130,10 @@ index ceef214b551114ba030f0f4b4aaf28aaa8013a3f..62d6c60deba45b63a8fa524cf9563e15
 +    }
  }
 diff --git a/net/minecraft/server/commands/SetBlockCommand.java b/net/minecraft/server/commands/SetBlockCommand.java
-index aa4ca10549c631f9f37b6d3f6e9c149e808e51a8..3dfcaff7d65430be8c5e8772a53802572f8c69db 100644
+index 785112128803792e1ce821d3da37d6bac6cd3f44..d924f096953ced6babf907dab47812be5570b137 100644
 --- a/net/minecraft/server/commands/SetBlockCommand.java
 +++ b/net/minecraft/server/commands/SetBlockCommand.java
-@@ -105,7 +105,31 @@ public class SetBlockCommand {
+@@ -106,7 +106,31 @@ public class SetBlockCommand {
          final @Nullable Predicate<BlockInWorld> predicate,
          final boolean strict
      ) throws CommandSyntaxException {
@@ -248,9 +165,9 @@ index aa4ca10549c631f9f37b6d3f6e9c149e808e51a8..3dfcaff7d65430be8c5e8772a5380257
 +    ) throws CommandSyntaxException {
          if (level.isDebug()) {
              throw ERROR_FAILED.create();
-         } else if (predicate != null && !predicate.test(new BlockInWorld(level, pos, true))) {
+         }
 diff --git a/net/minecraft/server/commands/TeleportCommand.java b/net/minecraft/server/commands/TeleportCommand.java
-index 7047a0da56459cda404702cf4dbc69e537683ff8..4ecd70b4209926b66136e9ad137f688bbae4b9de 100644
+index 290547abf7037c5c88736c66765b2ee8f575c53b..4ecd70b4209926b66136e9ad137f688bbae4b9de 100644
 --- a/net/minecraft/server/commands/TeleportCommand.java
 +++ b/net/minecraft/server/commands/TeleportCommand.java
 @@ -9,6 +9,7 @@ import java.util.Collections;
@@ -499,7 +416,7 @@ index 7047a0da56459cda404702cf4dbc69e537683ff8..4ecd70b4209926b66136e9ad137f688b
          final CommandSourceStack source,
          final Entity victim,
          final ServerLevel level,
-@@ -243,32 +360,30 @@ public class TeleportCommand {
+@@ -243,12 +360,7 @@ public class TeleportCommand {
          final float yRot,
          final float xRot,
          final @Nullable LookAt lookAt
@@ -507,41 +424,34 @@ index 7047a0da56459cda404702cf4dbc69e537683ff8..4ecd70b4209926b66136e9ad137f688b
 -        BlockPos blockPos = BlockPos.containing(x, y, z);
 -        if (!Level.isInSpawnableBounds(blockPos)) {
 -            throw INVALID_POSITION.create();
--        } else {
--            double relativeOrAbsoluteX = relatives.contains(Relative.X) ? x - victim.getX() : x;
--            double relativeOrAbsoluteY = relatives.contains(Relative.Y) ? y - victim.getY() : y;
--            double relativeOrAbsoluteZ = relatives.contains(Relative.Z) ? z - victim.getZ() : z;
--            float relativeOrAbsoluteYRot = relatives.contains(Relative.Y_ROT) ? yRot - victim.getYRot() : yRot;
--            float relativeOrAbsoluteXRot = relatives.contains(Relative.X_ROT) ? xRot - victim.getXRot() : xRot;
--            float newYRot = Mth.wrapDegrees(relativeOrAbsoluteYRot);
--            float newXRot = Mth.wrapDegrees(relativeOrAbsoluteXRot);
--            if (victim.teleportTo(level, relativeOrAbsoluteX, relativeOrAbsoluteY, relativeOrAbsoluteZ, relatives, newYRot, newXRot, true, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.COMMAND)) { // Paper - teleport cause
--                if (lookAt != null) {
--                    lookAt.perform(source, victim);
--                }
+-        }
+-
 +    ) {
-+        double relativeOrAbsoluteX = relatives.contains(Relative.X) ? x - victim.getX() : x;
-+        double relativeOrAbsoluteY = relatives.contains(Relative.Y) ? y - victim.getY() : y;
-+        double relativeOrAbsoluteZ = relatives.contains(Relative.Z) ? z - victim.getZ() : z;
-+        float relativeOrAbsoluteYRot = relatives.contains(Relative.Y_ROT) ? yRot - victim.getYRot() : yRot;
-+        float relativeOrAbsoluteXRot = relatives.contains(Relative.X_ROT) ? xRot - victim.getXRot() : xRot;
-+        float newYRot = Mth.wrapDegrees(relativeOrAbsoluteYRot);
-+        float newXRot = Mth.wrapDegrees(relativeOrAbsoluteXRot);
+         double relativeOrAbsoluteX = relatives.contains(Relative.X) ? x - victim.getX() : x;
+         double relativeOrAbsoluteY = relatives.contains(Relative.Y) ? y - victim.getY() : y;
+         double relativeOrAbsoluteZ = relatives.contains(Relative.Z) ? z - victim.getZ() : z;
+@@ -256,19 +368,22 @@ public class TeleportCommand {
+         float relativeOrAbsoluteXRot = relatives.contains(Relative.X_ROT) ? xRot - victim.getXRot() : xRot;
+         float newYRot = Mth.wrapDegrees(relativeOrAbsoluteYRot);
+         float newXRot = Mth.wrapDegrees(relativeOrAbsoluteXRot);
+-        if (victim.teleportTo(level, relativeOrAbsoluteX, relativeOrAbsoluteY, relativeOrAbsoluteZ, relatives, newYRot, newXRot, true, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.COMMAND)) { // Paper - teleport cause
+-            if (lookAt != null) {
+-                lookAt.perform(source, victim);
+-            }
 +        if (!victim.teleportTo(level, relativeOrAbsoluteX, relativeOrAbsoluteY, relativeOrAbsoluteZ, relatives, newYRot, newXRot, true, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.COMMAND)) { // Paper - teleport cause
 +            return false;
 +        }
  
--                if (!(victim instanceof LivingEntity living && living.isFallFlying())) {
--                    victim.setDeltaMovement(victim.getDeltaMovement().multiply(1.0, 0.0, 1.0));
--                    victim.setOnGround(true);
--                }
+-            if (!(victim instanceof LivingEntity living && living.isFallFlying())) {
+-                victim.setDeltaMovement(victim.getDeltaMovement().multiply(1.0, 0.0, 1.0));
+-                victim.setOnGround(true);
+-            }
 +        if (lookAt != null) {
 +            lookAt.perform(source, victim);
 +        }
  
--                if (victim instanceof PathfinderMob mob) {
--                    mob.getNavigation().stop();
--                }
+-            if (victim instanceof PathfinderMob mob) {
+-                mob.getNavigation().stop();
 -            }
 +        if (!(victim instanceof LivingEntity living && living.isFallFlying())) {
 +            victim.setDeltaMovement(victim.getDeltaMovement().multiply(1.0, 0.0, 1.0));
@@ -555,10 +465,10 @@ index 7047a0da56459cda404702cf4dbc69e537683ff8..4ecd70b4209926b66136e9ad137f688b
      }
  }
 diff --git a/net/minecraft/server/commands/TimeCommand.java b/net/minecraft/server/commands/TimeCommand.java
-index 5d08e4e8ff1ac4f253d855f7f126110244d74847..07bd37b7891ec06cc45431ddd57ecd5448c284bd 100644
+index 27ec27001aad55c9e1c691e3910c08a57b3322c9..ec3880f5d9be7b175a96819213e5176438c3b45c 100644
 --- a/net/minecraft/server/commands/TimeCommand.java
 +++ b/net/minecraft/server/commands/TimeCommand.java
-@@ -119,7 +119,7 @@ public class TimeCommand {
+@@ -120,7 +120,7 @@ public class TimeCommand {
          final CommandSourceStack source, final SuggestionsBuilder builder, final Holder<WorldClock> clock
      ) {
          return SharedSuggestionProvider.suggestResource(
@@ -567,7 +477,7 @@ index 5d08e4e8ff1ac4f253d855f7f126110244d74847..07bd37b7891ec06cc45431ddd57ecd54
          );
      }
  
-@@ -141,7 +141,7 @@ public class TimeCommand {
+@@ -142,7 +142,7 @@ public class TimeCommand {
      }
  
      private static int queryTime(final CommandSourceStack source, final Holder<WorldClock> clock) {
@@ -576,34 +486,33 @@ index 5d08e4e8ff1ac4f253d855f7f126110244d74847..07bd37b7891ec06cc45431ddd57ecd54
          long totalTicks = clockManager.getTotalTicks(clock);
          source.sendSuccess(() -> Component.translatable("commands.time.query.absolute", clock.getRegisteredName(), totalTicks), false);
          return wrapTime(totalTicks);
-@@ -151,7 +151,7 @@ public class TimeCommand {
-         if (!clock.equals(timeline.value().clock())) {
+@@ -153,7 +153,7 @@ public class TimeCommand {
              throw ERROR_WRONG_TIMELINE_FOR_CLOCK.create(clock.getRegisteredName(), timeline.getRegisteredName());
-         } else {
--            ServerClockManager clockManager = source.getLevel().clockManager(); // Paper - per-world time
-+            ServerClockManager clockManager = source.getServer().clockManager();
-             long currentTicks = timeline.value().getCurrentTicks(clockManager);
-             source.sendSuccess(() -> Component.translatable("commands.time.query.timeline", timeline.getRegisteredName(), currentTicks), false);
-             return wrapTime(currentTicks);
-@@ -162,15 +162,15 @@ public class TimeCommand {
-         if (!clock.equals(timeline.value().clock())) {
-             throw ERROR_WRONG_TIMELINE_FOR_CLOCK.create(clock.getRegisteredName(), timeline.getRegisteredName());
-         } else {
--            ServerClockManager clockManager = source.getLevel().clockManager(); // Paper - per-world time
-+            ServerClockManager clockManager = source.getServer().clockManager();
-             long repetitions = timeline.value().getPeriodCount(clockManager);
-             source.sendSuccess(() -> Component.translatable("commands.time.query.timeline.repetitions", timeline.getRegisteredName(), repetitions), false);
-             return wrapTime(repetitions);
          }
-     }
  
--    // Paper start - per-world time
+-        ServerClockManager clockManager = source.getLevel().clockManager(); // Paper - per-world time
++        ServerClockManager clockManager = source.getServer().clockManager();
+         long currentTicks = timeline.value().getCurrentTicks(clockManager);
+         source.sendSuccess(() -> Component.translatable("commands.time.query.timeline", timeline.getRegisteredName(), currentTicks), false);
+         return wrapTime(currentTicks);
+@@ -164,7 +164,7 @@ public class TimeCommand {
+             throw ERROR_WRONG_TIMELINE_FOR_CLOCK.create(clock.getRegisteredName(), timeline.getRegisteredName());
+         }
+ 
+-        ServerClockManager clockManager = source.getLevel().clockManager(); // Paper - per-world time
++        ServerClockManager clockManager = source.getServer().clockManager();
+         long repetitions = timeline.value().getPeriodCount(clockManager);
+         source.sendSuccess(() -> Component.translatable("commands.time.query.timeline.repetitions", timeline.getRegisteredName(), repetitions), false);
+         return wrapTime(repetitions);
+@@ -172,6 +172,7 @@ public class TimeCommand {
+ 
+     // Paper start - per-world time
      private static int setTotalTicks(final CommandSourceStack source, final Holder<WorldClock> clock, final int totalTicks) {
 +        ensureSynchronousContext(source, "time command set");
          ServerClockManager clockManager = source.getLevel().clockManager();
          long currentTotalTicks = clockManager.getTotalTicks(clock);
          org.bukkit.event.world.ClockTimeSkipEvent event = org.bukkit.craftbukkit.event.CraftEventFactory.createTimeSkipEvent(source, totalTicks - currentTotalTicks);
-@@ -179,13 +179,14 @@ public class TimeCommand {
+@@ -180,13 +181,14 @@ public class TimeCommand {
              newTotalTicks = currentTotalTicks + event.getSkipAmount();
              clockManager.setTotalTicks(clock, newTotalTicks);
          } else {
@@ -619,7 +528,7 @@ index 5d08e4e8ff1ac4f253d855f7f126110244d74847..07bd37b7891ec06cc45431ddd57ecd54
          ServerClockManager clockManager = source.getLevel().clockManager();
          org.bukkit.event.world.ClockTimeSkipEvent event = org.bukkit.craftbukkit.event.CraftEventFactory.createTimeSkipEvent(source, time);
          if (event.callEvent()) {
-@@ -197,7 +198,7 @@ public class TimeCommand {
+@@ -198,7 +200,7 @@ public class TimeCommand {
      }
  
      private static int setTimeToTimeMarker(final CommandSourceStack source, final Holder<WorldClock> clock, final ResourceKey<ClockTimeMarker> timeMarkerId) throws CommandSyntaxException {
@@ -628,15 +537,7 @@ index 5d08e4e8ff1ac4f253d855f7f126110244d74847..07bd37b7891ec06cc45431ddd57ecd54
          ServerClockManager clockManager = source.getLevel().clockManager();
          java.util.OptionalLong targetTime = clockManager.getTotalTicksToTimeMarker(clock, timeMarkerId);
          if (targetTime.isEmpty()) {
-@@ -208,7 +209,6 @@ public class TimeCommand {
-             if (event.callEvent()) {
-                 clockManager.setTotalTicks(clock, currentTime + event.getSkipAmount());
-             }
--            // Paper end - per-world time
-             source.sendSuccess(
-                 () -> Component.translatable("commands.time.set.time_marker", clock.getRegisteredName(), timeMarkerId.identifier().toString()), true
-             );
-@@ -217,17 +217,37 @@ public class TimeCommand {
+@@ -218,17 +220,37 @@ public class TimeCommand {
      }
  
      private static int setPaused(final CommandSourceStack source, final Holder<WorldClock> clock, final boolean paused) {
@@ -644,7 +545,7 @@ index 5d08e4e8ff1ac4f253d855f7f126110244d74847..07bd37b7891ec06cc45431ddd57ecd54
 +        ensureSynchronousContext(source, paused ? "time command pause" : "time command resume");
 +        source.getServer().clockManager().setPaused(clock, paused);
          source.sendSuccess(() -> Component.translatable(paused ? "commands.time.pause" : "commands.time.resume", clock.getRegisteredName()), true);
-         return 1;
+         return Command.SINGLE_SUCCESS;
      }
  
      private static int setRate(final CommandSourceStack source, final Holder<WorldClock> clock, final float rate) {
@@ -652,7 +553,7 @@ index 5d08e4e8ff1ac4f253d855f7f126110244d74847..07bd37b7891ec06cc45431ddd57ecd54
 +        ensureSynchronousContext(source, "time command rate");
 +        source.getServer().clockManager().setRate(clock, rate);
          source.sendSuccess(() -> Component.translatable("commands.time.rate", clock.getRegisteredName(), rate), true);
-         return 1;
+         return Command.SINGLE_SUCCESS;
      }
  
 +    private static void ensureSynchronousContext(final CommandSourceStack source, final String operation) {
@@ -677,10 +578,10 @@ index 5d08e4e8ff1ac4f253d855f7f126110244d74847..07bd37b7891ec06cc45431ddd57ecd54
          return Math.toIntExact(ticks % 2147483647L);
      }
 diff --git a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java b/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
-index 61c5e78cb39b6bf6caa350cee25f3a15695fa9e3..bfdc72002af8143eb7cbadfb8a4c6626d20f057b 100644
+index 912962e7ba35df57cbb157443fc8b7867a43d5dc..379f672e5ddde802bf727404cc730e48ea003953 100644
 --- a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
 +++ b/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
-@@ -81,8 +81,20 @@ public class MinecartCommandBlock extends AbstractMinecart {
+@@ -80,8 +80,20 @@ public class MinecartCommandBlock extends AbstractMinecart {
      @Override
      public void activateMinecart(final ServerLevel level, final int xt, final int yt, final int zt, final boolean state) {
          if (state && this.tickCount - this.lastActivated >= 4) {
@@ -703,10 +604,10 @@ index 61c5e78cb39b6bf6caa350cee25f3a15695fa9e3..bfdc72002af8143eb7cbadfb8a4c6626
      }
  
 diff --git a/net/minecraft/world/level/BaseCommandBlock.java b/net/minecraft/world/level/BaseCommandBlock.java
-index ea95136200a320fbebd5ef7dfdf68004787bb6ab..70e2f52aedbadef8df66354e7d084de9bdff763f 100644
+index fbe1cf1f02a27cbe0666fb83eb74c82df92785c9..3d5e1e7913f43551b5653c4424a6185a0496560f 100644
 --- a/net/minecraft/world/level/BaseCommandBlock.java
 +++ b/net/minecraft/world/level/BaseCommandBlock.java
-@@ -209,7 +209,7 @@ public abstract class BaseCommandBlock {
+@@ -208,7 +208,7 @@ public abstract class BaseCommandBlock {
          @Override
          public void sendSystemMessage(final Component message) {
              if (this.trackOutput && !this.closed) { // Paper - add back source when output disabled
@@ -716,7 +617,7 @@ index ea95136200a320fbebd5ef7dfdf68004787bb6ab..70e2f52aedbadef8df66354e7d084de9
                  BaseCommandBlock.this.onUpdated(this.level);
              }
 diff --git a/net/minecraft/world/level/block/CommandBlock.java b/net/minecraft/world/level/block/CommandBlock.java
-index 1c96b29d823c8979c3c4a08699f6318a063d41a2..38854242073c74017825dbffe000632cdd9aadf6 100644
+index 8cf4410a41ccd2f7e253e5400ca679a498aea4db..f126882c9e2556e812b4ac3c89a93cba437665b4 100644
 --- a/net/minecraft/world/level/block/CommandBlock.java
 +++ b/net/minecraft/world/level/block/CommandBlock.java
 @@ -91,6 +91,23 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {

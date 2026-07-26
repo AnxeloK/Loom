@@ -5,7 +5,7 @@ Subject: [PATCH] Cache stable chunk tick plans
 
 
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
-index ff4a10c5f858ab9bfea12f2b0c7ee937b13411b5..f2df01d9c197494e0decbee1ac995b387b64d13a 100644
+index a8ec8aca965346f5a8b147ed7889bc9350a5733e..dd7e1fb84788d159b7be4dc830f7662d041c2ce9 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
 @@ -8,6 +8,7 @@ import it.unimi.dsi.fastutil.objects.ObjectArrayList;

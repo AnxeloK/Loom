@@ -6,7 +6,7 @@ Subject: [PATCH] Route generic non-owner future waits through compatibility
 
 
 diff --git a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
-index a9f8180d042e516bcac4c1f26b441250b91bd1da..568c538a56589aeefa0d77e38d4bdd3bc187420c 100644
+index 4ec1abf30cbf4897ccd18a720f4c5a9ac92a4076..5d5df7b85a2a8e7a5c04ab4c49b96bd2ca4a8e0c 100644
 --- a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
 +++ b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
 @@ -2,6 +2,7 @@ package net.minecraft.server.threading.runtime;

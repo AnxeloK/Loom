@@ -171,12 +171,12 @@ index 47d6510a68f3a704712d4eba5bd466139f30a9f6..04f39c3859aa41944285cb9811adacfa
              // we do not return sends that we took from the allocation back because we want to limit the max send rate, not target it
              for (long i = 0; i < maxSendsThisTick; ++i) {
 diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
-index f278e1371fb73157010bcb117058239e4546a12a..d953bb4edb1ae93667a3c8865cb3d2fc1354ada6 100644
+index 45673626b7acd09cac5111cc24d2ed997d484c5d..e36483369fa969ee887fbfde9b068df24ae9611e 100644
 --- a/net/minecraft/network/Connection.java
 +++ b/net/minecraft/network/Connection.java
-@@ -28,6 +28,7 @@ import java.nio.channels.ClosedChannelException;
- import java.util.Objects;
+@@ -28,6 +28,7 @@ import java.util.Objects;
  import java.util.Queue;
+ import java.util.UUID;
  import java.util.concurrent.RejectedExecutionException;
 +import java.util.concurrent.atomic.AtomicInteger;
  import java.util.function.Consumer;
@@ -190,7 +190,7 @@ index f278e1371fb73157010bcb117058239e4546a12a..d953bb4edb1ae93667a3c8865cb3d2fc
      public Channel channel;
      public SocketAddress address;
      // Spigot start
-@@ -435,6 +437,29 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -434,6 +436,29 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          }
      }
  
@@ -220,7 +220,7 @@ index f278e1371fb73157010bcb117058239e4546a12a..d953bb4edb1ae93667a3c8865cb3d2fc
      public void runOnceConnected(final Consumer<Connection> action) {
          if (this.isConnected()) {
              this.flushQueue();
-@@ -449,7 +474,19 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -448,7 +473,19 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          if (this.channel.eventLoop().inEventLoop()) {
              this.doSendPacket(packet, listener, flush);
          } else {

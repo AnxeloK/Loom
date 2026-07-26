@@ -5,7 +5,7 @@ Subject: [PATCH] Actorize global-control services under owner-domain checks
 
 
 diff --git a/net/minecraft/server/ServerScoreboard.java b/net/minecraft/server/ServerScoreboard.java
-index 9bf09b888425e491072864265c8de3885154a0ba..187eeaad5c2bc84bba011df39d89578ad3cd0d0e 100644
+index 7ffd683c42557052d7bfa963d87e68f4e8f62d6c..ebafabd16b6244da3354c29e201e7aa03395ea2f 100644
 --- a/net/minecraft/server/ServerScoreboard.java
 +++ b/net/minecraft/server/ServerScoreboard.java
 @@ -211,9 +211,17 @@ public class ServerScoreboard extends Scoreboard {
@@ -64,7 +64,7 @@ index fb55ed68a1f8470b551030a27ca2656555c93d9e..36b514fe61b2f752fc5b9fe31aee940f
 +    }
  }
 diff --git a/net/minecraft/world/RandomSequences.java b/net/minecraft/world/RandomSequences.java
-index 08b59be32ff3fee1afd45f727e601fec3b4bfb0b..89bd1e93c0520cef6be09b1bfb5b136e3b7dd914 100644
+index a218431bd53512e1073a2df080d522026a541264..4a59e437a898fb10b08126b62f76be6c483649f9 100644
 --- a/net/minecraft/world/RandomSequences.java
 +++ b/net/minecraft/world/RandomSequences.java
 @@ -8,6 +8,7 @@ import java.util.Objects;
@@ -248,10 +248,10 @@ index 436ed3d95c21b8590664a125785545e0d07375fd..c6bdff28889a68dd96e7e810cf6b8276
              return new ClockNetworkState(this.totalTicks, this.partialTick, paused ? 0.0F : this.rate);
          }
 diff --git a/net/minecraft/world/entity/raid/Raid.java b/net/minecraft/world/entity/raid/Raid.java
-index 130cc6769c8a21ea0a0eabacacf77d9ef5e0dbb4..c1efcff5fbad3f9bacd8e2eab12dd6a3d3ef3393 100644
+index 16d789ffce1f645505f51a1e61944cd2bc0672c5..23c550c282b4fe6ec62d1c0fb25bf34ce1cdf468 100644
 --- a/net/minecraft/world/entity/raid/Raid.java
 +++ b/net/minecraft/world/entity/raid/Raid.java
-@@ -224,6 +224,26 @@ public class Raid {
+@@ -225,6 +225,26 @@ public class Raid {
          return this.groupsSpawned;
      }
  
@@ -279,7 +279,7 @@ index 130cc6769c8a21ea0a0eabacacf77d9ef5e0dbb4..c1efcff5fbad3f9bacd8e2eab12dd6a3
          return player -> {
              BlockPos pos = player.blockPosition();
 diff --git a/net/minecraft/world/entity/raid/Raids.java b/net/minecraft/world/entity/raid/Raids.java
-index d5d3c86327d8feefb9fa2a3330bcb4dbdc629342..01daaf99766314545d199013c06af213582633d4 100644
+index bc0f31a16f7b055e85f10eda377026a927032535..fa03cb63f3f6904432b4d481d0a1f3029f00f808 100644
 --- a/net/minecraft/world/entity/raid/Raids.java
 +++ b/net/minecraft/world/entity/raid/Raids.java
 @@ -63,6 +63,13 @@ public class Raids extends SavedData {
@@ -297,7 +297,7 @@ index d5d3c86327d8feefb9fa2a3330bcb4dbdc629342..01daaf99766314545d199013c06af213
          for (Entry<Raid> entry : this.raidMap.int2ObjectEntrySet()) {
              if (entry.getValue() == raid) {
 diff --git a/net/minecraft/world/item/crafting/RecipeManager.java b/net/minecraft/world/item/crafting/RecipeManager.java
-index 298908003d5422b8b58de631145fad381e8294c1..e55f857e42292be8cc7877f7357a4fd810ff3a96 100644
+index 6812ade4d9de26d507234b8357b109ec7e5cbb50..534b59f6bf3597f83e8ab4f2c4a1851f1b8faf06 100644
 --- a/net/minecraft/world/item/crafting/RecipeManager.java
 +++ b/net/minecraft/world/item/crafting/RecipeManager.java
 @@ -89,7 +89,10 @@ public class RecipeManager extends SimplePreparableReloadListener<RecipeMap> imp
@@ -313,18 +313,18 @@ index 298908003d5422b8b58de631145fad381e8294c1..e55f857e42292be8cc7877f7357a4fd8
          this.finalizeRecipeLoading();
      }
 diff --git a/net/minecraft/world/level/border/WorldBorder.java b/net/minecraft/world/level/border/WorldBorder.java
-index 01fa78999b0d206a74f64d46351547e673cb1eac..74721757bbcff2caa73a2fc509a15f0a8ee9a571 100644
+index a211de15d9a41291f384fc457bcf38146bbd4e42..cd85b5b2272a1a1c9539d471235e05076fd3f2b5 100644
 --- a/net/minecraft/world/level/border/WorldBorder.java
 +++ b/net/minecraft/world/level/border/WorldBorder.java
-@@ -7,6 +7,7 @@ import java.util.List;
- import java.util.Objects;
+@@ -6,6 +6,7 @@ import com.mojang.serialization.codecs.RecordCodecBuilder;
+ import java.util.List;
  import net.minecraft.core.BlockPos;
  import net.minecraft.resources.Identifier;
 +import net.minecraft.server.threading.runtime.DomainClock;
  import net.minecraft.util.Mth;
  import net.minecraft.util.datafix.DataFixTypes;
  import net.minecraft.world.entity.Entity;
-@@ -333,10 +334,11 @@ public class WorldBorder extends SavedData {
+@@ -330,10 +331,11 @@ public class WorldBorder extends SavedData {
  
      public void tick() {
          // Paper start - Prevent ticking virtual world borders multiple times per server tick
@@ -339,7 +339,7 @@ index 01fa78999b0d206a74f64d46351547e673cb1eac..74721757bbcff2caa73a2fc509a15f0a
          this.extent = this.extent.update();
      }
 diff --git a/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java b/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
-index 83a3ecf728be1129b07b5ab450861f2154cee92b..3d8a4126bc0c8d40fe09deddab8236e537631d28 100644
+index f05ab5fdab4cb587974e2864e859e49375f8165e..a30d3a8e5c6deaaa14ae19f03e1fdfe618b2ec2f 100644
 --- a/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
 +++ b/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
 @@ -7,6 +7,7 @@ import com.mojang.serialization.Codec;
@@ -358,7 +358,7 @@ index 83a3ecf728be1129b07b5ab450861f2154cee92b..3d8a4126bc0c8d40fe09deddab8236e5
      private final org.bukkit.craftbukkit.map.RenderData vanillaRender = new org.bukkit.craftbukkit.map.RenderData(); // Paper - Use Vanilla map renderer when possible
      public final List<MapItemSavedData.HoldingPlayer> carriedBy = Lists.newArrayList();
      public final Map<Player, MapItemSavedData.HoldingPlayer> carriedByPlayers = Maps.newHashMap();
-@@ -160,6 +162,35 @@ public class MapItemSavedData extends SavedData {
+@@ -158,6 +160,35 @@ public class MapItemSavedData extends SavedData {
          this.vanillaRender.buffer = colors.array(); // Paper - Use Vanilla map renderer when possible
      }
  
@@ -394,7 +394,7 @@ index 83a3ecf728be1129b07b5ab450861f2154cee92b..3d8a4126bc0c8d40fe09deddab8236e5
      public static MapItemSavedData createFresh(
          final double originX,
          final double originY,
-@@ -662,6 +693,9 @@ public class MapItemSavedData extends SavedData {
+@@ -654,6 +685,9 @@ public class MapItemSavedData extends SavedData {
      private record MapDecorationLocation(Holder<MapDecorationType> type, byte x, byte y, byte rot) {
      }
  
@@ -404,14 +404,14 @@ index 83a3ecf728be1129b07b5ab450861f2154cee92b..3d8a4126bc0c8d40fe09deddab8236e5
      public record MapPatch(int startX, int startY, int width, int height, byte[] mapColors) {
          public static final StreamCodec<ByteBuf, Optional<MapItemSavedData.MapPatch>> STREAM_CODEC = StreamCodec.of(
              MapItemSavedData.MapPatch::write, MapItemSavedData.MapPatch::read
-@@ -768,4 +802,5 @@ public class MapItemSavedData extends SavedData {
+@@ -760,4 +794,5 @@ public class MapItemSavedData extends SavedData {
          };
      }
      // Paper end - store target world by uuid in addition to dimension
 +
  }
 diff --git a/net/minecraft/world/level/storage/CommandStorage.java b/net/minecraft/world/level/storage/CommandStorage.java
-index a1244f1b92ab4cf7f404d46adda241851ddc6e90..5041e5a5e73e566c967406e1b2ca9820e2f8578f 100644
+index c99b9001cefdf6992dfcbe90294f697fe3b2eb64..c5b5e62344e38898852ff50611f9e073cb1ed4cb 100644
 --- a/net/minecraft/world/level/storage/CommandStorage.java
 +++ b/net/minecraft/world/level/storage/CommandStorage.java
 @@ -7,6 +7,7 @@ import java.util.Map;
@@ -445,7 +445,7 @@ index a1244f1b92ab4cf7f404d46adda241851ddc6e90..5041e5a5e73e566c967406e1b2ca9820
          public static final Codec<CommandStorage.Container> CODEC = RecordCodecBuilder.create(
              i -> i.group(Codec.unboundedMap(ExtraCodecs.RESOURCE_PATH_CODEC, CompoundTag.CODEC).fieldOf("contents").forGetter(container -> container.storage))
 diff --git a/net/minecraft/world/level/storage/SavedDataStorage.java b/net/minecraft/world/level/storage/SavedDataStorage.java
-index 971c3f3311f5eb132817589ee5b7f65736c25b76..e305e81ad573c0547015a65387dd9b2cf11440c1 100644
+index f359e53024019f35aaa5cd8477da708bda2fc57a..27bee69ba6c0630c83295fc3e7bc76f3f61a9bca 100644
 --- a/net/minecraft/world/level/storage/SavedDataStorage.java
 +++ b/net/minecraft/world/level/storage/SavedDataStorage.java
 @@ -28,6 +28,7 @@ import net.minecraft.nbt.NbtUtils;
@@ -456,17 +456,17 @@ index 971c3f3311f5eb132817589ee5b7f65736c25b76..e305e81ad573c0547015a65387dd9b2c
  import net.minecraft.util.FastBufferedInputStream;
  import net.minecraft.util.FileUtil;
  import net.minecraft.util.Mth;
-@@ -223,6 +224,7 @@ public class SavedDataStorage implements AutoCloseable {
+@@ -220,6 +221,7 @@ public class SavedDataStorage implements AutoCloseable {
  
      @Override
      public void close() {
 +        ensureOwner();
          if (this.closed) {
              throw new IllegalStateException("Trying to close SavedDataStorage when it is already closed");
-         } else {
-@@ -230,4 +232,11 @@ public class SavedDataStorage implements AutoCloseable {
-             this.closed = true;
          }
+@@ -227,4 +229,11 @@ public class SavedDataStorage implements AutoCloseable {
+         this.saveAndJoin();
+         this.closed = true;
      }
 +
 +    private static void ensureOwner() {
@@ -477,7 +477,7 @@ index 971c3f3311f5eb132817589ee5b7f65736c25b76..e305e81ad573c0547015a65387dd9b2c
 +    }
  }
 diff --git a/net/minecraft/world/scores/Scoreboard.java b/net/minecraft/world/scores/Scoreboard.java
-index 3013937e4b458cd46b6f3e72ce46692a43511423..34ad5e0784ee1d2ab1098c2248c7716e885aa790 100644
+index 4a15851bda30c918c58c96d2cb98b74f30db396c..85202868f1ba79e788e468f7cceba9bf1c3bb0ef 100644
 --- a/net/minecraft/world/scores/Scoreboard.java
 +++ b/net/minecraft/world/scores/Scoreboard.java
 @@ -49,6 +49,7 @@ public class Scoreboard {
@@ -487,7 +487,7 @@ index 3013937e4b458cd46b6f3e72ce46692a43511423..34ad5e0784ee1d2ab1098c2248c7716e
 +        ScoreboardThreading.ensureThreadAccess("add objective");
          if (this.objectivesByName.containsKey(name)) {
              throw new IllegalArgumentException("An objective with the name '" + name + "' already exists!");
-         } else {
+         }
 @@ -73,6 +74,7 @@ public class Scoreboard {
      }
  
@@ -496,7 +496,7 @@ index 3013937e4b458cd46b6f3e72ce46692a43511423..34ad5e0784ee1d2ab1098c2248c7716e
          final boolean canModify = forceWritable || !objective.getCriteria().isReadOnly();
          PlayerScores playerScore = this.getOrCreatePlayerInfo(scoreHolder.getScoreboardName());
          final MutableBoolean requiresSync = new MutableBoolean();
-@@ -191,6 +193,7 @@ public class Scoreboard {
+@@ -187,6 +189,7 @@ public class Scoreboard {
      }
  
      public void resetAllPlayerScores(final ScoreHolder player) {
@@ -504,7 +504,7 @@ index 3013937e4b458cd46b6f3e72ce46692a43511423..34ad5e0784ee1d2ab1098c2248c7716e
          PlayerScores removed = this.playerScores.remove(player.getScoreboardName());
          if (removed != null) {
              this.onPlayerRemoved(player);
-@@ -198,6 +201,7 @@ public class Scoreboard {
+@@ -194,6 +197,7 @@ public class Scoreboard {
      }
  
      public void resetSinglePlayerScore(final ScoreHolder player, final Objective objective) {
@@ -512,7 +512,7 @@ index 3013937e4b458cd46b6f3e72ce46692a43511423..34ad5e0784ee1d2ab1098c2248c7716e
          PlayerScores scores = this.playerScores.get(player.getScoreboardName());
          if (scores != null) {
              boolean hasRemoved = scores.remove(objective);
-@@ -218,6 +222,7 @@ public class Scoreboard {
+@@ -214,6 +218,7 @@ public class Scoreboard {
      }
  
      public void removeObjective(final Objective objective) {
@@ -520,7 +520,7 @@ index 3013937e4b458cd46b6f3e72ce46692a43511423..34ad5e0784ee1d2ab1098c2248c7716e
          this.objectivesByName.remove(objective.getName());
  
          for (DisplaySlot value : DisplaySlot.values()) {
-@@ -239,6 +244,7 @@ public class Scoreboard {
+@@ -235,6 +240,7 @@ public class Scoreboard {
      }
  
      public void setDisplayObjective(final DisplaySlot slot, final @Nullable Objective objective) {
@@ -528,7 +528,7 @@ index 3013937e4b458cd46b6f3e72ce46692a43511423..34ad5e0784ee1d2ab1098c2248c7716e
          this.displayObjectives.put(slot, objective);
      }
  
-@@ -251,6 +257,7 @@ public class Scoreboard {
+@@ -247,6 +253,7 @@ public class Scoreboard {
      }
  
      public PlayerTeam addPlayerTeam(final String name) {
@@ -536,7 +536,7 @@ index 3013937e4b458cd46b6f3e72ce46692a43511423..34ad5e0784ee1d2ab1098c2248c7716e
          PlayerTeam team = this.getPlayerTeam(name);
          if (team != null) {
              LOGGER.warn("Requested creation of existing team '{}'", name);
-@@ -264,6 +271,7 @@ public class Scoreboard {
+@@ -260,6 +267,7 @@ public class Scoreboard {
      }
  
      public void removePlayerTeam(final PlayerTeam team) {
@@ -544,7 +544,7 @@ index 3013937e4b458cd46b6f3e72ce46692a43511423..34ad5e0784ee1d2ab1098c2248c7716e
          this.teamsByName.remove(team.getName());
  
          for (String player : team.getPlayers()) {
-@@ -274,6 +282,7 @@ public class Scoreboard {
+@@ -270,6 +278,7 @@ public class Scoreboard {
      }
  
      public boolean addPlayerToTeam(final String player, final PlayerTeam team) {
@@ -552,7 +552,7 @@ index 3013937e4b458cd46b6f3e72ce46692a43511423..34ad5e0784ee1d2ab1098c2248c7716e
          if (this.getPlayersTeam(player) != null) {
              this.removePlayerFromTeam(player);
          }
-@@ -283,6 +292,7 @@ public class Scoreboard {
+@@ -279,6 +288,7 @@ public class Scoreboard {
      }
  
      public boolean removePlayerFromTeam(final String player) {
@@ -560,15 +560,15 @@ index 3013937e4b458cd46b6f3e72ce46692a43511423..34ad5e0784ee1d2ab1098c2248c7716e
          PlayerTeam team = this.getPlayersTeam(player);
          if (team != null) {
              this.removePlayerFromTeam(player, team);
-@@ -293,6 +303,7 @@ public class Scoreboard {
+@@ -289,6 +299,7 @@ public class Scoreboard {
      }
  
      public void removePlayerFromTeam(final String player, final PlayerTeam team) {
 +        ScoreboardThreading.ensureThreadAccess("remove player from team");
          if (this.getPlayersTeam(player) != team) {
              throw new IllegalStateException("Player is either on another team or not on any team. Cannot remove from team '" + team.getName() + "'.");
-         } else {
-@@ -344,6 +355,7 @@ public class Scoreboard {
+         }
+@@ -340,6 +351,7 @@ public class Scoreboard {
      }
  
      public void entityRemoved(final Entity entity) {

@@ -5,7 +5,7 @@ Subject: [PATCH] Reuse palette packing buffers
 
 
 diff --git a/net/minecraft/world/level/chunk/PalettedContainer.java b/net/minecraft/world/level/chunk/PalettedContainer.java
-index 09111c50cb34b643b7717f107a6f5bf6953bf0b2..158500a26f881d1bea62010b947d5785e5c820e6 100644
+index 26dbb9da7a7f50ec913b1226eff9e9ce6b4f3f12..9022152c70ebc77ae43dd3de6b86587b3caaaeac 100644
 --- a/net/minecraft/world/level/chunk/PalettedContainer.java
 +++ b/net/minecraft/world/level/chunk/PalettedContainer.java
 @@ -24,6 +24,10 @@ import org.jspecify.annotations.Nullable;
@@ -19,17 +19,17 @@ index 09111c50cb34b643b7717f107a6f5bf6953bf0b2..158500a26f881d1bea62010b947d5785
      public volatile PalettedContainer.Data<T> data; // Paper - optimise collisions - public
      private final Strategy<T> strategy;
      private final T @Nullable [] presetValues; // Paper - Anti-Xray - Add preset values
-@@ -334,7 +338,8 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
-                         Palette<T> oldPalette = new HashMapPalette<>(bitsOnDisc, paletteEntries);
-                         SimpleBitStorage oldStorage = new SimpleBitStorage(bitsOnDisc, entryCount, data);
-                         Palette<T> newPalette = storedConfiguration.createPalette(strategy, paletteEntries);
--                        int[] newContents = reencodeContents(oldStorage, oldPalette, newPalette);
-+                        int[] newContents = new int[oldStorage.getSize()];
-+                        reencodeContents(oldStorage, oldPalette, newPalette, newContents);
-                         palette = newPalette;
-                         storage = new SimpleBitStorage(storedConfiguration.bitsInMemory(), entryCount, newContents);
-                     }
-@@ -357,7 +362,12 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
+@@ -332,7 +336,8 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
+                     Palette<T> oldPalette = new HashMapPalette<>(bitsOnDisc, paletteEntries);
+                     SimpleBitStorage oldStorage = new SimpleBitStorage(bitsOnDisc, entryCount, data);
+                     Palette<T> newPalette = storedConfiguration.createPalette(strategy, paletteEntries);
+-                    int[] newContents = reencodeContents(oldStorage, oldPalette, newPalette);
++                    int[] newContents = new int[oldStorage.getSize()];
++                    reencodeContents(oldStorage, oldPalette, newPalette, newContents);
+                     palette = newPalette;
+                     storage = new SimpleBitStorage(storedConfiguration.bitsInMemory(), entryCount, newContents);
+                 }
+@@ -353,7 +358,12 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
              Palette<T> currentPalette = this.data.palette;
              HashMapPalette<T> newPalette = new HashMapPalette<>(currentStorage.getBits());
              int entryCount = strategy.entryCount();
@@ -43,8 +43,8 @@ index 09111c50cb34b643b7717f107a6f5bf6953bf0b2..158500a26f881d1bea62010b947d5785
              Configuration storedConfiguration = strategy.getConfigurationForPaletteSize(newPalette.getSize());
              int bitsOnDisc = storedConfiguration.bitsInStorage();
              Optional<LongStream> values;
-@@ -376,14 +386,18 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
-         return var14;
+@@ -370,14 +380,18 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
+         }
      }
  
 -    private static <T> int[] reencodeContents(final BitStorage storage, final Palette<T> oldPalette, final Palette<T> newPalette) {
@@ -65,7 +65,7 @@ index 09111c50cb34b643b7717f107a6f5bf6953bf0b2..158500a26f881d1bea62010b947d5785
              int id = buffer[index];
              if (id != lastReadId) {
                  lastReadId = id;
-@@ -392,8 +406,6 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
+@@ -386,8 +400,6 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
  
              buffer[index] = lastWrittenId;
          }

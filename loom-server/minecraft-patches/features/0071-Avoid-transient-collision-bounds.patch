@@ -5,7 +5,7 @@ Subject: [PATCH] Avoid transient collision bounds
 
 
 diff --git a/ca/spottedleaf/moonrise/patches/collisions/CollisionUtil.java b/ca/spottedleaf/moonrise/patches/collisions/CollisionUtil.java
-index de764da80793d272ff597b4a0742ce785838799a..058f4ec758e470f32d6fe0b552f1adb51c645068 100644
+index 15568f598b8c61cf92563b6a7f8cae526b84484e..ebd819146895072314021818596aa6671c6a1b97 100644
 --- a/ca/spottedleaf/moonrise/patches/collisions/CollisionUtil.java
 +++ b/ca/spottedleaf/moonrise/patches/collisions/CollisionUtil.java
 @@ -2013,16 +2013,21 @@ public final class CollisionUtil {
@@ -43,32 +43,32 @@ index de764da80793d272ff597b4a0742ce785838799a..058f4ec758e470f32d6fe0b552f1adb5
                                          }
                                      }
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 72e1d22d2fb49c1834d1911ad2d9de250c6d4cc7..7eb628dfe292a224b3c8c7797fc52d37dcaa8a37 100644
+index 3b137a93c58a668a4c2f387bfee5da83f74f122b..814cfa74cc8d1021983be98b8dde54978df5a085 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -1562,11 +1562,13 @@ public abstract class Entity
-                 return getOnPos;
-             } else {
-                 BlockState belowState = this.level().getBlockState(getOnPos);
--                return (!(offset <= 0.5) || !belowState.is(BlockTags.FENCES))
--                        && !belowState.is(BlockTags.WALLS)
--                        && !(belowState.getBlock() instanceof FenceGateBlock)
--                    ? getOnPos.atY(Mth.floor(this.position.y - offset))
--                    : getOnPos;
-+                if ((!(offset <= 0.5) || !belowState.is(BlockTags.FENCES))
-+                    && !belowState.is(BlockTags.WALLS)
-+                    && !(belowState.getBlock() instanceof FenceGateBlock)) {
-+                    final int onY = Mth.floor(this.position.y - offset);
-+                    return getOnPos.getY() == onY ? getOnPos : getOnPos.atY(onY);
-+                }
-+                return getOnPos;
+@@ -1625,11 +1625,13 @@ public abstract class Entity
              }
+ 
+             BlockState belowState = this.level().getBlockState(getOnPos);
+-            return (!(offset <= 0.5) || !belowState.is(BlockTags.FENCES))
+-                    && !belowState.is(BlockTags.WALLS)
+-                    && !(belowState.getBlock() instanceof FenceGateBlock)
+-                ? getOnPos.atY(Mth.floor(this.position.y - offset))
+-                : getOnPos;
++            if ((!(offset <= 0.5) || !belowState.is(BlockTags.FENCES))
++                && !belowState.is(BlockTags.WALLS)
++                && !(belowState.getBlock() instanceof FenceGateBlock)) {
++                final int onY = Mth.floor(this.position.y - offset);
++                return getOnPos.getY() == onY ? getOnPos : getOnPos.atY(onY);
++            }
++            return getOnPos;
          } else {
              int xTruncated = Mth.floor(this.position.x);
-@@ -3107,21 +3109,30 @@ public abstract class Entity
-             return false;
+             int yTruncatedBelow = Mth.floor(this.position.y - offset);
+@@ -3193,21 +3195,30 @@ public abstract class Entity
          }
  
+         // Paper start - optimise collisions
 -        final double reducedWith = (double)(this.dimensions.width() * 0.8F);
 -        final AABB boundingBox = AABB.ofSize(this.getEyePosition(), reducedWith, 1.0E-6D, reducedWith);
 +        final double reducedWidth = (double)(this.dimensions.width() * 0.8F);
@@ -105,7 +105,7 @@ index 72e1d22d2fb49c1834d1911ad2d9de250c6d4cc7..7eb628dfe292a224b3c8c7797fc52d37
  
          final int minChunkX = minBlockX >> 4;
          final int minChunkY = minBlockY >> 4;
-@@ -3188,16 +3199,24 @@ public abstract class Entity
+@@ -3274,16 +3285,24 @@ public abstract class Entity
                                      continue;
                                  }
  
@@ -132,7 +132,7 @@ index 72e1d22d2fb49c1834d1911ad2d9de250c6d4cc7..7eb628dfe292a224b3c8c7797fc52d37
                                  if (ca.spottedleaf.moonrise.patches.collisions.CollisionUtil.voxelShapeIntersectNoEmpty(collisionShape, toCollide)) {
                                      return true;
                                  }
-@@ -4722,18 +4741,37 @@ public abstract class Entity
+@@ -4797,18 +4816,37 @@ public abstract class Entity
                  maxX = bb.maxX,
                  maxY = bb.maxY,
                  maxZ = bb.maxZ;

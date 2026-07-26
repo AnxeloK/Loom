@@ -6,10 +6,10 @@ Subject: [PATCH] Route chunk readiness and owner-context bridges through
 
 
 diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
-index ce2d08456ed4ca4c2d349bd9043fa573bc9992b3..834942432c96af7a16de7a764b8dfad9321008de 100644
+index f2fb701db8c171e1639c53d437f18c9104dfe07b..ae5d61788e44603ab3031435817f0359aed95e99 100644
 --- a/net/minecraft/network/PacketProcessor.java
 +++ b/net/minecraft/network/PacketProcessor.java
-@@ -102,18 +102,23 @@ public class PacketProcessor implements AutoCloseable {
+@@ -101,18 +101,23 @@ public class PacketProcessor implements AutoCloseable {
              final int minChunkZ = chunkPos.z() - radius;
              final int maxChunkX = chunkPos.x() + radius;
              final int maxChunkZ = chunkPos.z() + radius;
@@ -45,10 +45,10 @@ index ce2d08456ed4ca4c2d349bd9043fa573bc9992b3..834942432c96af7a16de7a764b8dfad9
              return;
          }
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 0809ea2e5e0975e8549fc3e1cd50dff6f72f90a2..c912bcbd6b0bfd723db88478b21d06c32122243e 100644
+index bcedec73102ab35d0c84646c9a82a02384f7da6c..41c5b0d8915d81d1b51de769252a7d83aca6276f 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2778,7 +2778,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2748,7 +2748,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      // Paper start - rewrite chunk system
      @Override
      public boolean isSameThread() {
@@ -58,10 +58,10 @@ index 0809ea2e5e0975e8549fc3e1cd50dff6f72f90a2..c912bcbd6b0bfd723db88478b21d06c3
      // Paper end - rewrite chunk system
  
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index f3ecddedbe3a8b963c9bf46e62820cda65de6755..d34e038ac6309359116ea65c735b5c69ecc50090 100644
+index c3eacd2e085437557de1dbdef0abc23ba7d180bd..256bf100bbb340aeb383145cea1e5ab9d2994e17 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
-@@ -939,16 +939,22 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -918,16 +918,22 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
              return false;
          }
  
@@ -86,7 +86,7 @@ index f3ecddedbe3a8b963c9bf46e62820cda65de6755..d34e038ac6309359116ea65c735b5c69
          return true;
      }
  
-@@ -1778,24 +1784,35 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1764,24 +1770,35 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
          final int targetMinChunkZ = targetChunkZ - ownerRadius;
          final int targetMaxChunkX = targetChunkX + ownerRadius;
          final int targetMaxChunkZ = targetChunkZ + ownerRadius;
@@ -140,10 +140,10 @@ index f3ecddedbe3a8b963c9bf46e62820cda65de6755..d34e038ac6309359116ea65c735b5c69
          }
      }
 diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-index 7da3c00615ed46f013eb1be87d5f79c184e6edf5..346d2368831df6434cdb7fa06c31fee111b62893 100644
+index 7f5dc445c930a36afaad97782b856f74e4803606..c7cb62fefffb38b272b14bb7cea527df1e961bac 100644
 --- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-@@ -1967,16 +1967,22 @@ public class ServerGamePacketListenerImpl
+@@ -1946,16 +1946,22 @@ public class ServerGamePacketListenerImpl
          final PositionMoveRotation absoluteDestination = PositionMoveRotation.calculateAbsolute(PositionMoveRotation.of(this.player), destination, relatives);
          final Vec3 position = absoluteDestination.position();
          final ServerLevel level = this.player.level();
@@ -168,7 +168,7 @@ index 7da3c00615ed46f013eb1be87d5f79c184e6edf5..346d2368831df6434cdb7fa06c31fee1
      }
  
      private boolean waitForPlayerChunkIfUnloaded(final ServerLevel level) {
-@@ -1985,19 +1991,25 @@ public class ServerGamePacketListenerImpl
+@@ -1964,19 +1970,25 @@ public class ServerGamePacketListenerImpl
              return false;
          }
  
@@ -197,10 +197,10 @@ index 7da3c00615ed46f013eb1be87d5f79c184e6edf5..346d2368831df6434cdb7fa06c31fee1
      }
  
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index a7e9c62b6d74db838347ccd40f18145e0f4cba73..c95020c8b2207f6409c99d41ab99fdc754bf0029 100644
+index 321afd76dddce2fc980cfa2c874fd22bbd37e384..d114bf9e3e82bcb528b12e1c768c53b9b8a6de2e 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
-@@ -162,34 +162,42 @@ public abstract class PlayerList {
+@@ -161,34 +161,42 @@ public abstract class PlayerList {
          final int minChunkZ = chunkPos.z() - radius;
          final int maxChunkX = chunkPos.x() + radius;
          final int maxChunkZ = chunkPos.z() + radius;
@@ -650,10 +650,10 @@ index 5538a93f1ae5af424432e78d652fcf451b5946b3..a8081eee40c792a49fa300b33be0371d
          return this.portal.getLocalTransition();
      }
 diff --git a/net/minecraft/world/level/block/EndPortalBlock.java b/net/minecraft/world/level/block/EndPortalBlock.java
-index 60fc900fee1077a797ea3a0ae78f058c52d63c24..9320d3c89b7d618766878d8e2d5ee50957c41e6b 100644
+index 27e1443322c79d94a0669d617052ba7f20d2cdfe..ba47f21de3dbb698342b29c63d47642f2041afe9 100644
 --- a/net/minecraft/world/level/block/EndPortalBlock.java
 +++ b/net/minecraft/world/level/block/EndPortalBlock.java
-@@ -219,14 +219,20 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
+@@ -210,14 +210,20 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
                  });
          });
  
@@ -677,10 +677,10 @@ index 60fc900fee1077a797ea3a0ae78f058c52d63c24..9320d3c89b7d618766878d8e2d5ee509
      }
  
 diff --git a/net/minecraft/world/level/block/NetherPortalBlock.java b/net/minecraft/world/level/block/NetherPortalBlock.java
-index 5142942a5b7ba5ead3fad1abb9409d0c64ea7e03..63fb4fb57522ddb1cf277b087d510173a8094028 100644
+index ff7926d06a96069e7dabd1b147393ae91b5a3528..52f265007155d6def7762763deaab0f677797986 100644
 --- a/net/minecraft/world/level/block/NetherPortalBlock.java
 +++ b/net/minecraft/world/level/block/NetherPortalBlock.java
-@@ -218,14 +218,20 @@ public class NetherPortalBlock extends Block implements Portal {
+@@ -220,14 +220,20 @@ public class NetherPortalBlock extends Block implements Portal {
              }
          });
  

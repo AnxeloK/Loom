@@ -5,10 +5,10 @@ Subject: [PATCH] Confine hopper tick state
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 562de80d567a72eea522dc13ef5e7cfa28fe0356..52eefa22787c45153feae72a45102ae3ee252375 100644
+index 802c4c91e0f076cc1c4a043f294887e6321b53a6..d8a64e4c2ab81ccd5feaa53d6bf97682df77d88e 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2052,7 +2052,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2018,7 +2018,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              level.hasPhysicsEvent = org.bukkit.event.block.BlockPhysicsEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - BlockPhysicsEvent
              level.hasEntityMoveEvent = io.papermc.paper.event.entity.EntityMoveEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - Add EntityMoveEvent
              level.updateLagCompensationTick(); // Paper - lag compensation
@@ -18,10 +18,10 @@ index 562de80d567a72eea522dc13ef5e7cfa28fe0356..52eefa22787c45153feae72a45102ae3
          }
          net.minecraft.server.threading.TickRegions.tickWorldsInParallel(parallelLevels, level -> {
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index dca78a87b16ba370d3b43cf2bc8e3bc55cfe9bdd..feb26eff43ec71f91b8c3e7cf5302146a94f59af 100644
+index 785e91ad0c9d5a76ae1927dc24f13cbb9383754b..c2d31016ad2a5e5232173a70aefbf975c4fd45e7 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
-@@ -173,6 +173,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -174,6 +174,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
  
      public static @Nullable BlockPos lastPhysicsProblem; // Spigot
      public final Map<ServerExplosion.CacheKey, Float> explosionDensityCache = new java.util.HashMap<>(); // Paper - Optimize explosions
@@ -30,7 +30,7 @@ index dca78a87b16ba370d3b43cf2bc8e3bc55cfe9bdd..feb26eff43ec71f91b8c3e7cf5302146
  
      public CraftWorld getWorld() {
 diff --git a/net/minecraft/world/level/block/entity/BlockEntity.java b/net/minecraft/world/level/block/entity/BlockEntity.java
-index 865f08c92946010a36947b7766b957f4c0517285..07267cff3eb5ab2dee9e8aa285697639df27d2da 100644
+index ae0df53c3be7ebcf48886adbedfaa2c071a94023..80ff0ef452acd2480d4c49a543d91ad3b16851c6 100644
 --- a/net/minecraft/world/level/block/entity/BlockEntity.java
 +++ b/net/minecraft/world/level/block/entity/BlockEntity.java
 @@ -1,5 +1,6 @@
@@ -40,7 +40,7 @@ index 865f08c92946010a36947b7766b957f4c0517285..07267cff3eb5ab2dee9e8aa285697639
  import com.mojang.logging.LogUtils;
  import com.mojang.serialization.Codec;
  import java.util.HashSet;
-@@ -40,7 +41,6 @@ import org.jspecify.annotations.Nullable;
+@@ -39,7 +40,6 @@ import org.jspecify.annotations.Nullable;
  import org.slf4j.Logger;
  
  public abstract class BlockEntity implements DebugValueSource, TypedInstance<BlockEntityType<?>> {
@@ -48,7 +48,7 @@ index 865f08c92946010a36947b7766b957f4c0517285..07267cff3eb5ab2dee9e8aa285697639
      // CraftBukkit start - data containers
      private static final org.bukkit.craftbukkit.persistence.CraftPersistentDataTypeRegistry DATA_TYPE_REGISTRY = new org.bukkit.craftbukkit.persistence.CraftPersistentDataTypeRegistry();
      public final org.bukkit.craftbukkit.persistence.CraftPersistentDataContainer persistentDataContainer;
-@@ -230,7 +230,9 @@ public abstract class BlockEntity implements DebugValueSource, TypedInstance<Blo
+@@ -210,7 +210,9 @@ public abstract class BlockEntity implements DebugValueSource, TypedInstance<Blo
  
      public void setChanged() {
          if (this.level != null) {
@@ -60,7 +60,7 @@ index 865f08c92946010a36947b7766b957f4c0517285..07267cff3eb5ab2dee9e8aa285697639
          }
      }
 diff --git a/net/minecraft/world/level/block/entity/HopperBlockEntity.java b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
-index 085ed0eecc47cf9c0fa9fc26b3f7b8522610a941..868b5c96d09e6921241ae9d41472a695c5187e74 100644
+index fef616d7b92454a721f7a14941b62a8963080cc5..4b87eb54828f422b627e59a2714179e58c8617e8 100644
 --- a/net/minecraft/world/level/block/entity/HopperBlockEntity.java
 +++ b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
 @@ -1,5 +1,6 @@

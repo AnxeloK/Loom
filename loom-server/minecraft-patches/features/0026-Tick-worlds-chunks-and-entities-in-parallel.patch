@@ -5,10 +5,10 @@ Subject: [PATCH] Tick worlds, chunks, and entities in parallel
 
 
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
-index 56e71bf01f22579c294c6b33450bd282e082f6ae..7b88008f0a69bd522530abe9db96825ae4a2b510 100644
+index 328784ba08236553e49d62320b79f7222292412f..9448f253d2a0b6806a4c3bae5f99d966978f41ad 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
-@@ -954,7 +954,9 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+@@ -958,7 +958,9 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
          }
      }
  
@@ -19,7 +19,7 @@ index 56e71bf01f22579c294c6b33450bd282e082f6ae..7b88008f0a69bd522530abe9db96825a
  
          public final Entity entity;
  
-@@ -964,6 +966,23 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+@@ -968,6 +970,23 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
  
          @Override
          public void onMove() {
@@ -43,7 +43,7 @@ index 56e71bf01f22579c294c6b33450bd282e082f6ae..7b88008f0a69bd522530abe9db96825a
              final Entity entity = this.entity;
              final Visibility oldVisibility = getEntityStatus(entity);
              final ChunkEntitySlices newSlices = EntityLookup.this.moveEntity(this.entity);
-@@ -979,6 +998,21 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+@@ -983,6 +1002,21 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
  
          @Override
          public void onRemove(final Entity.RemovalReason reason) {
@@ -65,7 +65,7 @@ index 56e71bf01f22579c294c6b33450bd282e082f6ae..7b88008f0a69bd522530abe9db96825a
              final Entity entity = this.entity;
              EntityLookup.this.checkThread(entity, "Cannot remove entity off-main");
              final Visibility tickingState = EntityLookup.getEntityStatus(entity);
-@@ -991,6 +1025,18 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+@@ -995,6 +1029,18 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
  
              this.entity.setLevelCallback(NoOpCallback.INSTANCE);
          }
@@ -85,10 +85,10 @@ index 56e71bf01f22579c294c6b33450bd282e082f6ae..7b88008f0a69bd522530abe9db96825a
  
      protected static final class NoOpCallback implements EntityInLevelCallback {
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 1c69ded5a8f948157a70535c32d452ee4d8522dd..3b2451b173b4bbe4f929c3ffa7c9ed8b7023bbf3 100644
+index 5fb98e98f87d03a472acba516b004ffd4c15c7de..f6b2a36b7ad6ed9f7f576d19be5e0d3d3f521343 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -480,6 +480,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -479,6 +479,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          // if we execute too many tasks, that's fine - we have logic to correctly handle overuse of allocated time.
          boolean executed = false;
          for (final ServerLevel world : this.getAllLevels()) {
@@ -101,7 +101,7 @@ index 1c69ded5a8f948157a70535c32d452ee4d8522dd..3b2451b173b4bbe4f929c3ffa7c9ed8b
              long currTime = System.nanoTime();
              if (currTime - ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)world).moonrise$getLastMidTickFailure() <= TASK_EXECUTION_FAILURE_BACKOFF) {
                  continue;
-@@ -2031,32 +2037,35 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1997,21 +2003,28 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.updateEffectiveRespawnData();
  
          this.isIteratingOverLevels = true; // Paper - Throw exception on world create while being ticked
@@ -124,20 +124,20 @@ index 1c69ded5a8f948157a70535c32d452ee4d8522dd..3b2451b173b4bbe4f929c3ffa7c9ed8b
              net.minecraft.server.threading.TickRegions.tickWorld(level);
              final net.minecraft.server.threading.TickRegions.RegionContext tickRegionContext =
                  net.minecraft.server.threading.TickRegions.pushLevelContext(level);
--
+ 
              try {
                  level.tick(haveTime);
--            } catch (Throwable var7) {
--                CrashReport report = CrashReport.forThrowable(var7, "Exception ticking world");
+-            } catch (Throwable t) {
+-                CrashReport report = CrashReport.forThrowable(t, "Exception ticking world");
 +            } catch (Throwable throwable) {
 +                CrashReport report = CrashReport.forThrowable(throwable, "Exception ticking world");
                  level.fillReportDetails(report);
                  throw new ReportedException(report);
              } finally {
-                 net.minecraft.server.threading.TickRegions.popContext(tickRegionContext);
+@@ -2019,10 +2032,8 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              }
              net.minecraft.server.threading.TickRegions.postWorldTick(level);
--
+ 
 -            profiler.pop();
 -            profiler.pop();
              level.explosionDensityCache.clear(); // Paper - Optimize explosions
@@ -147,7 +147,7 @@ index 1c69ded5a8f948157a70535c32d452ee4d8522dd..3b2451b173b4bbe4f929c3ffa7c9ed8b
  
          profiler.popPush("connection");
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
-index c0c5d5f8f26e910274a5be116eddd02c6dc404af..55b1da8af2637207725ce993c6ed585154d6da84 100644
+index 2528158d9b6aaeb2fb35f6a77ad130cc354104a7..e49147a4ae0288148da1cb0a0f2378fa519739ee 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
 @@ -174,6 +174,54 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
@@ -215,10 +215,10 @@ index c0c5d5f8f26e910274a5be116eddd02c6dc404af..55b1da8af2637207725ce993c6ed5851
      // Paper end - chunk tick iteration optimisations
  
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index d9f12606d27e2c8e6e780f7f9f7be9799bb8b573..f485932561d503ff896703f07fe03812c85ded98 100644
+index 56b83717ea5e26d70ef16b5c446407f3d0a6ccfa..c363b46cb2dc01d1f0975fe6c30af89a6b18e1af 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -914,40 +914,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -930,40 +930,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
                  loomDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_ACTIVATION, now - loomEntitySectionStart);
                  loomEntitySectionStart = now;
              }
@@ -262,7 +262,7 @@ index d9f12606d27e2c8e6e780f7f9f7be9799bb8b573..f485932561d503ff896703f07fe03812
              profiler.popPush("blockEntities");
              final long loomBlockEntitiesStart = loomDiagnostics == null ? 0L : System.nanoTime();
              this.tickBlockEntities();
-@@ -1064,7 +1033,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1077,7 +1046,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      private void optimiseRandomTick(final LevelChunk chunk, final int tickSpeed) {
          final LevelChunkSection[] sections = chunk.getSections();
          final int minSection = ca.spottedleaf.moonrise.common.util.WorldUtil.getMinSection((ServerLevel)(Object)this);
@@ -275,7 +275,7 @@ index d9f12606d27e2c8e6e780f7f9f7be9799bb8b573..f485932561d503ff896703f07fe03812
          final boolean doubleTickFluids = !ca.spottedleaf.moonrise.common.PlatformHooks.get().configFixMC224294();
  
          final ChunkPos cpos = chunk.getPos();
-@@ -1111,7 +1084,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1124,7 +1097,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      // Paper end - optimise random ticking
  
      public void tickChunk(final LevelChunk chunk, final int tickSpeed) {
@@ -284,7 +284,7 @@ index d9f12606d27e2c8e6e780f7f9f7be9799bb8b573..f485932561d503ff896703f07fe03812
          ChunkPos chunkPos = chunk.getPos();
          int minX = chunkPos.getMinBlockX();
          int minZ = chunkPos.getMinBlockZ();
-@@ -1484,6 +1457,115 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1497,6 +1470,115 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      }
      // Paper end - log detailed entity tick information
  
@@ -400,7 +400,7 @@ index d9f12606d27e2c8e6e780f7f9f7be9799bb8b573..f485932561d503ff896703f07fe03812
      public void tickNonPassenger(final Entity entity) {
          // Paper start - log detailed entity tick information
          ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(entity, "Cannot tick an entity off-main");
-@@ -1677,6 +1759,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1690,6 +1772,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
      @Override
      public boolean addFreshEntity(final Entity entity, final org.bukkit.event.entity.CreatureSpawnEvent.@Nullable SpawnReason reason) {
@@ -412,23 +412,32 @@ index d9f12606d27e2c8e6e780f7f9f7be9799bb8b573..f485932561d503ff896703f07fe03812
          return this.addEntity(entity, reason);
          // CraftBukkit end
      }
-@@ -2335,8 +2422,15 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
-         } else {
-             for (ServerLevel otherLevel : this.getServer().getAllLevels()) {
-                 if (otherLevel != this) {
-+                    final boolean ownsOther = net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(otherLevel, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE);
-+                    // Loom - another world may be ticking on its own thread and hold its lease. Claiming it
-+                    // here for a cross-dimension read would conflict (or risk an owner deadlock), so skip that
-+                    // dimension - best-effort and non-corrupting.
-+                    if (!ownsOther) {
-+                        continue;
-+                    }
-                     final Entity otherEntity;
--                    if (net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(otherLevel, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
-+                    if (ownsOther) {
-                         otherEntity = otherLevel.getEntity(uuid);
-                     } else {
-                         final net.minecraft.server.threading.TickRegions.RegionContext otherLevelContext =
+@@ -2349,18 +2436,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+ 
+         for (ServerLevel otherLevel : this.getServer().getAllLevels()) {
+             if (otherLevel != this) {
+-                final Entity otherEntity;
+-                if (net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(otherLevel, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
+-                    otherEntity = otherLevel.getEntity(uuid);
+-                } else {
+-                    final net.minecraft.server.threading.TickRegions.RegionContext otherLevelContext =
+-                        net.minecraft.server.threading.TickRegions.pushLevelContext(otherLevel);
+-                    try {
+-                        otherEntity = otherLevel.getEntity(uuid);
+-                    } finally {
+-                        net.minecraft.server.threading.TickRegions.popContext(otherLevelContext);
+-                    }
++                final boolean ownsOther = net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(otherLevel, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE);
++                // Loom - another world may be ticking on its own thread and hold its lease. Claiming it
++                // here for a cross-dimension read would conflict (or risk an owner deadlock), so skip that
++                // dimension - best-effort and non-corrupting.
++                if (!ownsOther) {
++                    continue;
+                 }
++                final Entity otherEntity = otherLevel.getEntity(uuid);
+                 if (otherEntity != null) {
+                     return otherEntity;
+                 }
 diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
 new file mode 100644
 index 0000000000000000000000000000000000000000..56de9e0ec3ef2dd8d2df8d780fcd89f5accbafb9
@@ -1151,7 +1160,7 @@ index 2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791..a8ff6c10f3e04ee120364ff0c6557c98
  
          private void absorb(final RegionBoundBucket other) {
 diff --git a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
-index 568c538a56589aeefa0d77e38d4bdd3bc187420c..d912b312127e979d261a5a1249ed4316d209dc2d 100644
+index 5d5df7b85a2a8e7a5c04ab4c49b96bd2ca4a8e0c..1b39a05db2daed6a2267725f559b88e5c8b131a0 100644
 --- a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
 +++ b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
 @@ -30,6 +30,16 @@ public final class ThreadedRegionsBlockingBarrier {
@@ -1169,10 +1178,10 @@ index 568c538a56589aeefa0d77e38d4bdd3bc187420c..d912b312127e979d261a5a1249ed4316
 +    }
 +
      public static boolean isShutdownThread(final MinecraftServer server) {
-         return Thread.currentThread() == server.serverThread;
+         return Thread.currentThread() == server.getRunningThread();
      }
 diff --git a/net/minecraft/world/entity/ai/sensing/Sensor.java b/net/minecraft/world/entity/ai/sensing/Sensor.java
-index 8386e433dd1906bb45f8f5c9bfcd1425289ef91e..e0fecd726095a1fee1262d4c5359d3dc7f525910 100644
+index 745f26d36a30a9f570bc989b97002c2723db4ba8..1c698d2d2cb9f2693876839b5a2fd0b16e28d02a 100644
 --- a/net/minecraft/world/entity/ai/sensing/Sensor.java
 +++ b/net/minecraft/world/entity/ai/sensing/Sensor.java
 @@ -13,19 +13,23 @@ import net.minecraft.world.entity.ai.targeting.TargetingConditions;
@@ -1256,15 +1265,15 @@ index 8386e433dd1906bb45f8f5c9bfcd1425289ef91e..e0fecd726095a1fee1262d4c5359d3dc
 +            : ATTACK_TARGET_CONDITIONS_IGNORE_LINE_OF_SIGHT.get().test(level, body, target);
      }
  
-     static <T, U> BiPredicate<T, U> rememberPositives(final int invocations, final BiPredicate<T, U> predicate) {
+     public static <T, U> BiPredicate<T, U> rememberPositives(final int invocations, final BiPredicate<T, U> predicate) {
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index 49f828e1fdfd7fba8752c67c05cfc322332c3fa0..7946114fe520b3a5a7e1b9e1f113b7a1b9e5f174 100644
+index b8de0a50895176645c4828cb49acc03074b40b0d..3a800d1f1256a793c229a4a1ae22979278119f68 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
-@@ -1050,6 +1050,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1054,6 +1054,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
  
      @Override
-     public boolean setBlock(final BlockPos pos, final BlockState blockState, @Block.UpdateFlags final int updateFlags, final int updateLimit) {
+     public boolean setBlock(final BlockPos pos, final BlockState blockState, final @Block.UpdateFlags int updateFlags, final int updateLimit) {
 +        // Loom - during parallel chunk ticking, buffer the write and apply it serially after the parallel
 +        // phase instead of mutating another region's chunk / shared world state off-thread.
 +        if (net.minecraft.server.threading.RegionTickStaging.stageSetBlock(this, pos, blockState, updateFlags, updateLimit)) {
@@ -1273,28 +1282,27 @@ index 49f828e1fdfd7fba8752c67c05cfc322332c3fa0..7946114fe520b3a5a7e1b9e1f113b7a1
          // CraftBukkit start - tree generation
          if (this.captureTreeGeneration) {
              // Paper start - Protect Bedrock and End Portal/Frames from being destroyed
-@@ -1315,11 +1320,71 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
-         if (!this.isInValidBounds(pos)) {
+@@ -1320,10 +1325,70 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
              return Blocks.VOID_AIR.defaultBlockState();
-         } else {
-+            // Loom start - allow cross-region block-state READS under parallel ticking.
-+            // Block writes during the parallel compute phase are STAGED (see Level#setBlock ->
-+            // RegionTickStaging) and only applied serially on the owner thread after the parallel join, so a
-+            // section's PalettedContainer is frozen during the compute phase: reading another region's
-+            // already-loaded block-state is a consistent, non-torn read. The only thing the owner-domain machinery
-+            // legitimately blocks here is FORCING a synchronous chunk load/generate mid-tick (that cannot be
-+            // synchronously awaited off the startup barrier, see ThreadedRegionsBlockingBarrier, and off-owner it
-+            // would also claim a conflicting full-level lease) - so a cross-region/unloaded read serves the loaded
-+            // chunk directly or the default state, and never forces a mid-tick load. With parallel execution
-+            // disabled this returns null immediately and the serial path below is byte-identical.
-+            final BlockState relaxed = this.loomRelaxedBlockStateRead(pos);
-+            if (relaxed != null) {
-+                return relaxed;
-+            }
-+            // Loom end
-             ChunkAccess chunk = this.getChunk(pos.getX() >> 4, pos.getZ() >> 4, ChunkStatus.FULL, true); // Paper - manually inline to reduce hops and avoid unnecessary null check to reduce total byte code size, this should never return null and if it does we will see it the next line but the real stack trace will matter in the chunk engine
-             return chunk.getBlockState(pos);
          }
+ 
++        // Loom start - allow cross-region block-state READS under parallel ticking.
++        // Block writes during the parallel compute phase are STAGED (see Level#setBlock ->
++        // RegionTickStaging) and only applied serially on the owner thread after the parallel join, so a
++        // section's PalettedContainer is frozen during the compute phase: reading another region's
++        // already-loaded block-state is a consistent, non-torn read. The only thing the owner-domain machinery
++        // legitimately blocks here is FORCING a synchronous chunk load/generate mid-tick (that cannot be
++        // synchronously awaited off the startup barrier, see ThreadedRegionsBlockingBarrier, and off-owner it
++        // would also claim a conflicting full-level lease) - so a cross-region/unloaded read serves the loaded
++        // chunk directly or the default state, and never forces a mid-tick load. With parallel execution
++        // disabled this returns null immediately and the serial path below is byte-identical.
++        final BlockState relaxed = this.loomRelaxedBlockStateRead(pos);
++        if (relaxed != null) {
++            return relaxed;
++        }
++        // Loom end
+         ChunkAccess chunk = this.getChunk(pos.getX() >> 4, pos.getZ() >> 4, ChunkStatus.FULL, true); // Paper - manually inline to reduce hops and avoid unnecessary null check to reduce total byte code size, this should never return null and if it does we will see it the next line but the real stack trace will matter in the chunk engine
+         return chunk.getBlockState(pos);
      }
  
 +    // Loom start - block-state READ relaxation under parallel ticking
@@ -1345,7 +1353,7 @@ index 49f828e1fdfd7fba8752c67c05cfc322332c3fa0..7946114fe520b3a5a7e1b9e1f113b7a1
      @Override
      public FluidState getFluidState(final BlockPos pos) {
          if (!this.isInValidBounds(pos)) {
-@@ -1524,7 +1589,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1528,7 +1593,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
              entity.discard(org.bukkit.event.entity.EntityRemoveEvent.Cause.DISCARD);
              // Paper end - Prevent block entity and entity crashes
          }
@@ -1360,10 +1368,10 @@ index 49f828e1fdfd7fba8752c67c05cfc322332c3fa0..7946114fe520b3a5a7e1b9e1f113b7a1
  
      // Paper start - Option to prevent armor stands from doing entity lookups
 diff --git a/net/minecraft/world/scores/Scoreboard.java b/net/minecraft/world/scores/Scoreboard.java
-index 34ad5e0784ee1d2ab1098c2248c7716e885aa790..fe1984ac2372ff8f207c31c3e322a7fd0913d9f7 100644
+index 85202868f1ba79e788e468f7cceba9bf1c3bb0ef..852fda7132d94000a991011da864e20dc2602f7e 100644
 --- a/net/minecraft/world/scores/Scoreboard.java
 +++ b/net/minecraft/world/scores/Scoreboard.java
-@@ -355,6 +355,23 @@ public class Scoreboard {
+@@ -351,6 +351,23 @@ public class Scoreboard {
      }
  
      public void entityRemoved(final Entity entity) {

@@ -7,7 +7,7 @@ Subject: [PATCH] Revert "Batch region-thread packet sends into the per-tick
 This reverts commit 2b0abf2688a6bbef1d5360636351dd69d7b74fcb.
 
 diff --git a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
-index 80bd2124714f15de00ae25155b942538a3b30b56..f8c0298b33f7115b633780fd634eaff6378b5910 100644
+index 92cbb59c063e7386e52e245b478c0ed54a84591a..3a40c5086415bc3aff4f23c9967406c632d0f7ed 100644
 --- a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
 @@ -337,14 +337,8 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack

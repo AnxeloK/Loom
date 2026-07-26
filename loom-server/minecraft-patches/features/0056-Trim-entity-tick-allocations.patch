@@ -5,7 +5,7 @@ Subject: [PATCH] Trim entity tick allocations
 
 
 diff --git a/net/minecraft/world/entity/InsideBlockEffectApplier.java b/net/minecraft/world/entity/InsideBlockEffectApplier.java
-index fa7ae9b80fe0035aca42d18c5983b7f3861bc098..dc642dc329bc0a7996b8b2a71122e1094711e1a5 100644
+index fc7cfc75e3e5c274f01498e4afd8693236b4e394..6347a656f631838841eaaef685c5a931646090c5 100644
 --- a/net/minecraft/world/entity/InsideBlockEffectApplier.java
 +++ b/net/minecraft/world/entity/InsideBlockEffectApplier.java
 @@ -53,30 +53,36 @@ public interface InsideBlockEffectApplier {
@@ -56,10 +56,10 @@ index fa7ae9b80fe0035aca42d18c5983b7f3861bc098..dc642dc329bc0a7996b8b2a71122e109
          }
  
 diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
-index 7cb742eb47b10aa8c409e268a47565fb2750670d..1590e57039a5c15f1e041131679d203a5f22a566 100644
+index e23720de0df7759b1be384a4d118962ae6e23483..c9aa469f2b8c9d232c13adc6effeefe1ac1b58e1 100644
 --- a/net/minecraft/world/entity/LivingEntity.java
 +++ b/net/minecraft/world/entity/LivingEntity.java
-@@ -1324,6 +1324,9 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+@@ -1328,6 +1328,9 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
  
      private void refreshDirtyAttributes() {
          Set<AttributeInstance> attributesToUpdate = this.getAttributes().getAttributesToUpdate();
@@ -70,7 +70,7 @@ index 7cb742eb47b10aa8c409e268a47565fb2750670d..1590e57039a5c15f1e041131679d203a
          for (AttributeInstance changedAttributeInstance : attributesToUpdate) {
              this.onAttributeUpdated(changedAttributeInstance.getAttribute());
 diff --git a/net/minecraft/world/entity/ai/goal/GoalSelector.java b/net/minecraft/world/entity/ai/goal/GoalSelector.java
-index 75d8953845b2e9acb62b19a859d0e39fd63533eb..6c175046c91079279b69b66f5165c8474460cd57 100644
+index 0439543fbb25ddb974550fe9dbdaa479e330937d..6f948996b82827222d8612b0c5df0caafa92e523 100644
 --- a/net/minecraft/world/entity/ai/goal/GoalSelector.java
 +++ b/net/minecraft/world/entity/ai/goal/GoalSelector.java
 @@ -91,7 +91,12 @@ public class GoalSelector {

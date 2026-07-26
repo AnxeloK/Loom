@@ -28,24 +28,32 @@ index 4d35b23970b92b2dea28c3780b295cd2561a343d..2ba82e076f30359585a4c76a272a9634
      // racing every parallel entity on one ThreadUnsafeRandom seed and Gaussian cache.
      public final ThreadUnsafeRandom entityRandom = new ThreadUnsafeRandom(
 diff --git a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
-index f77cb6d85c8947a96d41b96b31814c551dfd5258..2546d7377363787e20a694dbed5042d119c1fb16 100644
+index f3f068011abd8c6585463169d50634bf42a09497..a8177556da60a7a998c1ba23869b3a62f4ac2539 100644
 --- a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
 +++ b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
-@@ -746,25 +746,25 @@ public class CraftWorld extends CraftRegionAccessor implements World {
+@@ -738,30 +738,26 @@ public class CraftWorld extends CraftRegionAccessor implements World {
  
      @Override
      public boolean generateTree(Location loc, TreeType type, BlockChangeDelegate delegate) {
 -        this.world.captureTreeGeneration = true;
 -        this.world.captureBlockStates = true;
--        boolean grownTree = this.generateTree(loc, type);
--        this.world.captureBlockStates = false;
--        this.world.captureTreeGeneration = false;
+-        List<org.bukkit.craftbukkit.block.CraftBlockState> capturedBlockStates;
+-        boolean grownTree;
+-        try {
+-            grownTree = this.generateTree(loc, type);
+-        } finally {
+-            this.world.captureTreeGeneration = false;
+-            this.world.captureBlockStates = false;
+-
+-            capturedBlockStates = new ArrayList<>(this.world.capturedBlockStates.values());
+-            this.world.capturedBlockStates.clear();
+-        }
 -        if (grownTree) { // Copy block data to delegate
--            for (BlockState blockstate : this.world.capturedBlockStates.values()) {
--                BlockPos position = ((CraftBlockState) blockstate).getPosition();
+-            for (CraftBlockState snapshot : capturedBlockStates) {
+-                BlockPos position = snapshot.getPosition();
 -                net.minecraft.world.level.block.state.BlockState oldBlock = this.world.getBlockState(position);
--                int flags = ((CraftBlockState) blockstate).getFlags();
--                delegate.setBlockData(blockstate.getX(), blockstate.getY(), blockstate.getZ(), blockstate.getBlockData());
+-                int flags = snapshot.getFlags();
+-                delegate.setBlockData(snapshot.getX(), snapshot.getY(), snapshot.getZ(), snapshot.getBlockData());
 -                net.minecraft.world.level.block.state.BlockState newBlock = this.world.getBlockState(position);
 -                this.world.notifyAndUpdatePhysics(position, null, oldBlock, newBlock, newBlock, flags, net.minecraft.world.level.block.Block.UPDATE_LIMIT);
 +        Preconditions.checkState(!net.minecraft.server.threading.RegionTickStaging.isStaging(), "Synchronous tree generation API reached region tick staging");
@@ -55,10 +63,10 @@ index f77cb6d85c8947a96d41b96b31814c551dfd5258..2546d7377363787e20a694dbed5042d1
 +            boolean grownTree = this.generateTree(loc, type);
 +            net.minecraft.world.level.LevelCaptureContext.Result captured = captureScope.freeze();
 +            if (grownTree) { // Copy block data to delegate
-+                for (BlockState blockstate : captured.blockStates().values()) {
-+                    BlockPos position = ((CraftBlockState) blockstate).getPosition();
++                for (CraftBlockState blockstate : captured.blockStates().values()) {
++                    BlockPos position = blockstate.getPosition();
 +                    net.minecraft.world.level.block.state.BlockState oldBlock = this.world.getBlockState(position);
-+                    int flags = ((CraftBlockState) blockstate).getFlags();
++                    int flags = blockstate.getFlags();
 +                    delegate.setBlockData(blockstate.getX(), blockstate.getY(), blockstate.getZ(), blockstate.getBlockData());
 +                    net.minecraft.world.level.block.state.BlockState newBlock = this.world.getBlockState(position);
 +                    this.world.notifyAndUpdatePhysics(position, null, oldBlock, newBlock, newBlock, flags, net.minecraft.world.level.block.Block.UPDATE_LIMIT);
@@ -67,16 +75,13 @@ index f77cb6d85c8947a96d41b96b31814c551dfd5258..2546d7377363787e20a694dbed5042d1
 +            } else {
 +                return false;
              }
--            this.world.capturedBlockStates.clear();
--            return true;
--        } else {
--            this.world.capturedBlockStates.clear();
--            return false;
          }
+-        return grownTree;
      }
  
+     @Override
 diff --git a/src/main/java/org/bukkit/craftbukkit/block/CapturedBlockState.java b/src/main/java/org/bukkit/craftbukkit/block/CapturedBlockState.java
-index 6b5853ced761ef55de883fe86c009b94ccb159fc..7256ac64e84066fbe6d003d00832147215f59575 100644
+index 1dcfc5d715bb704145283c0b8eb0c58b7cef0990..8597988a9c443ed9f33e3e95bb4d16c06c1da119 100644
 --- a/src/main/java/org/bukkit/craftbukkit/block/CapturedBlockState.java
 +++ b/src/main/java/org/bukkit/craftbukkit/block/CapturedBlockState.java
 @@ -46,7 +46,7 @@ public final class CapturedBlockState extends CraftBlockState {
@@ -86,21 +91,21 @@ index 6b5853ced761ef55de883fe86c009b94ccb159fc..7256ac64e84066fbe6d003d008321472
 -        // SPIGOT-5537: Horrible hack to manually add bees given Level#captureTreeGeneration does not support block entities
 +        // SPIGOT-5537: Horrible hack to manually add bees because virtual tree capture does not support block entities
          if (this.treeBlock && this.getType() == Material.BEE_NEST) {
-             WorldGenLevel worldGenLevel = this.world.getHandle();
+             WorldGenLevel level = this.world.getHandle();
              BlockPos pos = this.getPosition();
 diff --git a/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java b/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
-index 5d6116c55072c028e1e9409628de47932d06a4cf..ca3843d4ef7075f58f3beb4f553d0e2f17280815 100644
+index afbf9c70f69b02e7b92a8382aa9fb9f1132b7bf8..34cefbdfd76519724a8e861c19d06d7ed8a1a062 100644
 --- a/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
 +++ b/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
-@@ -21,7 +21,6 @@ import net.minecraft.world.level.SignalGetter;
- import net.minecraft.world.level.block.Blocks;
+@@ -20,7 +20,6 @@ import net.minecraft.world.level.LightLayer;
+ import net.minecraft.world.level.SignalGetter;
  import net.minecraft.world.level.block.LevelEvent;
  import net.minecraft.world.level.block.RedStoneWireBlock;
 -import net.minecraft.world.level.block.SaplingBlock;
  import net.minecraft.world.level.block.state.BlockState;
  import net.minecraft.world.level.redstone.Redstone;
  import net.minecraft.world.phys.AABB;
-@@ -520,42 +519,42 @@ public class CraftBlock implements Block {
+@@ -500,49 +499,42 @@ public class CraftBlock implements Block {
      public boolean applyBoneMeal(BlockFace face) {
          Direction direction = blockFaceToNotch(face);
          Preconditions.checkArgument(direction != null, face + " is not a valid cartesian face");
@@ -111,19 +116,27 @@ index 5d6116c55072c028e1e9409628de47932d06a4cf..ca3843d4ef7075f58f3beb4f553d0e2f
          UseOnContext context = new UseOnContext(world, null, InteractionHand.MAIN_HAND, Items.BONE_MEAL.getDefaultInstance(), new BlockHitResult(Vec3.ZERO, direction, this.getPosition(), false));
  
          // SPIGOT-6895: Call StructureGrowEvent and BlockFertilizeEvent
+-        List<org.bukkit.craftbukkit.block.CraftBlockState> capturedBlockStates;
 -        world.captureTreeGeneration = true;
--        InteractionResult result = BoneMealItem.applyBonemeal(context);
--        world.captureTreeGeneration = false;
+-        TreeType treeType;
+-        InteractionResult result;
+-        try {
+-            result = BoneMealItem.applyBonemeal(context);
+-        } finally {
+-            world.captureTreeGeneration = false;
 -
--        if (!world.capturedBlockStates.isEmpty()) {
--            TreeType treeType = SaplingBlock.treeType;
--            SaplingBlock.treeType = null;
--            List<org.bukkit.block.BlockState> states = new ArrayList<>(world.capturedBlockStates.values());
+-            capturedBlockStates = new ArrayList<>(world.capturedBlockStates.values());
 -            world.capturedBlockStates.clear();
+-
+-            treeType = SaplingBlock.treeType;
+-            SaplingBlock.treeType = null;
+-        }
+-
+-        if (!capturedBlockStates.isEmpty()) {
 -            StructureGrowEvent structureEvent = null;
 -
 -            if (treeType != null) {
--                structureEvent = new StructureGrowEvent(this.getLocation(), treeType, true, null, states);
+-                structureEvent = new StructureGrowEvent(this.getLocation(), treeType, true, null, (List<org.bukkit.block.BlockState>) (List<? extends org.bukkit.block.BlockState>) capturedBlockStates);
 -                Bukkit.getPluginManager().callEvent(structureEvent);
 -            }
 +        try (net.minecraft.world.level.LevelCaptureContext.Scope captureScope = world.beginCaptureContext(net.minecraft.world.level.LevelCaptureContext.TREE)) {
@@ -141,7 +154,7 @@ index 5d6116c55072c028e1e9409628de47932d06a4cf..ca3843d4ef7075f58f3beb4f553d0e2f
 +                    Bukkit.getPluginManager().callEvent(structureEvent);
 +                }
  
--            event = new BlockFertilizeEvent(CraftBlock.at(world, this.getPosition()), null, states);
+-            event = new BlockFertilizeEvent(CraftBlock.at(world, this.getPosition()), null, (List<org.bukkit.block.BlockState>) (List<? extends org.bukkit.block.BlockState>) capturedBlockStates);
 -            event.setCancelled(structureEvent != null && structureEvent.isCancelled());
 -            Bukkit.getPluginManager().callEvent(event);
 +                event = new BlockFertilizeEvent(CraftBlock.at(world, this.getPosition()), null, states);
@@ -149,10 +162,9 @@ index 5d6116c55072c028e1e9409628de47932d06a4cf..ca3843d4ef7075f58f3beb4f553d0e2f
 +                Bukkit.getPluginManager().callEvent(event);
  
 -            if (!event.isCancelled()) {
--                for (org.bukkit.block.BlockState state : states) {
--                    CraftBlockState craftBlockState = (CraftBlockState) state;
--                    craftBlockState.place(craftBlockState.getFlags());
--                    world.checkCapturedTreeStateForObserverNotify(this.position, craftBlockState);
+-                for (CraftBlockState snapshot : capturedBlockStates) {
+-                    snapshot.place(snapshot.getFlags());
+-                    world.checkCapturedTreeStateForObserverNotify(this.position, snapshot);
 +                if (!event.isCancelled()) {
 +                    for (org.bukkit.block.BlockState state : states) {
 +                        CraftBlockState craftBlockState = (CraftBlockState) state;
@@ -163,8 +175,8 @@ index 5d6116c55072c028e1e9409628de47932d06a4cf..ca3843d4ef7075f58f3beb4f553d0e2f
              }
 -        }
  
--        return result == InteractionResult.SUCCESS && (event == null || !event.isCancelled());
-+            return result == InteractionResult.SUCCESS && (event == null || !event.isCancelled());
+-        return result instanceof InteractionResult.Success && (event == null || !event.isCancelled());
++            return result instanceof InteractionResult.Success && (event == null || !event.isCancelled());
 +        }
      }
  

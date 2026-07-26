@@ -5,10 +5,10 @@ Subject: [PATCH] Trim parallel tick hot paths
 
 
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
-index 7b88008f0a69bd522530abe9db96825ae4a2b510..4d9655f3858c476c9982654da4681f4a5401a626 100644
+index 9448f253d2a0b6806a4c3bae5f99d966978f41ad..fd73bbb06ccd8bf8db941fc4bb96599ee03f6930 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
-@@ -959,6 +959,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+@@ -963,6 +963,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
      public final class EntityCallback implements EntityInLevelCallback {
  
          public final Entity entity;
@@ -16,7 +16,7 @@ index 7b88008f0a69bd522530abe9db96825ae4a2b510..4d9655f3858c476c9982654da4681f4a
  
          public EntityCallback(final Entity entity) {
              this.entity = entity;
-@@ -973,7 +974,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+@@ -977,7 +978,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
              // op is replayed verbatim by applyMove() on the world-owning thread. When NOT staging
              // (serial/default path), stageEntityMove returns false and the original body runs inline, byte-
              // identical to upstream.
@@ -25,7 +25,7 @@ index 7b88008f0a69bd522530abe9db96825ae4a2b510..4d9655f3858c476c9982654da4681f4a
                  return;
              }
              this.applyMove();
-@@ -996,6 +997,17 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+@@ -1000,6 +1001,17 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
              EntityLookup.this.entityStatusChange(entity, newSlices, oldVisibility, newVisibility, true, false, false);
          }
  
@@ -43,7 +43,7 @@ index 7b88008f0a69bd522530abe9db96825ae4a2b510..4d9655f3858c476c9982654da4681f4a
          @Override
          public void onRemove(final Entity.RemovalReason reason) {
              // Loom start - stage entity removals (despawn/death) to the owner thread under parallel entity
-@@ -1003,7 +1015,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+@@ -1007,7 +1019,7 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
              // per-world tracking tables and trips Moonrise's per-region thread check off-main. When staging,
              // defer to the per-dispatch session and replay via applyRemove() on the owning thread; otherwise
              // the original body runs inline, byte-identical to upstream.
@@ -53,7 +53,7 @@ index 7b88008f0a69bd522530abe9db96825ae4a2b510..4d9655f3858c476c9982654da4681f4a
              }
              this.applyRemove(reason);
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
-index ff58b9bab31ff3d86c77c00ed3ffe56a8e379f8b..ff4a10c5f858ab9bfea12f2b0c7ee937b13411b5 100644
+index a92080137a8a8d698b0e5854bee6820b40cd8b3c..a8ec8aca965346f5a8b147ed7889bc9350a5733e 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
 @@ -174,69 +174,87 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
@@ -200,18 +200,18 @@ index ff58b9bab31ff3d86c77c00ed3ffe56a8e379f8b..ff4a10c5f858ab9bfea12f2b0c7ee937
      // Paper end - chunk tick iteration optimisations
  
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 8cce6fcab93ed20e1f290ad28dc1d43b641e35c3..ebc24e67575ea800494a854df4514cc0dd046d4a 100644
+index e6d1b5822dbf33c755a1ac05a2cc0349c9a082d7..6c6b3efd1547d998a33fba067e01a873200ef1fb 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -28,6 +28,7 @@ import java.util.Set;
- import java.util.UUID;
+@@ -29,6 +29,7 @@ import java.util.UUID;
  import java.util.concurrent.Executor;
+ import java.util.concurrent.atomic.AtomicInteger;
  import java.util.function.BooleanSupplier;
 +import java.util.function.Consumer;
  import java.util.function.Function;
  import java.util.function.Predicate;
  import java.util.stream.Collectors;
-@@ -1446,18 +1447,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1459,18 +1460,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      }
  
      // Paper start - log detailed entity tick information
@@ -233,7 +233,7 @@ index 8cce6fcab93ed20e1f290ad28dc1d43b641e35c3..ebc24e67575ea800494a854df4514cc0
      private void tickOneEntity(final Entity entity) {
          if (entity.isRemoved() || this.tickRateManager().isEntityFrozen(entity)) {
              return;
-@@ -1470,7 +1467,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1483,7 +1480,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              }
              entity.stopRiding();
          }
@@ -242,7 +242,7 @@ index 8cce6fcab93ed20e1f290ad28dc1d43b641e35c3..ebc24e67575ea800494a854df4514cc0
      }
  
      // Multipart/boss entities (e.g. the Ender Dragon and its EnderDragonPart sub-entities) move and remove
-@@ -1616,9 +1613,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1629,9 +1626,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      public void tickNonPassenger(final Entity entity) {
          // Paper start - log detailed entity tick information
          ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(entity, "Cannot tick an entity off-main");
@@ -255,7 +255,7 @@ index 8cce6fcab93ed20e1f290ad28dc1d43b641e35c3..ebc24e67575ea800494a854df4514cc0
              }
              // Paper end - log detailed entity tick information
          entity.setOldPosAndRot();
-@@ -1639,8 +1637,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1652,8 +1650,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          }
          // Paper start - log detailed entity tick information
          } finally {
@@ -616,7 +616,7 @@ index af4f7bf952f52dbc43de69d20bc63bfa887076c2..be300c082975cf4e7e136163ab74b5d0
                  }
                  final StagedSpawn s = spawns.get(i);
 diff --git a/net/minecraft/util/profiling/Profiler.java b/net/minecraft/util/profiling/Profiler.java
-index 2a43ad5e4a16b6d90c1d5a791ef2330e7a7f2c79..41cd80e746d0a24a7dfd4c2dcdc053cc4f9fa5ac 100644
+index ee9794784a53cbe4ec02ec4ad94923ce8381b5dd..da752528d050a7b0a79d841833e8e92f4a6f3ca5 100644
 --- a/net/minecraft/util/profiling/Profiler.java
 +++ b/net/minecraft/util/profiling/Profiler.java
 @@ -1,14 +1,11 @@
@@ -634,22 +634,22 @@ index 2a43ad5e4a16b6d90c1d5a791ef2330e7a7f2c79..41cd80e746d0a24a7dfd4c2dcdc053cc
  
      private Profiler() {
      }
-@@ -24,7 +21,6 @@ public final class Profiler {
-         } else {
-             ProfilerFiller active = decorateFiller(filler);
-             ACTIVE.set(active);
--            ACTIVE_COUNT.incrementAndGet();
-             active.startTick();
-         }
+@@ -25,7 +22,6 @@ public final class Profiler {
+ 
+         ProfilerFiller active = decorateFiller(filler);
+         ACTIVE.set(active);
+-        ACTIVE_COUNT.incrementAndGet();
+         active.startTick();
      }
-@@ -35,7 +31,6 @@ public final class Profiler {
-             throw new IllegalStateException("Profiler was not active");
-         } else {
-             ACTIVE.remove();
--            ACTIVE_COUNT.decrementAndGet();
-             active.endTick();
+ 
+@@ -36,7 +32,6 @@ public final class Profiler {
          }
+ 
+         ACTIVE.remove();
+-        ACTIVE_COUNT.decrementAndGet();
+         active.endTick();
      }
+ 
 @@ -45,7 +40,10 @@ public final class Profiler {
      }
  

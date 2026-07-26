@@ -7,7 +7,7 @@ Subject: [PATCH] Revert "Coalesce event-loop flushes for packets sent off the
 This reverts commit ebf02086dd07a971fc578493cc1da5f0a763b103.
 
 diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
-index 72a747fddd7ca985fa994e496ef2387d39e7fe6d..d953bb4edb1ae93667a3c8865cb3d2fc1354ada6 100644
+index 164e6c0ba59fdcebee02437666e17f60d2340db3..e36483369fa969ee887fbfde9b068df24ae9611e 100644
 --- a/net/minecraft/network/Connection.java
 +++ b/net/minecraft/network/Connection.java
 @@ -70,7 +70,6 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
@@ -18,7 +18,7 @@ index 72a747fddd7ca985fa994e496ef2387d39e7fe6d..d953bb4edb1ae93667a3c8865cb3d2fc
      public Channel channel;
      public SocketAddress address;
      // Spigot start
-@@ -475,29 +474,15 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -474,29 +473,15 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          if (this.channel.eventLoop().inEventLoop()) {
              this.doSendPacket(packet, listener, flush);
          } else {

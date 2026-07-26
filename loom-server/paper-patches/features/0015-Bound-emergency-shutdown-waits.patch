@@ -5,7 +5,7 @@ Subject: [PATCH] Bound emergency shutdown waits
 
 
 diff --git a/src/main/java/org/bukkit/craftbukkit/util/ServerShutdownThread.java b/src/main/java/org/bukkit/craftbukkit/util/ServerShutdownThread.java
-index 6050180e65d2a664e96318029cf5031d1bc1f504..99382b23bbbfe95426ca359b410d1f7d653a4f99 100644
+index def2e3c1960d41d8d72c32d36a256350ce3448f1..5fef5c0ee290326c810ca907aea8646952b31310 100644
 --- a/src/main/java/org/bukkit/craftbukkit/util/ServerShutdownThread.java
 +++ b/src/main/java/org/bukkit/craftbukkit/util/ServerShutdownThread.java
 @@ -1,9 +1,15 @@
@@ -29,7 +29,7 @@ index 6050180e65d2a664e96318029cf5031d1bc1f504..99382b23bbbfe95426ca359b410d1f7d
      public void run() {
          try {
 -            // Paper start - try to shutdown on main
--            server.safeShutdown(false, false);
+-            server.halt(false, false);
 -            for (int i = 1000; i > 0 && !server.hasStopped(); i -= 100) {
 -                Thread.sleep(100);
 +            // Loom - request shutdown from the lifecycle owner and wait only for a bounded grace period.
@@ -66,7 +66,7 @@ index 6050180e65d2a664e96318029cf5031d1bc1f504..99382b23bbbfe95426ca359b410d1f7d
 +        try {
 +            OwnerDomainExecutor.execute(
 +                OwnerDomainExecutor.global(server, "server-shutdown-request"),
-+                () -> server.safeShutdown(false, restarting)
++                () -> server.halt(false, restarting)
 +            );
 +            return true;
 +        } catch (final RejectedExecutionException rejected) {
@@ -93,7 +93,7 @@ index 6050180e65d2a664e96318029cf5031d1bc1f504..99382b23bbbfe95426ca359b410d1f7d
 +    }
  }
 diff --git a/src/main/java/org/spigotmc/WatchdogThread.java b/src/main/java/org/spigotmc/WatchdogThread.java
-index 5c1306ac6eb620a38ed5ef3632b611214e1d5dcd..192625adac2026e078b1294aef481587ba958d1d 100644
+index ab6c553f0f5c228e65c95538fc2deef07d9cd077..fc51d410d45a4c2010c2d27cb793e2e1aacfaa74 100644
 --- a/src/main/java/org/spigotmc/WatchdogThread.java
 +++ b/src/main/java/org/spigotmc/WatchdogThread.java
 @@ -14,6 +14,16 @@ import org.bukkit.craftbukkit.CraftServer;
@@ -157,7 +157,7 @@ index 5c1306ac6eb620a38ed5ef3632b611214e1d5dcd..192625adac2026e078b1294aef481587
                          }
                          // try one last chance to safe shutdown on main in case it 'comes back'
                          server.abnormalExit = true;
--                        server.safeShutdown(false, this.restart);
+-                        server.halt(false, this.restart);
 +                        if (!org.bukkit.craftbukkit.util.ServerShutdownThread.requestShutdown(server, this.restart)) {
 +                            org.bukkit.craftbukkit.util.ServerShutdownThread.haltStalledServer(
 +                                server,

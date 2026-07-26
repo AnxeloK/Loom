@@ -6,7 +6,7 @@ Subject: [PATCH] Apply owner-domain guards to activation, hopper, and block
 
 
 diff --git a/io/papermc/paper/entity/activation/ActivationRange.java b/io/papermc/paper/entity/activation/ActivationRange.java
-index ce6b57eeeeb1bd652f4bb53c19dcfbc05126c7e9..f44f9be27f8d3e5f3d9607f3618f40c8074f73cc 100644
+index 829f7685904fd741e00403647ae76d32275c34a3..1956b02ba18a39ec5987a5e8dc1a1b970b640ec6 100644
 --- a/io/papermc/paper/entity/activation/ActivationRange.java
 +++ b/io/papermc/paper/entity/activation/ActivationRange.java
 @@ -1,7 +1,7 @@
@@ -17,8 +17,8 @@ index ce6b57eeeeb1bd652f4bb53c19dcfbc05126c7e9..f44f9be27f8d3e5f3d9607f3618f40c8
 +import net.minecraft.server.threading.runtime.DomainClock;
  import net.minecraft.world.entity.Entity;
  import net.minecraft.world.entity.EntityType;
- import net.minecraft.world.entity.ExperienceOrb;
-@@ -45,6 +45,14 @@ public final class ActivationRange {
+ import net.minecraft.world.entity.EntityTypes;
+@@ -46,6 +46,14 @@ public final class ActivationRange {
      private ActivationRange() {
      }
  
@@ -33,7 +33,7 @@ index ce6b57eeeeb1bd652f4bb53c19dcfbc05126c7e9..f44f9be27f8d3e5f3d9607f3618f40c8
      static Activity[] VILLAGER_PANIC_IMMUNITIES = {
          Activity.HIDE,
          Activity.PRE_RAID,
-@@ -55,7 +63,7 @@ public final class ActivationRange {
+@@ -56,7 +64,7 @@ public final class ActivationRange {
      private static int checkInactiveWakeup(final Entity entity) {
          final Level world = entity.level();
          final SpigotWorldConfig config = world.spigotConfig;
@@ -42,7 +42,7 @@ index ce6b57eeeeb1bd652f4bb53c19dcfbc05126c7e9..f44f9be27f8d3e5f3d9607f3618f40c8
          if (entity.activationType == ActivationType.VILLAGER) {
              if (inactiveFor > config.wakeUpInactiveVillagersEvery && world.wakeupInactiveRemainingVillagers > 0) {
                  world.wakeupInactiveRemainingVillagers--;
-@@ -142,7 +150,7 @@ public final class ActivationRange {
+@@ -143,7 +151,7 @@ public final class ActivationRange {
          maxRange = Math.min((world.spigotConfig.simulationDistance << 4) - 8, maxRange);
  
          for (final Player player : world.players()) {
@@ -51,7 +51,7 @@ index ce6b57eeeeb1bd652f4bb53c19dcfbc05126c7e9..f44f9be27f8d3e5f3d9607f3618f40c8
              if (world.spigotConfig.ignoreSpectatorActivation && player.isSpectator()) {
                  continue;
              }
-@@ -175,13 +183,14 @@ public final class ActivationRange {
+@@ -176,13 +184,14 @@ public final class ActivationRange {
       * @param entity
       */
      private static void activateEntity(final Entity entity) {
@@ -69,7 +69,7 @@ index ce6b57eeeeb1bd652f4bb53c19dcfbc05126c7e9..f44f9be27f8d3e5f3d9607f3618f40c8
              }
          }
      }
-@@ -202,10 +211,11 @@ public final class ActivationRange {
+@@ -203,10 +212,11 @@ public final class ActivationRange {
          if (entity.getRemainingFireTicks() > 0) {
              return 2;
          }
@@ -83,7 +83,7 @@ index ce6b57eeeeb1bd652f4bb53c19dcfbc05126c7e9..f44f9be27f8d3e5f3d9607f3618f40c8
          if ((entity.activationType != ActivationType.WATER && entity.isInWater() && entity.isPushedByFluid())) {
              return 100;
          }
-@@ -302,16 +312,17 @@ public final class ActivationRange {
+@@ -303,16 +313,17 @@ public final class ActivationRange {
              return true;
          }
  
@@ -105,7 +105,7 @@ index ce6b57eeeeb1bd652f4bb53c19dcfbc05126c7e9..f44f9be27f8d3e5f3d9607f3618f40c8
                      entity.isTemporarilyActive = true;
                  }
 diff --git a/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java b/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java
-index 06ab7c48b18c03af494ab10fc2b584cefc776749..3465a5fc23f7f91fbfadceed2f74fe643fab390c 100644
+index 445c5cafad71028171c1f261939661775dd7f2bd..1628f7b43da9b5e936a5eedc3bd9c3aa55ae9a94 100644
 --- a/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java
 +++ b/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java
 @@ -148,7 +148,7 @@ public class MinecartHopper extends AbstractMinecartContainer implements Hopper
@@ -142,7 +142,7 @@ index 902735a0ae76c0a8b3397c00bb8e4480b4120c6e..fe8b768d2f77f11aad17e54fb47116ee
              if (moisture > 0) {
                  org.bukkit.craftbukkit.event.CraftEventFactory.handleMoistureChangeEvent(level, pos, state.setValue(MOISTURE, moisture - 1), Block.UPDATE_CLIENTS); // CraftBukkit
 diff --git a/net/minecraft/world/level/block/SpreadingSnowyBlock.java b/net/minecraft/world/level/block/SpreadingSnowyBlock.java
-index f868b1ccfa0e373c47344d000f26fbe8507c3510..029747dc28a4f2d70aa392da4cc5aa2357d71e92 100644
+index 513e23b693aa0f47bcf91e9087159a75471efd36..7814387fd5c2a92301cc53edc21c7cb741110b94 100644
 --- a/net/minecraft/world/level/block/SpreadingSnowyBlock.java
 +++ b/net/minecraft/world/level/block/SpreadingSnowyBlock.java
 @@ -8,6 +8,7 @@ import net.minecraft.core.Registry;
@@ -153,7 +153,7 @@ index f868b1ccfa0e373c47344d000f26fbe8507c3510..029747dc28a4f2d70aa392da4cc5aa23
  import net.minecraft.tags.FluidTags;
  import net.minecraft.util.RandomSource;
  import net.minecraft.world.level.LevelReader;
-@@ -57,7 +58,7 @@ public abstract class SpreadingSnowyBlock extends SnowyBlock {
+@@ -59,7 +60,7 @@ public abstract class SpreadingSnowyBlock extends SnowyBlock {
  
      @Override
      protected void randomTick(final BlockState state, final ServerLevel level, final BlockPos pos, final RandomSource random) {
@@ -163,7 +163,7 @@ index f868b1ccfa0e373c47344d000f26fbe8507c3510..029747dc28a4f2d70aa392da4cc5aa23
          Optional<Block> baseBlock = blocks.getOptional(this.baseBlock);
          if (!baseBlock.isEmpty()) {
 diff --git a/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java b/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java
-index f904c587fafe7395473450f766354d874e36ebac..3446e5f230e0cbbf0f31ccc7d08e9dc05de6d3b9 100644
+index 3fcb1a45a547681740d6ec8946b274539448cf95..965a5f59c5b463fac7eafbac7aac1888b1bdb136 100644
 --- a/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java
 +++ b/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java
 @@ -160,8 +160,9 @@ public class PistonMovingBlockEntity extends BlockEntity {
@@ -179,10 +179,10 @@ index f904c587fafe7395473450f766354d874e36ebac..3446e5f230e0cbbf0f31ccc7d08e9dc0
                                  break;
                              }
 diff --git a/net/minecraft/world/level/block/state/BlockBehaviour.java b/net/minecraft/world/level/block/state/BlockBehaviour.java
-index ca77680b645c352456744b148e0ff4ac31b05aa2..8020dd2a33057da352ea70aa18f45fa6fc16ab6b 100644
+index c78d77089e34c4bb559f173b449bfb7d91b05d5c..bf99187e3f5e15034f147fc95bc7889cd6a568a7 100644
 --- a/net/minecraft/world/level/block/state/BlockBehaviour.java
 +++ b/net/minecraft/world/level/block/state/BlockBehaviour.java
-@@ -170,7 +170,7 @@ public abstract class BlockBehaviour implements FeatureElement {
+@@ -168,7 +168,7 @@ public abstract class BlockBehaviour implements FeatureElement {
      }
  
      protected void onPlace(final BlockState state, final Level level, final BlockPos pos, final BlockState oldState, final boolean movedByPiston) {

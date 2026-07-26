@@ -5,18 +5,18 @@ Subject: [PATCH] Reuse inside-block visitors
 
 
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 281c1fe13e43e1b3da9120565d7a2f27bc54a5fa..72e1d22d2fb49c1834d1911ad2d9de250c6d4cc7 100644
+index d7214a66b68351200e4b5f8f04c906a43b78de7a..3b137a93c58a668a4c2f387bfee5da83f74f122b 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -437,6 +437,7 @@ public abstract class Entity
+@@ -438,6 +438,7 @@ public abstract class Entity
      private final List<Entity.Movement> finalMovementsThisTick = new ObjectArrayList<>();
      private final LongSet visitedBlocks = new LongOpenHashSet();
      private final InsideBlockEffectApplier.StepBasedCollector insideEffectCollector = new InsideBlockEffectApplier.StepBasedCollector();
 +    private @Nullable InsideBlockTraversal insideBlockTraversal;
      private CustomData customData = CustomData.EMPTY;
      // CraftBukkit start
-     public boolean forceDrops;
-@@ -1873,62 +1874,125 @@ public abstract class Entity
+     public boolean persist = true;
+@@ -1954,55 +1955,116 @@ public abstract class Entity
          boolean movedFar = from.distanceToSqr(to) > Mth.square(0.9999900000002526);
          boolean debugEntityBlockIntersections = this.level instanceof ServerLevel serverLevel
              && serverLevel.getServer().debugSubscribers().hasAnySubscriberFor(DebugSubscriptions.ENTITY_BLOCK_INTERSECTIONS);
@@ -32,14 +32,7 @@ index 281c1fe13e43e1b3da9120565d7a2f27bc54a5fa..72e1d22d2fb49c1834d1911ad2d9de25
 -            (blockIntersection, iteration) -> {
 -                if (!this.isAlive()) {
 -                    return false;
--                } else if (iteration >= maxMovementIterations) {
--                    return false;
--                } else {
--                    BlockState state = this.level().getBlockState(blockIntersection);
--                    if (state.isAir()) {
--                        if (debugEntityBlockIntersections) {
--                            this.debugBlockIntersection((ServerLevel)this.level(), blockIntersection.immutable(), false, false);
--                        }
+-                }
 +            movedFar,
 +            debugEntityBlockIntersections
 +        );
@@ -50,28 +43,9 @@ index 281c1fe13e43e1b3da9120565d7a2f27bc54a5fa..72e1d22d2fb49c1834d1911ad2d9de25
 +        }
 +    }
  
--                        return true;
--                    } else {
--                        VoxelShape intersectShape = state.getEntityInsideCollisionShape(this.level(), blockIntersection, this);
--                        boolean insideBlock = intersectShape == Shapes.block()
--                            || this.collidedWithShapeMovingFrom(from, to, intersectShape.move(new Vec3(blockIntersection)).toAabbs());
--                        boolean insideFluid = this.collidedWithFluid(state.getFluidState(), blockIntersection, from, to);
--                        if ((insideBlock || insideFluid) && visitedBlocks.add(blockIntersection.asLong())) {
--                            if (insideBlock) {
--                                try {
--                                    boolean isPrecise = movedFar || deflatedBoundingBoxAtTarget.intersects(blockIntersection);
--                                    effectCollector.advanceStep(iteration, blockIntersection); // Paper - track position inside effect was triggered on
--                                    state.entityInside(this.level(), blockIntersection, this, effectCollector, isPrecise);
--                                    this.onInsideBlock(state);
--                                } catch (Throwable var20) {
--                                    CrashReport report = CrashReport.forThrowable(var20, "Colliding entity with block");
--                                    CrashReportCategory category = report.addCategory("Block being collided with");
--                                    CrashReportCategory.populateBlockDetails(category, this.level(), blockIntersection, state);
--                                    CrashReportCategory entityCategory = report.addCategory("Entity being checked for collision");
--                                    this.fillCrashReportCategory(entityCategory);
--                                    throw new ReportedException(report);
--                                }
--                            }
+-                if (iteration >= maxMovementIterations) {
+-                    return false;
+-                }
 +    private InsideBlockTraversal acquireInsideBlockTraversal() {
 +        InsideBlockTraversal traversal = this.insideBlockTraversal;
 +        if (traversal == null) {
@@ -86,11 +60,7 @@ index 281c1fe13e43e1b3da9120565d7a2f27bc54a5fa..72e1d22d2fb49c1834d1911ad2d9de25
 +        traversal.inUse = true;
 +        return traversal;
 +    }
- 
--                            if (insideFluid) {
--                                effectCollector.advanceStep(iteration, blockIntersection); // Paper - track position inside effect was triggered on
--                                state.getFluidState().entityInside(this.level(), blockIntersection, this, effectCollector);
--                            }
++
 +    private final class InsideBlockTraversal implements BlockGetter.BlockStepVisitor {
 +        private boolean inUse;
 +        private @Nullable InsideBlockTraversal next;
@@ -123,8 +93,7 @@ index 281c1fe13e43e1b3da9120565d7a2f27bc54a5fa..72e1d22d2fb49c1834d1911ad2d9de25
 +            this.debugEntityBlockIntersections = debugEntityBlockIntersections;
 +        }
  
--                            if (debugEntityBlockIntersections) {
--                                this.debugBlockIntersection((ServerLevel)this.level(), blockIntersection.immutable(), insideBlock, insideFluid);
+-                BlockState state = this.level().getBlockState(blockIntersection);
 +        @Override
 +        public boolean visit(final BlockPos blockIntersection, final int iteration) {
 +            if (!Entity.this.isAlive()) {
@@ -133,51 +102,63 @@ index 281c1fe13e43e1b3da9120565d7a2f27bc54a5fa..72e1d22d2fb49c1834d1911ad2d9de25
 +                return false;
 +            } else {
 +                BlockState state = Entity.this.level().getBlockState(blockIntersection);
-+                if (state.isAir()) {
+                 if (state.isAir()) {
+-                    if (debugEntityBlockIntersections) {
+-                        this.debugBlockIntersection((ServerLevel)this.level(), blockIntersection.immutable(), false, false);
 +                    if (this.debugEntityBlockIntersections) {
 +                        Entity.this.debugBlockIntersection((ServerLevel)Entity.this.level(), blockIntersection.immutable(), false, false);
-+                    }
-+
-+                    return true;
-+                } else {
+                     }
+ 
+                     return true;
+                 } else {
+-                    VoxelShape intersectShape = state.getEntityInsideCollisionShape(this.level(), blockIntersection, this);
 +                    VoxelShape intersectShape = state.getEntityInsideCollisionShape(Entity.this.level(), blockIntersection, Entity.this);
-+                    boolean insideBlock = intersectShape == Shapes.block()
+                     boolean insideBlock = intersectShape == Shapes.block()
+-                        || this.collidedWithShapeMovingFrom(from, to, intersectShape.move(new Vec3(blockIntersection)).toAabbs());
+-                    boolean insideFluid = this.collidedWithFluid(state.getFluidState(), blockIntersection, from, to);
+-                    if ((insideBlock || insideFluid) && visitedBlocks.add(blockIntersection.asLong())) {
 +                        || Entity.this.collidedWithShapeMovingFrom(this.from, this.to, intersectShape.move(new Vec3(blockIntersection)).toAabbs());
 +                    boolean insideFluid = Entity.this.collidedWithFluid(state.getFluidState(), blockIntersection, this.from, this.to);
 +                    if ((insideBlock || insideFluid) && this.visitedBlocks.add(blockIntersection.asLong())) {
-+                        if (insideBlock) {
-+                            try {
+                         if (insideBlock) {
+                             try {
+-                                boolean isPrecise = movedFar || deflatedBoundingBoxAtTarget.intersects(blockIntersection);
+-                                effectCollector.advanceStep(iteration, blockIntersection); // Paper - track position inside effect was triggered on
+-                                state.entityInside(this.level(), blockIntersection, this, effectCollector, isPrecise);
+-                                this.onInsideBlock(state);
 +                                boolean isPrecise = this.movedFar || this.deflatedBoundingBoxAtTarget.intersects(blockIntersection);
 +                                this.effectCollector.advanceStep(iteration, blockIntersection); // Paper - track position inside effect was triggered on
 +                                state.entityInside(Entity.this.level(), blockIntersection, Entity.this, this.effectCollector, isPrecise);
 +                                Entity.this.onInsideBlock(state);
-+                            } catch (Throwable var20) {
-+                                CrashReport report = CrashReport.forThrowable(var20, "Colliding entity with block");
-+                                CrashReportCategory category = report.addCategory("Block being collided with");
+                             } catch (Throwable t) {
+                                 CrashReport report = CrashReport.forThrowable(t, "Colliding entity with block");
+                                 CrashReportCategory category = report.addCategory("Block being collided with");
+-                                CrashReportCategory.populateBlockDetails(category, this.level(), blockIntersection, state);
 +                                CrashReportCategory.populateBlockDetails(category, Entity.this.level(), blockIntersection, state);
-+                                CrashReportCategory entityCategory = report.addCategory("Entity being checked for collision");
+                                 CrashReportCategory entityCategory = report.addCategory("Entity being checked for collision");
+-                                this.fillCrashReportCategory(entityCategory);
 +                                Entity.this.fillCrashReportCategory(entityCategory);
-+                                throw new ReportedException(report);
+                                 throw new ReportedException(report);
                              }
-+                        }
-+
-+                        if (insideFluid) {
+                         }
+ 
+                         if (insideFluid) {
+-                            effectCollector.advanceStep(iteration, blockIntersection); // Paper - track position inside effect was triggered on
+-                            state.getFluidState().entityInside(this.level(), blockIntersection, this, effectCollector);
 +                            this.effectCollector.advanceStep(iteration, blockIntersection); // Paper - track position inside effect was triggered on
 +                            state.getFluidState().entityInside(Entity.this.level(), blockIntersection, Entity.this, this.effectCollector);
-+                        }
+                         }
  
--                            return true;
--                        } else {
--                            return true;
+-                        if (debugEntityBlockIntersections) {
+-                            this.debugBlockIntersection((ServerLevel)this.level(), blockIntersection.immutable(), insideBlock, insideFluid);
 +                        if (this.debugEntityBlockIntersections) {
 +                            Entity.this.debugBlockIntersection(
 +                                (ServerLevel)Entity.this.level(), blockIntersection.immutable(), insideBlock, insideFluid
 +                            );
                          }
-+
-+                        return true;
-+                    } else {
-+                        return true;
+ 
+                         return true;
+@@ -2011,7 +2073,7 @@ public abstract class Entity
                      }
                  }
              }

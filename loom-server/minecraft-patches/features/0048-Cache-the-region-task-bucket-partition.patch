@@ -13,7 +13,7 @@ only when the rectangles change and stays as the fallback that keeps
 the non-adjacency guarantee.
 
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
-index 55b1da8af2637207725ce993c6ed585154d6da84..ff58b9bab31ff3d86c77c00ed3ffe56a8e379f8b 100644
+index e49147a4ae0288148da1cb0a0f2378fa519739ee..a92080137a8a8d698b0e5854bee6820b40cd8b3c 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
 @@ -195,6 +195,10 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon

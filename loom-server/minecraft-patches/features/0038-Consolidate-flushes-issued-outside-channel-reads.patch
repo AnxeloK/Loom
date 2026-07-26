@@ -13,10 +13,10 @@ event loop drains, which keeps latency at task-queue scale instead of
 buffering whole ticks.
 
 diff --git a/net/minecraft/server/network/ServerConnectionListener.java b/net/minecraft/server/network/ServerConnectionListener.java
-index 92bda2d0638411ed23cc4a2499b8100ca8f7adfb..b33f970a0e28866de33311d76a0c98520213e375 100644
+index 735873cdf172f190e1a0ea7b33dacffe5934baf0..f219fa6597912c5d60697b93430c5f6f32ac7a1b 100644
 --- a/net/minecraft/server/network/ServerConnectionListener.java
 +++ b/net/minecraft/server/network/ServerConnectionListener.java
-@@ -99,7 +99,7 @@ public class ServerConnectionListener {
+@@ -98,7 +98,7 @@ public class ServerConnectionListener {
                                      } catch (ChannelException var5) {
                                      }
  

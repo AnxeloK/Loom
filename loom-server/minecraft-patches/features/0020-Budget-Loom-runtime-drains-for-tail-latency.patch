@@ -474,7 +474,7 @@ index bed702a5df280d0b76b7d967d7616c64630b0100..15c2d98a1cd6d56dabb4186cbe5e6fdc
  
                  if (this.removed) {
 diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
-index 834942432c96af7a16de7a764b8dfad9321008de..8a7830dfde27c293266d2c55538167331ca1981d 100644
+index ae5d61788e44603ab3031435817f0359aed95e99..2900503c1278e339eac992d81c402b671a6c62ef 100644
 --- a/net/minecraft/network/PacketProcessor.java
 +++ b/net/minecraft/network/PacketProcessor.java
 @@ -35,6 +35,15 @@ public class PacketProcessor implements AutoCloseable {
@@ -493,7 +493,7 @@ index 834942432c96af7a16de7a764b8dfad9321008de..8a7830dfde27c293266d2c5553816733
      public boolean canHandleInline() {
          return net.minecraft.server.threading.runtime.OwnerDomainExecutor.canRunSynchronousCallbacks();
      }
-@@ -78,11 +87,39 @@ public class PacketProcessor implements AutoCloseable {
+@@ -77,11 +86,39 @@ public class PacketProcessor implements AutoCloseable {
      // Paper start - detailed watchdog information
      public static final java.util.concurrent.ConcurrentLinkedDeque<PacketListener> packetProcessing = new java.util.concurrent.ConcurrentLinkedDeque<>();
      static final java.util.concurrent.atomic.AtomicLong totalMainThreadPacketsProcessed = new java.util.concurrent.atomic.AtomicLong();
@@ -533,7 +533,7 @@ index 834942432c96af7a16de7a764b8dfad9321008de..8a7830dfde27c293266d2c5553816733
      public static java.util.List<PacketListener> getCurrentPacketProcessors() {
          java.util.List<PacketListener> listeners = new java.util.ArrayList<>(4);
          for (PacketListener listener : packetProcessing) {
-@@ -92,12 +129,12 @@ public class PacketProcessor implements AutoCloseable {
+@@ -91,12 +128,12 @@ public class PacketProcessor implements AutoCloseable {
          return listeners;
      }
  
@@ -548,7 +548,7 @@ index 834942432c96af7a16de7a764b8dfad9321008de..8a7830dfde27c293266d2c5553816733
              final int minChunkX = chunkPos.x() - radius;
              final int minChunkZ = chunkPos.z() - radius;
              final int maxChunkX = chunkPos.x() + radius;
-@@ -126,13 +163,50 @@ public class PacketProcessor implements AutoCloseable {
+@@ -125,13 +162,50 @@ public class PacketProcessor implements AutoCloseable {
          action.run();
      }
  
@@ -601,10 +601,10 @@ index 834942432c96af7a16de7a764b8dfad9321008de..8a7830dfde27c293266d2c5553816733
                  if (this.listener.shouldHandleMessage(this.packet)) {
                      try {
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index c912bcbd6b0bfd723db88478b21d06c32122243e..d0fc3f983c83d74221d31e83cb56b3d673538c5b 100644
+index 41c5b0d8915d81d1b51de769252a7d83aca6276f..b8ca941fcf03019c6ee2871ca1bf25914c34a70c 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -199,6 +199,19 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -197,6 +197,19 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      public static final String VANILLA_BRAND = "vanilla";
      private static final float AVERAGE_TICK_TIME_SMOOTHING = 0.8F;
      private static final int TICK_STATS_SPAN = 100;
@@ -624,7 +624,7 @@ index c912bcbd6b0bfd723db88478b21d06c32122243e..d0fc3f983c83d74221d31e83cb56b3d6
      private static final long OVERLOADED_THRESHOLD_NANOS = 30L * TimeUtil.NANOSECONDS_PER_SECOND / 20L; // CraftBukkit
      private static final int OVERLOADED_TICKS_THRESHOLD = 20;
      private static final long OVERLOADED_WARNING_INTERVAL_NANOS = 10L * TimeUtil.NANOSECONDS_PER_SECOND;
-@@ -1214,8 +1227,49 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1180,8 +1193,49 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.addTickTime(time);
      }
  
@@ -674,7 +674,7 @@ index c912bcbd6b0bfd723db88478b21d06c32122243e..d0fc3f983c83d74221d31e83cb56b3d6
  
          // note: To avoid possibly spinning forever, only execute tasks that are roughly available at the beginning
          //       of this call. Packet processing and chunk system tasks are possibly always being queued.
-@@ -1234,10 +1288,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1200,10 +1254,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              // draining is large - chunk system and packet processing may be latency sensitive
  
              ((ca.spottedleaf.moonrise.patches.chunk_system.server.ChunkSystemMinecraftServer)this).moonrise$executeMidTickTasks(); // Paper - rewrite chunk system
@@ -687,7 +687,7 @@ index c912bcbd6b0bfd723db88478b21d06c32122243e..d0fc3f983c83d74221d31e83cb56b3d6
              // execute possibly latency sensitive chunk system tasks (see above)
              ((ca.spottedleaf.moonrise.patches.chunk_system.server.ChunkSystemMinecraftServer)this).moonrise$executeMidTickTasks(); // Paper - rewrite chunk system
          }
-@@ -1267,6 +1321,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1233,6 +1287,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          profiler.pop(); // moonrise:run_all_chunk
          profiler.pop(); // moonrise:run_all_tasks
  

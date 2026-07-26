@@ -5,10 +5,10 @@ Subject: [PATCH] Reuse block traversal scratch
 
 
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 176fbb9c3414b8f00e49b2ca519d62871e774712..3bca048d19785610ea6e448995558868271359b0 100644
+index 6d6cbffcc088b23aedd37fb7aa3a856a4591c4c3..b63602ab4b60bb04f234bbe1a99b1c09893fa64e 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -1838,8 +1838,7 @@ public abstract class Entity
+@@ -1919,8 +1919,7 @@ public abstract class Entity
          boolean movedFar = from.distanceToSqr(to) > Mth.square(0.9999900000002526);
          boolean debugEntityBlockIntersections = this.level instanceof ServerLevel serverLevel
              && serverLevel.getServer().debugSubscribers().hasAnySubscriberFor(DebugSubscriptions.ENTITY_BLOCK_INTERSECTIONS);
@@ -18,15 +18,15 @@ index 176fbb9c3414b8f00e49b2ca519d62871e774712..3bca048d19785610ea6e448995558868
              from,
              to,
              deflatedBoundingBoxAtTarget,
-@@ -1849,7 +1848,6 @@ public abstract class Entity
-                 } else if (iteration >= maxMovementIterations) {
+@@ -1933,7 +1932,6 @@ public abstract class Entity
                      return false;
-                 } else {
--                    iterations.set(iteration);
-                     BlockState state = this.level().getBlockState(blockIntersection);
-                     if (state.isAir()) {
-                         if (debugEntityBlockIntersections) {
-@@ -1896,7 +1894,6 @@ public abstract class Entity
+                 }
+ 
+-                iterations.set(iteration);
+                 BlockState state = this.level().getBlockState(blockIntersection);
+                 if (state.isAir()) {
+                     if (debugEntityBlockIntersections) {
+@@ -1979,7 +1977,6 @@ public abstract class Entity
                  }
              }
          );
@@ -35,7 +35,7 @@ index 176fbb9c3414b8f00e49b2ca519d62871e774712..3bca048d19785610ea6e448995558868
  
      private void debugBlockIntersection(final ServerLevel level, final BlockPos pos, final boolean insideBlock, final boolean insideFluid) {
 diff --git a/net/minecraft/world/level/BlockGetter.java b/net/minecraft/world/level/BlockGetter.java
-index f9073223aad937a9bd27a9a8be8817de32f967f6..a710a1fac12088304a146b2cdf01c9804f3d2e40 100644
+index 2a4c928281c7e455d6f210aeb599881855d328f8..a3b79608f7e9c0652cd7ccaf27abf2b3a0cf90d7 100644
 --- a/net/minecraft/world/level/BlockGetter.java
 +++ b/net/minecraft/world/level/BlockGetter.java
 @@ -2,6 +2,7 @@ package net.minecraft.world.level;
@@ -82,48 +82,48 @@ index f9073223aad937a9bd27a9a8be8817de32f967f6..a710a1fac12088304a146b2cdf01c980
 +            LongSet visitedBlocks = scratch.visitedBlocks();
 +
 +            try {
-+                for (BlockPos blockPosx : BlockPos.betweenCornersInDirection(aabbAtTarget.move(travel.scale(-1.0)), travel)) {
-+                    if (!visitor.visit(blockPosx, 0)) {
++                for (BlockPos blockPos : BlockPos.betweenCornersInDirection(aabbAtTarget.move(travel.scale(-1.0)), travel)) {
++                    if (!visitor.visit(blockPos, 0)) {
 +                        return blockTraversalResult(false, scratch.lastAcceptedIteration);
 +                    }
  
--            for (BlockPos blockPosx : BlockPos.betweenCornersInDirection(aabbAtTarget.move(travel.scale(-1.0)), travel)) {
--                if (!visitor.visit(blockPosx, 0)) {
+-            for (BlockPos blockPos : BlockPos.betweenCornersInDirection(aabbAtTarget.move(travel.scale(-1.0)), travel)) {
+-                if (!visitor.visit(blockPos, 0)) {
 -                    return false;
 +                    scratch.lastAcceptedIteration = 0;
-+                    visitedBlocks.add(blockPosx.asLong());
++                    visitedBlocks.add(blockPos.asLong());
                  }
  
--                visitedBlocks.add(blockPosx.asLong());
+-                visitedBlocks.add(blockPos.asLong());
 -            }
 +                int iterations = addCollisionsAlongTravel(visitedBlocks, travel, aabbAtTarget, visitor, scratch);
 +                if (iterations < 0) {
 +                    return blockTraversalResult(false, scratch.lastAcceptedIteration);
-+                } else {
-+                    for (BlockPos blockPosx : BlockPos.betweenCornersInDirection(aabbAtTarget, travel)) {
-+                        if (visitedBlocks.add(blockPosx.asLong())) {
-+                            if (!visitor.visit(blockPosx, iterations + 1)) {
-+                                return blockTraversalResult(false, scratch.lastAcceptedIteration);
-+                            }
++                }
  
 -            int iterations = addCollisionsAlongTravel(visitedBlocks, travel, aabbAtTarget, visitor);
 -            if (iterations < 0) {
 -                return false;
--            } else {
--                for (BlockPos blockPosx : BlockPos.betweenCornersInDirection(aabbAtTarget, travel)) {
--                    if (visitedBlocks.add(blockPosx.asLong()) && !visitor.visit(blockPosx, iterations + 1)) {
--                        return false;
-+                            scratch.lastAcceptedIteration = iterations + 1;
+-            }
++                for (BlockPos blockPos : BlockPos.betweenCornersInDirection(aabbAtTarget, travel)) {
++                    if (visitedBlocks.add(blockPos.asLong())) {
++                        if (!visitor.visit(blockPos, iterations + 1)) {
++                            return blockTraversalResult(false, scratch.lastAcceptedIteration);
 +                        }
-                     }
--                }
  
--                return true;
-+                    return blockTraversalResult(true, scratch.lastAcceptedIteration);
-+                }
+-            for (BlockPos blockPos : BlockPos.betweenCornersInDirection(aabbAtTarget, travel)) {
+-                if (visitedBlocks.add(blockPos.asLong()) && !visitor.visit(blockPos, iterations + 1)) {
+-                    return false;
++                        scratch.lastAcceptedIteration = iterations + 1;
++                    }
+                 }
+-            }
+ 
+-            return true;
++                return blockTraversalResult(true, scratch.lastAcceptedIteration);
 +            } finally {
 +                scratchPool.release(scratch);
-             }
++            }
          }
      }
  

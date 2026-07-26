@@ -16,10 +16,10 @@ init call by a depth counter so no other runtime path gains a
 blocking chunk wait.
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 3b2451b173b4bbe4f929c3ffa7c9ed8b7023bbf3..b1e3fc29c6b53f72276aac474faa9b7a71d6adaa 100644
+index f6b2a36b7ad6ed9f7f576d19be5e0d3d3f521343..21f21651bd92c39939f2d33423a27425f96ffaf6 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -831,6 +831,8 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -799,6 +799,8 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.server.getPluginManager().callEvent(new org.bukkit.event.world.WorldInitEvent(overworld.getWorld()));
      // Paper end - rework world loading process
          if (!levelData.isInitialized()) {
@@ -28,7 +28,7 @@ index 3b2451b173b4bbe4f929c3ffa7c9ed8b7023bbf3..b1e3fc29c6b53f72276aac474faa9b7a
              try {
                  setInitialSpawn(overworld, levelData, worldOptions.generateBonusChest(), isDebug, overworld.levelLoadListener); // Paper - per world level load listener
                  levelData.setInitialized(true);
-@@ -849,6 +851,9 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -817,6 +819,9 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              }
  
              levelData.setInitialized(true);
@@ -39,7 +39,7 @@ index 3b2451b173b4bbe4f929c3ffa7c9ed8b7023bbf3..b1e3fc29c6b53f72276aac474faa9b7a
  
          GlobalPos focusPos = this.selectLevelLoadFocusPos();
 diff --git a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
-index d912b312127e979d261a5a1249ed4316d209dc2d..bf6359cef8cab22c7df06a2a883bca48cadc6e62 100644
+index 1b39a05db2daed6a2267725f559b88e5c8b131a0..49a89fad126f8a93c29f842c2db0ac76c18dc183 100644
 --- a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
 +++ b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
 @@ -37,7 +37,30 @@ public final class ThreadedRegionsBlockingBarrier {
@@ -68,7 +68,7 @@ index d912b312127e979d261a5a1249ed4316d209dc2d..bf6359cef8cab22c7df06a2a883bca48
 +    public static boolean isWorldInitBarrier(final ServerLevel level) {
 +        final MinecraftServer server = level.getServer();
 +        return server != null
-+            && Thread.currentThread() == server.serverThread
++            && Thread.currentThread() == server.getRunningThread()
 +            && ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()
 +            && WORLD_INIT_DEPTH.get()[0] > 0;
      }

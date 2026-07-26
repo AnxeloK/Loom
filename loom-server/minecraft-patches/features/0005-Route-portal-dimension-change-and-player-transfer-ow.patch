@@ -6,13 +6,13 @@ Subject: [PATCH] Route portal, dimension change, and player transfer ownership
 
 
 diff --git a/net/minecraft/server/level/PlayerSpawnFinder.java b/net/minecraft/server/level/PlayerSpawnFinder.java
-index ddffd36d8213a40dc3f6cbb0ef0f33a0a7490ac1..d6592077634d6a13fe88cb0c2552dd3339f4f866 100644
+index 3509df9dd423b38d1ca3e4a420d1352ae95d3551..11fd1e15c91683c980c0cad3a27750673db0736d 100644
 --- a/net/minecraft/server/level/PlayerSpawnFinder.java
 +++ b/net/minecraft/server/level/PlayerSpawnFinder.java
-@@ -63,7 +63,14 @@ public class PlayerSpawnFinder {
-             finder.scheduleNext();
-             return finder.finishedFuture;
-         } else {
+@@ -49,7 +49,14 @@ public class PlayerSpawnFinder {
+ 
+     public static CompletableFuture<Vec3> findSpawn(final ServerLevel level, final BlockPos spawnSuggestion) {
+         if (level.serverLevelData.getGameType() == GameType.ADVENTURE) { // CraftBukkit
 -            return CompletableFuture.completedFuture(fixupSpawnHeight(level, spawnSuggestion));
 +            PlayerSpawnFinder finder = new PlayerSpawnFinder(level, spawnSuggestion, 0);
 +            finder.scheduleCandidate(
@@ -23,8 +23,8 @@ index ddffd36d8213a40dc3f6cbb0ef0f33a0a7490ac1..d6592077634d6a13fe88cb0c2552dd33
 +            );
 +            return finder.finishedFuture;
          }
-     }
  
+         int radius = Math.max(0, level.getGameRules().get(GameRules.RESPAWN_RADIUS));
 @@ -115,33 +122,33 @@ public class PlayerSpawnFinder {
          if (!this.finishedFuture.isDone()) {
              int chunkX = SectionPos.blockToSectionCoord(candidateX);
@@ -41,8 +41,8 @@ index ddffd36d8213a40dc3f6cbb0ef0f33a0a7490ac1..d6592077634d6a13fe88cb0c2552dd33
 -                            } else {
 -                                this.scheduleNext();
 -                            }
--                        } catch (Throwable var9) {
--                            throwable = var9;
+-                        } catch (Throwable t) {
+-                            throwable = t;
 -                        }
 -                    }
 -
@@ -69,7 +69,7 @@ index ddffd36d8213a40dc3f6cbb0ef0f33a0a7490ac1..d6592077634d6a13fe88cb0c2552dd33
 +                    } else {
 +                        this.scheduleNext();
                      }
--                }, this.level.chunkSource.mainThreadProcessor); // Paper - rewrite chunk system
+-                }, this.level.getChunkSource().mainThreadProcessor); // Paper - rewrite chunk system
 +                }
 +            ).whenComplete((ignored, throwable) -> {
 +                if (throwable != null && !this.finishedFuture.isDone()) {
@@ -86,7 +86,7 @@ index ddffd36d8213a40dc3f6cbb0ef0f33a0a7490ac1..d6592077634d6a13fe88cb0c2552dd33
      }
  
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..f3ecddedbe3a8b963c9bf46e62820cda65de6755 100644
+index c063fa617ea79b758b9c4ef0456889a91e341ad4..c3eacd2e085437557de1dbdef0abc23ba7d180bd 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
 @@ -92,6 +92,7 @@ import net.minecraft.server.MinecraftServer;
@@ -97,7 +97,7 @@ index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..f3ecddedbe3a8b963c9bf46e62820cda
  import net.minecraft.server.network.TextFilter;
  import net.minecraft.server.permissions.PermissionSet;
  import net.minecraft.server.players.PlayerList;
-@@ -205,7 +206,7 @@ import org.slf4j.Logger;
+@@ -208,7 +209,7 @@ import org.slf4j.Logger;
  
  public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patches.chunk_system.player.ChunkSystemServerPlayer { // Paper - rewrite chunk system
      private static final Logger LOGGER = LogUtils.getLogger();
@@ -106,14 +106,14 @@ index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..f3ecddedbe3a8b963c9bf46e62820cda
      private static final int NEUTRAL_MOB_DEATH_NOTIFICATION_RADII_XZ = 32;
      private static final int NEUTRAL_MOB_DEATH_NOTIFICATION_RADII_Y = 10;
      private static final int FLY_STAT_RECORDING_SPEED = 25;
-@@ -819,8 +820,15 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -799,8 +800,15 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
  
      public void doTick() {
          try {
 +            if (this.valid && this.waitForCurrentChunkIfUnloaded()) {
 +                return;
 +            }
-             if (valid && !this.isSpectator() || !this.touchingUnloadedChunk()) { // Paper - don't tick dead players that are not in the world currently (pending respawn)
+             if (this.valid && (!this.isSpectator() || !this.touchingUnloadedChunk())) { // Paper - don't tick dead players that are not in the world currently (pending respawn)
 +                final ServerLevel tickStartLevel = this.level();
                  super.tick();
 +                if (this.level() != tickStartLevel) {
@@ -122,7 +122,7 @@ index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..f3ecddedbe3a8b963c9bf46e62820cda
                  if (!this.containerMenu.stillValid(this)) {
                      this.closeContainer(org.bukkit.event.inventory.InventoryCloseEvent.Reason.CANT_USE); // Paper - Inventory close reason
                      this.containerMenu = this.inventoryMenu;
-@@ -925,6 +933,25 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -904,6 +912,25 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
          }
      }
  
@@ -148,7 +148,7 @@ index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..f3ecddedbe3a8b963c9bf46e62820cda
      private void synchronizeSpecialItemUpdates(final ItemStack itemStack) {
          MapId mapId = itemStack.get(DataComponents.MAP_ID);
          MapItemSavedData data = MapItem.getSavedData(mapId, this.level());
-@@ -1339,7 +1366,12 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1321,7 +1348,12 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
      }
  
      // Paper start
@@ -162,7 +162,7 @@ index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..f3ecddedbe3a8b963c9bf46e62820cda
      }
  
      public @Nullable TeleportTransition findRespawnPositionAndUseSpawnBlock(
-@@ -1358,6 +1390,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1340,6 +1372,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
          boolean isBedSpawn = false;
          boolean isAnchorSpawn = false;
          Runnable consumeAnchorCharge = null;
@@ -170,7 +170,7 @@ index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..f3ecddedbe3a8b963c9bf46e62820cda
          // Paper end
          ServerPlayer.RespawnConfig respawnConfig = this.getRespawnConfig();
          ServerLevel respawnLevel = this.server.getLevel(ServerPlayer.RespawnConfig.getDimensionOrDefault(respawnConfig));
-@@ -1369,6 +1402,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1351,6 +1384,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
                  isBedSpawn = respawnPosAngle.isBedSpawn();
                  isAnchorSpawn = respawnPosAngle.isAnchorSpawn();
                  consumeAnchorCharge = respawnPosAngle.consumeAnchorCharge();
@@ -178,7 +178,7 @@ index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..f3ecddedbe3a8b963c9bf46e62820cda
                  teleportTransition = new TeleportTransition(
                      respawnLevel, respawnPosAngle.position(), Vec3.ZERO, respawnPosAngle.yaw(), respawnPosAngle.pitch(), postTeleportTransition
                  );
-@@ -1381,6 +1415,131 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1363,6 +1397,131 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
              teleportTransition = TeleportTransition.createDefault(this, postTeleportTransition);
          }
  
@@ -310,7 +310,7 @@ index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..f3ecddedbe3a8b963c9bf46e62820cda
          org.bukkit.entity.Player respawnPlayer = this.getBukkitEntity();
          org.bukkit.Location location = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(
              teleportTransition.position(),
-@@ -1427,9 +1586,9 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1409,9 +1568,9 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
                  teleportTransition.cause()
              ),
              isBedSpawn,
@@ -322,56 +322,75 @@ index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..f3ecddedbe3a8b963c9bf46e62820cda
      }
  
      public boolean isReceivingWaypoints() {
-@@ -1548,19 +1707,24 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
-             }
- 
-             if (newLevel.dimension() == lastDimension) {
--                this.connection.internalTeleport(PositionMoveRotation.of(transition), transition.relatives()); // CraftBukkit
--                this.connection.resetPosition();
--                transition.postTeleportTransition().onTransition(this);
-+                final TeleportTransition sameDimensionTransition = transition;
-+                runWithTeleportOwnerContext(newLevel, this.chunkPosition(), sameDimensionTransition.position(), () -> {
-+                    this.connection.internalTeleport(PositionMoveRotation.of(sameDimensionTransition), sameDimensionTransition.relatives()); // CraftBukkit
-+                    this.connection.resetPosition();
-+                    sameDimensionTransition.postTeleportTransition().onTransition(this);
-+                });
-                 return this;
-             } else {
-+                final ServerLevel destinationLevel = newLevel;
-+                final TeleportTransition dimensionTransition = transition;
-                 this.isChangingDimension = true;
--                LevelData levelData = newLevel.getLevelData();
--                this.connection.send(new ClientboundRespawnPacket(this.createCommonSpawnInfo(newLevel), ClientboundRespawnPacket.KEEP_ALL_DATA));
-+                LevelData levelData = destinationLevel.getLevelData();
-+                this.connection.send(new ClientboundRespawnPacket(this.createCommonSpawnInfo(destinationLevel), ClientboundRespawnPacket.KEEP_ALL_DATA));
-                 this.connection.send(new ClientboundChangeDifficultyPacket(levelData.getDifficulty(), levelData.isDifficultyLocked()));
-                 PlayerList playerList = this.server.getPlayerList();
-                 playerList.sendPlayerPermissionLevel(this);
-                 this.portalProcess = null; // SPIGOT-7785: there is no need to carry this over as it contains the old world/location and we might run into trouble if there is a portal in the same spot in both worlds
--                oldLevel.removePlayerImmediately(this, Entity.RemovalReason.CHANGED_DIMENSION);
-+                runWithTeleportOwnerContext(oldLevel, this.chunkPosition(), this.position(), () -> oldLevel.removePlayerImmediately(this, Entity.RemovalReason.CHANGED_DIMENSION));
-                 this.unsetRemoved();
-                 ProfilerFiller profiler = Profiler.get();
-                 profiler.push("moving");
-@@ -1570,10 +1734,12 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
- 
-                 profiler.pop();
-                 profiler.push("placing");
--                this.setServerLevel(newLevel);
--                this.connection.internalTeleport(PositionMoveRotation.of(transition), transition.relatives()); // CraftBukkit - use internal teleport without event
--                this.connection.resetPosition();
--                newLevel.addDuringTeleport(this);
-+                this.setServerLevel(destinationLevel);
-+                runWithTeleportOwnerContext(destinationLevel, this.chunkPosition(), dimensionTransition.position(), () -> {
-+                    this.connection.internalTeleport(PositionMoveRotation.of(dimensionTransition), dimensionTransition.relatives()); // CraftBukkit - use internal teleport without event
-+                    this.connection.resetPosition();
-+                    destinationLevel.addDuringTeleport(this);
-+                });
-                 profiler.pop();
-                 this.triggerDimensionChangeTriggers(oldLevel);
-                 this.stopUsingItem();
-@@ -1600,6 +1766,40 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1535,45 +1694,52 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
          }
+ 
+         if (newLevel.dimension() == lastDimension) {
+-            this.connection.internalTeleport(PositionMoveRotation.of(transition), transition.relatives()); // CraftBukkit  
+-            this.connection.resetPosition();
+-            transition.postTeleportTransition().onTransition(this);
++            final TeleportTransition sameDimensionTransition = transition;
++            runWithTeleportOwnerContext(newLevel, this.chunkPosition(), sameDimensionTransition.position(), () -> {
++                this.connection.internalTeleport(PositionMoveRotation.of(sameDimensionTransition), sameDimensionTransition.relatives()); // CraftBukkit
++                this.connection.resetPosition();
++                sameDimensionTransition.postTeleportTransition().onTransition(this);
++            });
+             return this;
+         }
+ 
++        final ServerLevel destinationLevel = newLevel;
++        final TeleportTransition dimensionTransition = transition;
+         this.isChangingDimension = true;
+-        LevelData levelData = newLevel.getLevelData();
+-        this.connection.send(new ClientboundRespawnPacket(this.createCommonSpawnInfo(newLevel), ClientboundRespawnPacket.KEEP_ALL_DATA));
++        LevelData levelData = destinationLevel.getLevelData();
++        this.connection.send(new ClientboundRespawnPacket(this.createCommonSpawnInfo(destinationLevel), ClientboundRespawnPacket.KEEP_ALL_DATA));
+         this.connection.send(new ClientboundChangeDifficultyPacket(levelData.getDifficulty(), levelData.isDifficultyLocked()));
+         PlayerList playerList = this.server.getPlayerList();
+         playerList.sendPlayerPermissionLevel(this);
+         this.portalProcess = null; // SPIGOT-7785: there is no need to carry this over as it contains the old world/location and we might run into trouble if there is a portal in the same spot in both worlds
+-        oldLevel.removePlayerImmediately(this, Entity.RemovalReason.CHANGED_DIMENSION);
++        runWithTeleportOwnerContext(oldLevel, this.chunkPosition(), this.position(), () -> oldLevel.removePlayerImmediately(this, Entity.RemovalReason.CHANGED_DIMENSION));
+         this.unsetRemoved();
+         ProfilerFiller profiler = Profiler.get();
+         profiler.push("moving");
+-        if (oldLevelTypeKey == net.minecraft.world.level.dimension.LevelStem.OVERWORLD && newLevel.getTypeKey() == net.minecraft.world.level.dimension.LevelStem.NETHER) { // CraftBukkit - empty to fall through to null to event
++        if (oldLevelTypeKey == net.minecraft.world.level.dimension.LevelStem.OVERWORLD && destinationLevel.getTypeKey() == net.minecraft.world.level.dimension.LevelStem.NETHER) { // CraftBukkit - empty to fall through to null to event
+             this.enteredNetherPosition = this.position();
+         }
+ 
+         profiler.pop();
+         profiler.push("placing");
+-        this.setServerLevel(newLevel);
+-        this.connection.internalTeleport(PositionMoveRotation.of(transition), transition.relatives()); // CraftBukkit - use internal teleport without event
+-        this.connection.resetPosition();
+-        newLevel.addDuringTeleport(this);
++        this.setServerLevel(destinationLevel);
++        runWithTeleportOwnerContext(destinationLevel, this.chunkPosition(), dimensionTransition.position(), () -> {
++            this.connection.internalTeleport(PositionMoveRotation.of(dimensionTransition), dimensionTransition.relatives()); // CraftBukkit - use internal teleport without event
++            this.connection.resetPosition();
++            destinationLevel.addDuringTeleport(this);
++        });
+         profiler.pop();
+         this.triggerDimensionChangeTriggers(oldLevel);
+         this.stopUsingItem();
+         this.connection.send(new ClientboundPlayerAbilitiesPacket(this.getAbilities()));
+-        playerList.sendLevelInfo(this, newLevel);
++        playerList.sendLevelInfo(this, destinationLevel);
+         playerList.sendAllPlayerInfo(this);
+         playerList.sendActivePlayerEffects(this);
+-        transition.postTeleportTransition().onTransition(this);
++        dimensionTransition.postTeleportTransition().onTransition(this);
+         this.lastSentExp = -1;
+         this.lastSentHealth = -1.0F;
+         this.lastSentFood = -1;
+-        this.teleportSpectators(transition, oldLevel);
++        this.teleportSpectators(dimensionTransition, oldLevel);
+         // CraftBukkit start
+         org.bukkit.event.player.PlayerChangedWorldEvent changeEvent = new org.bukkit.event.player.PlayerChangedWorldEvent(this.getBukkitEntity(), oldLevel.getWorld());
+         this.level().getCraftServer().getPluginManager().callEvent(changeEvent);
+@@ -1586,6 +1752,40 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+         return this;
      }
  
 +    private static void runWithTeleportOwnerContext(final ServerLevel level, final ChunkPos currentChunk, final Vec3 targetPosition, final Runnable action) {
@@ -412,10 +431,10 @@ index 06b938013f9dbee4fb3b86979d5a42f28a0ea33e..f3ecddedbe3a8b963c9bf46e62820cda
      public void forceSetRotation(final float yRot, final boolean relativeY, final float xRot, final boolean relativeX) {
          super.forceSetRotation(yRot, relativeY, xRot, relativeX);
 diff --git a/net/minecraft/server/level/ServerPlayerGameMode.java b/net/minecraft/server/level/ServerPlayerGameMode.java
-index f7390b91fe1866c6a11beb93711d0fcde4293164..d7087b7f9aedd2be6695582c52ea8d191def62c7 100644
+index 27bdb82793250b33b457fe027c003948000857c9..b5b9cd93d6c5e2fcf66a552256ae9843ed689d39 100644
 --- a/net/minecraft/server/level/ServerPlayerGameMode.java
 +++ b/net/minecraft/server/level/ServerPlayerGameMode.java
-@@ -126,7 +126,7 @@ public class ServerPlayerGameMode {
+@@ -125,7 +125,7 @@ public class ServerPlayerGameMode {
      }
  
      public void tick() {
@@ -425,7 +444,7 @@ index f7390b91fe1866c6a11beb93711d0fcde4293164..d7087b7f9aedd2be6695582c52ea8d19
          if (this.hasDelayedDestroy) {
              BlockState blockState = this.level.getBlockStateIfLoaded(this.delayedDestroyPos); // Paper - Don't allow digging into unloaded chunks
 diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-index e11595a7b1132060c29f760053866f8d123f91de..7da3c00615ed46f013eb1be87d5f79c184e6edf5 100644
+index dfd353f9cd557be6c791d51c2a2a8cc0ce56ffda..7f5dc445c930a36afaad97782b856f74e4803606 100644
 --- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 @@ -325,6 +325,7 @@ public class ServerGamePacketListenerImpl
@@ -436,7 +455,7 @@ index e11595a7b1132060c29f760053866f8d123f91de..7da3c00615ed46f013eb1be87d5f79c1
      private int clientLoadedTimeoutTimer;
      private static final int MAX_SIGN_LINE_LENGTH = Integer.getInteger("Paper.maxSignLength", 80); // Paper - Limit client sign length
      private final io.papermc.paper.event.packet.ClientTickEndEvent tickEndEvent; // Paper - add client tick end event
-@@ -3076,25 +3077,44 @@ public class ServerGamePacketListenerImpl
+@@ -3066,24 +3067,44 @@ public class ServerGamePacketListenerImpl
          ServerboundClientCommandPacket.Action action = packet.getAction();
          switch (action) {
              case PERFORM_RESPAWN:
@@ -480,7 +499,6 @@ index e11595a7b1132060c29f760053866f8d123f91de..7da3c00615ed46f013eb1be87d5f79c1
 -                    this.restartClientLoadTimerAfterRespawn();
 -                    if (this.server.isHardcore()) {
 -                        this.player.setGameMode(GameType.SPECTATOR, org.bukkit.event.player.PlayerGameModeChangeEvent.Cause.HARDCORE_DEATH, null); // Paper - Expand PlayerGameModeChangeEvent
--                        this.player.level().getGameRules().set(GameRules.SPECTATORS_GENERATE_CHUNKS, false, this.player.level()); // CraftBukkit - per-world
 +                        this.player = respawnedPlayer;
 +                        this.resetPosition();
 +                        this.restartClientLoadTimerAfterRespawn();
@@ -499,10 +517,10 @@ index e11595a7b1132060c29f760053866f8d123f91de..7da3c00615ed46f013eb1be87d5f79c1
              case REQUEST_STATS:
                  this.player.getStats().sendStats(this.player);
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index 6a358dea5ab373775a541192be246087afc94b5b..a7e9c62b6d74db838347ccd40f18145e0f4cba73 100644
+index c934baa7936d4529d7c8e24fc177ca1c8b0b8961..321afd76dddce2fc980cfa2c874fd22bbd37e384 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
-@@ -87,8 +87,6 @@ import net.minecraft.world.entity.player.Player;
+@@ -86,8 +86,6 @@ import net.minecraft.world.entity.player.Player;
  import net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl;
  import net.minecraft.world.item.crafting.RecipeManager;
  import net.minecraft.world.level.Level;
@@ -511,7 +529,7 @@ index 6a358dea5ab373775a541192be246087afc94b5b..a7e9c62b6d74db838347ccd40f18145e
  import net.minecraft.world.level.border.BorderChangeListener;
  import net.minecraft.world.level.border.WorldBorder;
  import net.minecraft.world.level.gamerules.GameRules;
-@@ -195,6 +193,90 @@ public abstract class PlayerList {
+@@ -194,6 +192,90 @@ public abstract class PlayerList {
          }
      }
  
@@ -602,7 +620,7 @@ index 6a358dea5ab373775a541192be246087afc94b5b..a7e9c62b6d74db838347ccd40f18145e
      public void placeNewPlayer(final Connection connection, final ServerPlayer player, final CommonListenerCookie cookie) {
          player.isRealPlayer = true; // Paper
          player.loginTime = System.currentTimeMillis(); // Paper - Replace OfflinePlayer#getLastPlayed
-@@ -650,17 +732,98 @@ public abstract class PlayerList {
+@@ -648,17 +730,98 @@ public abstract class PlayerList {
      }
  
      // Paper start - respawn event
@@ -702,7 +720,7 @@ index 6a358dea5ab373775a541192be246087afc94b5b..a7e9c62b6d74db838347ccd40f18145e
          ServerLevel level = respawnInfo.newLevel();
          ServerPlayer player = serverPlayer; // Paper - TODO - recreate instance
          player.connection = serverPlayer.connection;
-@@ -701,7 +864,7 @@ public abstract class PlayerList {
+@@ -699,7 +862,7 @@ public abstract class PlayerList {
          this.sendActivePlayerEffects(player);
          this.sendLevelInfo(player, level);
          this.sendPlayerPermissionLevel(player);
@@ -711,7 +729,7 @@ index 6a358dea5ab373775a541192be246087afc94b5b..a7e9c62b6d74db838347ccd40f18145e
          this.players.add(player);
          this.playersByName.put(player.getScoreboardName().toLowerCase(java.util.Locale.ROOT), player); // Paper
          this.playersByUUID.put(player.getUUID(), player);
-@@ -712,29 +875,21 @@ public abstract class PlayerList {
+@@ -710,29 +873,21 @@ public abstract class PlayerList {
          this.sendAllPlayerInfo(serverPlayer); // Update health
          serverPlayer.onUpdateAbilities(); // Update inventory, etc
          // Paper end
@@ -757,10 +775,10 @@ index 6a358dea5ab373775a541192be246087afc94b5b..a7e9c62b6d74db838347ccd40f18145e
  
          // Paper start
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..ceaeb1f438c9048716bb9be44ce831d227e02b7b 100644
+index 1530810cdb74810e37e3e22ce4fcda4ee7511055..357cdd17e6ca0a672941f765d5ed1a0b8a1c40fe 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -1133,7 +1133,7 @@ public abstract class Entity
+@@ -1138,7 +1138,7 @@ public abstract class Entity
      public void move(final MoverType moverType, Vec3 delta) {
          final Vec3 originalMovement = delta; // Paper - Expose pre-collision velocity
          // Paper start - detailed watchdog information
@@ -769,7 +787,7 @@ index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..ceaeb1f438c9048716bb9be44ce831d2
          synchronized (this.posLock) {
              this.moveStartX = this.getX();
              this.moveStartY = this.getY();
-@@ -1152,8 +1152,9 @@ public abstract class Entity
+@@ -1157,8 +1157,9 @@ public abstract class Entity
              if (moverType == MoverType.PISTON) {
                  delta = this.limitPistonMovement(delta);
                  // Paper start - EAR 2
@@ -781,7 +799,7 @@ index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..ceaeb1f438c9048716bb9be44ce831d2
                  // Paper end - EAR 2
                  if (delta.equals(Vec3.ZERO)) {
                      return;
-@@ -2219,7 +2220,16 @@ public abstract class Entity
+@@ -2306,7 +2307,16 @@ public abstract class Entity
          this.yo = y;
          this.zo = cz;
          this.setPos(cx, y, cz);
@@ -799,7 +817,7 @@ index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..ceaeb1f438c9048716bb9be44ce831d2
      }
  
      public void snapTo(final Vec3 pos) {
-@@ -2948,7 +2958,12 @@ public abstract class Entity
+@@ -3036,7 +3046,12 @@ public abstract class Entity
  
          for (int currChunkZ = minChunkZ; currChunkZ <= maxChunkZ; ++currChunkZ) {
              for (int currChunkX = minChunkX; currChunkX <= maxChunkX; ++currChunkX) {
@@ -813,7 +831,7 @@ index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..ceaeb1f438c9048716bb9be44ce831d2
  
                  for (int currChunkY = minChunkY; currChunkY <= maxChunkY; ++currChunkY) {
                      final int sectionIdx = currChunkY - minSection;
-@@ -3518,12 +3533,29 @@ public abstract class Entity
+@@ -3583,12 +3598,29 @@ public abstract class Entity
                  if (this.portalProcess.processPortalTeleportation(level, this, this.canUsePortal(false))) {
                      ProfilerFiller profiler = Profiler.get();
                      profiler.push("portal");
@@ -845,7 +863,7 @@ index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..ceaeb1f438c9048716bb9be44ce831d2
                          }
                      }
  
-@@ -3781,10 +3813,11 @@ public abstract class Entity
+@@ -3846,10 +3878,11 @@ public abstract class Entity
          }
  
          // CraftBukkit start
@@ -860,7 +878,7 @@ index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..ceaeb1f438c9048716bb9be44ce831d2
                  return;
              }
          }
-@@ -3793,7 +3826,7 @@ public abstract class Entity
+@@ -3858,7 +3891,7 @@ public abstract class Entity
              return;
          }
  
@@ -870,10 +888,10 @@ index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..ceaeb1f438c9048716bb9be44ce831d2
          }
          // CraftBukkit end
 diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
-index 36c0081e3e8f8776293ae619156cd0828fe5b21d..7cb742eb47b10aa8c409e268a47565fb2750670d 100644
+index 3a4da514c163e7565fc241835db52c464a5c4734..e23720de0df7759b1be384a4d118962ae6e23483 100644
 --- a/net/minecraft/world/entity/LivingEntity.java
 +++ b/net/minecraft/world/entity/LivingEntity.java
-@@ -3382,7 +3382,11 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+@@ -3395,7 +3395,11 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
  
      @Override
      public void tick() {
@@ -966,7 +984,7 @@ index 7ec15f3d3a770e1e9e2fbac29dd38e947bb07091..5538a93f1ae5af424432e78d652fcf45
  
      public Portal.Transition getPortalLocalTransition() {
 diff --git a/net/minecraft/world/entity/ai/navigation/PathNavigation.java b/net/minecraft/world/entity/ai/navigation/PathNavigation.java
-index 18cbe9735473eee408407e1f5944d2975d0d0b65..58811c877dc83d0c00ebaaef65d8f0c9f80ced0c 100644
+index 862224dfc003bf02ee0d7c1d804549210d6c8ffa..8a5fdb9216ed6e616010ecfe8782fc1df28db987 100644
 --- a/net/minecraft/world/entity/ai/navigation/PathNavigation.java
 +++ b/net/minecraft/world/entity/ai/navigation/PathNavigation.java
 @@ -7,6 +7,7 @@ import java.util.stream.Stream;
@@ -977,7 +995,7 @@ index 18cbe9735473eee408407e1f5944d2975d0d0b65..58811c877dc83d0c00ebaaef65d8f0c9
  import net.minecraft.tags.BlockTags;
  import net.minecraft.util.Mth;
  import net.minecraft.util.debug.DebugSubscriptions;
-@@ -215,7 +216,8 @@ public abstract class PathNavigation {
+@@ -219,7 +220,8 @@ public abstract class PathNavigation {
  
      public boolean moveTo(final Entity target, final double speedModifier) {
          // Paper start - Perf: Optimise pathfinding
@@ -987,7 +1005,7 @@ index 18cbe9735473eee408407e1f5944d2975d0d0b65..58811c877dc83d0c00ebaaef65d8f0c9
              return false;
          }
          // Paper end - Perf: Optimise pathfinding
-@@ -227,7 +229,7 @@ public abstract class PathNavigation {
+@@ -231,7 +233,7 @@ public abstract class PathNavigation {
              return true;
          } else {
              this.pathfindFailures++;
@@ -997,10 +1015,10 @@ index 18cbe9735473eee408407e1f5944d2975d0d0b65..58811c877dc83d0c00ebaaef65d8f0c9
          }
          // Paper end - Perf: Optimise pathfinding
 diff --git a/net/minecraft/world/entity/player/Player.java b/net/minecraft/world/entity/player/Player.java
-index 391f3048f34edfa3d5759abfd56e17d5b5318309..088a9eaeeaac8e27741ebccac176f82a6456ddb5 100644
+index 5d4b3ed09fe10f545d0720b2919f0d6c822d5196..b7e07ce82d001b27816d8ebc030cd2194a022984 100644
 --- a/net/minecraft/world/entity/player/Player.java
 +++ b/net/minecraft/world/entity/player/Player.java
-@@ -239,6 +239,7 @@ public abstract class Player extends Avatar implements ContainerUser {
+@@ -243,6 +243,7 @@ public abstract class Player extends Avatar implements ContainerUser {
  
      @Override
      public void tick() {
@@ -1008,7 +1026,7 @@ index 391f3048f34edfa3d5759abfd56e17d5b5318309..088a9eaeeaac8e27741ebccac176f82a
          this.noPhysics = this.isSpectator();
          if (this.isSpectator() || this.isPassenger()) {
              this.setOnGround(false);
-@@ -274,6 +275,9 @@ public abstract class Player extends Avatar implements ContainerUser {
+@@ -278,6 +279,9 @@ public abstract class Player extends Avatar implements ContainerUser {
  
          this.updateIsUnderwater();
          super.tick();
@@ -1019,7 +1037,7 @@ index 391f3048f34edfa3d5759abfd56e17d5b5318309..088a9eaeeaac8e27741ebccac176f82a
          double nx = Mth.clamp(this.getX(), -2.9999999E7, 2.9999999E7);
          double nz = Mth.clamp(this.getZ(), -2.9999999E7, 2.9999999E7);
 diff --git a/net/minecraft/world/level/block/EndPortalBlock.java b/net/minecraft/world/level/block/EndPortalBlock.java
-index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..60fc900fee1077a797ea3a0ae78f058c52d63c24 100644
+index 66c8f1abf36c9f4598bde83e4375d0f72eac4668..27e1443322c79d94a0669d617052ba7f20d2cdfe 100644
 --- a/net/minecraft/world/level/block/EndPortalBlock.java
 +++ b/net/minecraft/world/level/block/EndPortalBlock.java
 @@ -2,12 +2,14 @@ package net.minecraft.world.level.block;
@@ -1037,7 +1055,7 @@ index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..60fc900fee1077a797ea3a0ae78f058c
  import net.minecraft.util.RandomSource;
  import net.minecraft.world.entity.Entity;
  import net.minecraft.world.entity.InsideBlockEffectApplier;
-@@ -83,37 +85,162 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
+@@ -83,13 +85,19 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
  
      @Override
      public @Nullable TeleportTransition getPortalDestination(final ServerLevel currentLevel, final Entity entity, final BlockPos portalEntryPos) {
@@ -1055,49 +1073,49 @@ index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..60fc900fee1077a797ea3a0ae78f058c
          if (newLevel == null) {
 -            return null;
 +            return CompletableFuture.completedFuture(null);
-         } else {
-             Vec3 spawnPos = spawnBlockPos.getBottomCenter();
-             float yRot;
-             float xRot;
-             Set<Relative> relatives;
-             if (!fromEnd) {
--                EndPlatformFeature.createEndPlatform(newLevel, BlockPos.containing(spawnPos).below(), true, entity); // CraftBukkit
-+                final BlockPos platformOrigin = BlockPos.containing(spawnPos).below();
-                 yRot = Direction.WEST.toYRot();
-                 xRot = 0.0F;
-                 relatives = Relative.union(Relative.DELTA, Set.of(Relative.X_ROT));
-                 if (entity instanceof ServerPlayer) {
-                     spawnPos = spawnPos.subtract(0.0, 1.0, 0.0);
-                 }
-+                return this.createEndPlatformAndPortalTransition(newLevel, entity, platformOrigin, spawnPos, yRot, xRot, relatives, fromEnd);
-             } else {
-                 yRot = respawnData.yaw();
-                 xRot = respawnData.pitch();
-                 relatives = Relative.union(Relative.DELTA, Relative.ROTATION);
-                 if (entity instanceof ServerPlayer serverPlayer) {
--                    return serverPlayer.findRespawnPositionAndUseSpawnBlock(false, TeleportTransition.DO_NOTHING, org.bukkit.event.player.PlayerRespawnEvent.RespawnReason.END_PORTAL); // CraftBukkit
-+                    return serverPlayer.findRespawnPositionAndUseSpawnBlockAsync(
-+                        false,
-+                        TeleportTransition.DO_NOTHING,
-+                        org.bukkit.event.player.PlayerRespawnEvent.RespawnReason.END_PORTAL
-+                    ).thenApply(result -> result == null ? null : result.transition()); // CraftBukkit
-                 }
+         }
  
--                spawnPos = entity.adjustSpawnLocation(newLevel, spawnBlockPos).getBottomCenter();
-+                return this.createEndExitPortalTransition(
-+                    newLevel,
-+                    entity,
-+                    spawnBlockPos,
-+                    yRot,
-+                    xRot,
-+                    relatives,
-+                    fromEnd
-+                );
+         Vec3 spawnPos = Vec3.atBottomCenterOf(spawnBlockPos);
+@@ -97,38 +105,148 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
+         float xRot;
+         Set<Relative> relatives;
+         if (!fromEnd) {
+-            EndPlatformFeature.createEndPlatform(newLevel, BlockPos.containing(spawnPos).below(), true, entity); // CraftBukkit
++            final BlockPos platformOrigin = BlockPos.containing(spawnPos).below();
+             yRot = Direction.WEST.toYRot();
+             xRot = 0.0F;
+             relatives = Relative.union(Relative.DELTA, Set.of(Relative.X_ROT));
+             if (entity instanceof ServerPlayer) {
+                 spawnPos = spawnPos.subtract(0.0, 1.0, 0.0);
+             }
++            return this.createEndPlatformAndPortalTransition(newLevel, entity, platformOrigin, spawnPos, yRot, xRot, relatives, fromEnd);
+         } else {
+             yRot = respawnData.yaw();
+             xRot = respawnData.pitch();
+             relatives = Relative.union(Relative.DELTA, Relative.ROTATION);
+             if (entity instanceof ServerPlayer serverPlayer) {
+-                return serverPlayer.findRespawnPositionAndUseSpawnBlock(false, TeleportTransition.DO_NOTHING, org.bukkit.event.player.PlayerRespawnEvent.RespawnReason.END_PORTAL); // CraftBukkit
++                return serverPlayer.findRespawnPositionAndUseSpawnBlockAsync(
++                    false,
++                    TeleportTransition.DO_NOTHING,
++                    org.bukkit.event.player.PlayerRespawnEvent.RespawnReason.END_PORTAL
++                ).thenApply(result -> result == null ? null : result.transition()); // CraftBukkit
              }
  
-+        }
+-            spawnPos = Vec3.atBottomCenterOf(entity.adjustSpawnLocation(newLevel, spawnBlockPos));
++            return this.createEndExitPortalTransition(newLevel, entity, spawnBlockPos, yRot, xRot, relatives, fromEnd);
+         }
 +    }
-+
+ 
+-        // CraftBukkit start
+-        relatives.removeAll(Relative.ROTATION); // remove relative rotation flags to simplify event mutation
+-        float absoluteYaw = !fromEnd ? yRot : entity.getYRot() + yRot;
+-        float absolutePitch = entity.getXRot() + xRot;
+-        org.bukkit.craftbukkit.event.PortalEventResult result = org.bukkit.craftbukkit.event.CraftEventFactory.handlePortalEvents(entity, org.bukkit.craftbukkit.util.CraftLocation.toBukkit(spawnPos, newLevel, absoluteYaw, absolutePitch), org.bukkit.PortalType.ENDER, 0, 0);
+-        if (result == null) {
+-            return null;
+-        }
+-        org.bukkit.Location to = result.to();
 +    private CompletableFuture<@Nullable TeleportTransition> createEndExitPortalTransition(
 +        final ServerLevel newLevel,
 +        final Entity entity,
@@ -1119,7 +1137,7 @@ index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..60fc900fee1077a797ea3a0ae78f058c
 +            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
 +            "end-exit-spawn-ready",
 +            chunks -> {
-+                final Vec3 spawnPos = entity.adjustSpawnLocation(newLevel, spawnBlockPos).getBottomCenter();
++                final Vec3 spawnPos = Vec3.atBottomCenterOf(entity.adjustSpawnLocation(newLevel, spawnBlockPos));
 +                this.createPortalTransitionInEntityContext(
 +                    OwnerDomainExecutor.entity(entity, "end-portal-event"),
 +                    newLevel,
@@ -1144,7 +1162,9 @@ index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..60fc900fee1077a797ea3a0ae78f058c
 +        });
 +        return destination;
 +    }
-+
+ 
+-        return new TeleportTransition(
+-            ((org.bukkit.craftbukkit.CraftWorld) to.getWorld()).getHandle(), org.bukkit.craftbukkit.util.CraftLocation.toVec3(to), Vec3.ZERO, to.getYaw(), to.getPitch(), relatives, TeleportTransition.PLAY_PORTAL_SOUND.then(TeleportTransition.PLACE_PORTAL_TICKET), org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.END_PORTAL
 +    private CompletableFuture<@Nullable TeleportTransition> createEndPlatformAndPortalTransition(
 +        final ServerLevel newLevel,
 +        final Entity entity,
@@ -1186,7 +1206,8 @@ index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..60fc900fee1077a797ea3a0ae78f058c
 +            maxChunkZ,
 +            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
 +            chunks -> createPlatform.run()
-+        );
+         );
+-        // CraftBukkit end
 +        return destination;
 +    }
 +
@@ -1201,20 +1222,26 @@ index fcf0f6cf9211a5453353d2fb44e0f94d72efc2e5..60fc900fee1077a797ea3a0ae78f058c
 +        final boolean fromEnd
 +    ) {
 +        return OwnerDomainExecutor.supply(entityOwner, () -> {
-             // CraftBukkit start
-             relatives.removeAll(Relative.ROTATION); // remove relative rotation flags to simplify event mutation
-             float absoluteYaw = !fromEnd ? yRot : entity.getYRot() + yRot;
-@@ -128,7 +255,7 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
-                 ((org.bukkit.craftbukkit.CraftWorld) to.getWorld()).getHandle(), org.bukkit.craftbukkit.util.CraftLocation.toVec3(to), Vec3.ZERO, to.getYaw(), to.getPitch(), relatives, TeleportTransition.PLAY_PORTAL_SOUND.then(TeleportTransition.PLACE_PORTAL_TICKET), org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.END_PORTAL
-             );
-             // CraftBukkit end
--        }
++            // CraftBukkit start
++            relatives.removeAll(Relative.ROTATION); // remove relative rotation flags to simplify event mutation
++            float absoluteYaw = !fromEnd ? yRot : entity.getYRot() + yRot;
++            float absolutePitch = entity.getXRot() + xRot;
++            org.bukkit.craftbukkit.event.PortalEventResult result = org.bukkit.craftbukkit.event.CraftEventFactory.handlePortalEvents(entity, org.bukkit.craftbukkit.util.CraftLocation.toBukkit(spawnPos, newLevel, absoluteYaw, absolutePitch), org.bukkit.PortalType.ENDER, 0, 0);
++            if (result == null) {
++                return null;
++            }
++            org.bukkit.Location to = result.to();
++
++            return new TeleportTransition(
++                ((org.bukkit.craftbukkit.CraftWorld) to.getWorld()).getHandle(), org.bukkit.craftbukkit.util.CraftLocation.toVec3(to), Vec3.ZERO, to.getYaw(), to.getPitch(), relatives, TeleportTransition.PLAY_PORTAL_SOUND.then(TeleportTransition.PLACE_PORTAL_TICKET), org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.END_PORTAL
++            );
++            // CraftBukkit end
 +        });
      }
  
      @Override
 diff --git a/net/minecraft/world/level/block/NetherPortalBlock.java b/net/minecraft/world/level/block/NetherPortalBlock.java
-index b66aa14aea47e3b10c3e28cf25a64be550a8f5e0..5142942a5b7ba5ead3fad1abb9409d0c64ea7e03 100644
+index 070880adc13501f8011d81de339a66d474f7948a..ff7926d06a96069e7dabd1b147393ae91b5a3528 100644
 --- a/net/minecraft/world/level/block/NetherPortalBlock.java
 +++ b/net/minecraft/world/level/block/NetherPortalBlock.java
 @@ -4,11 +4,13 @@ import com.mojang.logging.LogUtils;
@@ -1231,7 +1258,7 @@ index b66aa14aea47e3b10c3e28cf25a64be550a8f5e0..5142942a5b7ba5ead3fad1abb9409d0c
  import net.minecraft.sounds.SoundEvents;
  import net.minecraft.sounds.SoundSource;
  import net.minecraft.util.BlockUtil;
-@@ -34,6 +36,7 @@ import net.minecraft.world.level.block.state.properties.EnumProperty;
+@@ -35,6 +37,7 @@ import net.minecraft.world.level.block.state.properties.EnumProperty;
  import net.minecraft.world.level.border.WorldBorder;
  import net.minecraft.world.level.dimension.DimensionType;
  import net.minecraft.world.level.gamerules.GameRules;
@@ -1239,12 +1266,12 @@ index b66aa14aea47e3b10c3e28cf25a64be550a8f5e0..5142942a5b7ba5ead3fad1abb9409d0c
  import net.minecraft.world.level.portal.PortalShape;
  import net.minecraft.world.level.portal.TeleportTransition;
  import net.minecraft.world.phys.Vec3;
-@@ -143,18 +146,24 @@ public class NetherPortalBlock extends Block implements Portal {
+@@ -145,18 +148,24 @@ public class NetherPortalBlock extends Block implements Portal {
  
      @Override
      public @Nullable TeleportTransition getPortalDestination(final ServerLevel currentLevel, final Entity entity, final BlockPos portalEntryPos) {
 +        CompletableFuture<@Nullable TeleportTransition> destination = this.getPortalDestinationAsync(currentLevel, entity, portalEntryPos);
-+        return destination.isDone() ? destination.join() : null;
++        return destination.isDone() ? destination.getNow(null) : null;
 +    }
 +
 +    @Override
@@ -1263,24 +1290,23 @@ index b66aa14aea47e3b10c3e28cf25a64be550a8f5e0..5142942a5b7ba5ead3fad1abb9409d0c
          if (newLevel == null) {
 -            return null;
 +            return CompletableFuture.completedFuture(null);
-         } else {
-             boolean toNether = newLevel.getTypeKey() == net.minecraft.world.level.dimension.LevelStem.NETHER; // CraftBukkit
-             WorldBorder newWorldBorder = newLevel.getWorldBorder();
-@@ -169,24 +178,65 @@ public class NetherPortalBlock extends Block implements Portal {
-             // CraftBukkit start
-             org.bukkit.craftbukkit.event.PortalEventResult result = org.bukkit.craftbukkit.event.CraftEventFactory.handlePortalEvents(entity, org.bukkit.craftbukkit.util.CraftLocation.toBukkit(approximateExitPos, newLevel), org.bukkit.PortalType.NETHER, portalSearchRadius, newLevel.paperConfig().environment.portalCreateRadius); // Paper - use custom portal search radius
-             if (result == null) {
--                return null;
-+                return CompletableFuture.completedFuture(null);
-             }
-             newLevel = ((org.bukkit.craftbukkit.CraftWorld) result.to().getWorld()).getHandle();
-             newWorldBorder = newLevel.getWorldBorder();
-             approximateExitPos = newWorldBorder.clampToBounds(result.to().getX(), result.to().getY(), result.to().getZ());
--            return this.getExitPortal(newLevel, entity, portalEntryPos, approximateExitPos, toNether, newWorldBorder, result);
-+            SourcePortalInfo sourcePortal = getSourcePortalInfo(entity, portalEntryPos);
-+            return this.getExitPortalAsync(newLevel, entity, approximateExitPos, toNether, newWorldBorder, result, sourcePortal);
-             // CraftBukkit end
          }
+ 
+         boolean toNether = newLevel.getTypeKey() == net.minecraft.world.level.dimension.LevelStem.NETHER; // CraftBukkit
+@@ -172,23 +181,64 @@ public class NetherPortalBlock extends Block implements Portal {
+         // CraftBukkit start
+         org.bukkit.craftbukkit.event.PortalEventResult result = org.bukkit.craftbukkit.event.CraftEventFactory.handlePortalEvents(entity, org.bukkit.craftbukkit.util.CraftLocation.toBukkit(approximateExitPos, newLevel), org.bukkit.PortalType.NETHER, portalSearchRadius, newLevel.paperConfig().environment.portalCreateRadius); // Paper - use custom portal search radius
+         if (result == null) {
+-            return null;
++            return CompletableFuture.completedFuture(null);
+         }
+         newLevel = ((org.bukkit.craftbukkit.CraftWorld) result.to().getWorld()).getHandle();
+         newWorldBorder = newLevel.getWorldBorder();
+         approximateExitPos = newWorldBorder.clampToBounds(result.to().getX(), result.to().getY(), result.to().getZ());
+-        return this.getExitPortal(newLevel, entity, portalEntryPos, approximateExitPos, toNether, newWorldBorder, result);
++        SourcePortalInfo sourcePortal = getSourcePortalInfo(entity, portalEntryPos);
++        return this.getExitPortalAsync(newLevel, entity, approximateExitPos, toNether, newWorldBorder, result, sourcePortal);
+         // CraftBukkit end
      }
  
 +    private CompletableFuture<@Nullable TeleportTransition> getExitPortalAsync(
@@ -1335,7 +1361,7 @@ index b66aa14aea47e3b10c3e28cf25a64be550a8f5e0..5142942a5b7ba5ead3fad1abb9409d0c
      ) {
          Optional<BlockPos> exitPortalPos = newLevel.getPortalForcer().findClosestPortalPosition(approximateExitPos, worldBorder, result.searchRadius()); // CraftBukkit
          BlockUtil.FoundRectangle exitPortal;
-@@ -204,8 +254,7 @@ public class NetherPortalBlock extends Block implements Portal {
+@@ -206,8 +256,7 @@ public class NetherPortalBlock extends Block implements Portal {
              );
              post = TeleportTransition.PLAY_PORTAL_SOUND.then(e -> e.placePortalTicket(pos));
          } else if (result.canCreatePortal()) { // CraftBukkit
@@ -1345,7 +1371,7 @@ index b66aa14aea47e3b10c3e28cf25a64be550a8f5e0..5142942a5b7ba5ead3fad1abb9409d0c
              if (createdExit.isEmpty()) {
                  // LOGGER.error("Unable to create a portal, likely target out of worldborder"); // CraftBukkit
                  return null;
-@@ -220,15 +269,12 @@ public class NetherPortalBlock extends Block implements Portal {
+@@ -222,15 +271,12 @@ public class NetherPortalBlock extends Block implements Portal {
          }
          // CraftBukkit end
  
@@ -1364,7 +1390,7 @@ index b66aa14aea47e3b10c3e28cf25a64be550a8f5e0..5142942a5b7ba5ead3fad1abb9409d0c
      ) {
          BlockState blockState = entity.level().getBlockState(portalEntryPos);
          Direction.Axis axis;
-@@ -244,7 +290,10 @@ public class NetherPortalBlock extends Block implements Portal {
+@@ -246,7 +292,10 @@ public class NetherPortalBlock extends Block implements Portal {
              offset = new Vec3(0.5, 0.0, 0.0);
          }
  
@@ -1377,7 +1403,7 @@ index b66aa14aea47e3b10c3e28cf25a64be550a8f5e0..5142942a5b7ba5ead3fad1abb9409d0c
  
      private static TeleportTransition createDimensionTransition(
 diff --git a/net/minecraft/world/level/block/Portal.java b/net/minecraft/world/level/block/Portal.java
-index 01a43dced9a562608bf48a1d60c0208887a5801e..e5db4e7581f4cbf066a72237c4ef5309b320ad09 100644
+index 3098fa04fe7a282ac008d9c902c8525892e83d31..d6c38453492959e87ff836ab7fd13af50ae776f2 100644
 --- a/net/minecraft/world/level/block/Portal.java
 +++ b/net/minecraft/world/level/block/Portal.java
 @@ -1,5 +1,6 @@

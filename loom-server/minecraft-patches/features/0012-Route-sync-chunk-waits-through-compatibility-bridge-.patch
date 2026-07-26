@@ -5,10 +5,10 @@ Subject: [PATCH] Route sync chunk waits through compatibility bridge mode
 
 
 diff --git a/net/minecraft/server/dedicated/DedicatedServer.java b/net/minecraft/server/dedicated/DedicatedServer.java
-index bc857ea218018e5cf651ecd81093b4b4e566034e..9b79ab22b95e86f102fc609f493a6731d37da4fe 100644
+index 0b6d7f99edde802cb464baa5a4b2b4a4dcce684a..8a10107363ab4f35ad983154210d396056b7775a 100644
 --- a/net/minecraft/server/dedicated/DedicatedServer.java
 +++ b/net/minecraft/server/dedicated/DedicatedServer.java
-@@ -281,6 +281,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+@@ -237,6 +237,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
          // Paper start - initialize global and world-defaults configuration
          this.paperConfigurations.initializeGlobalConfiguration(this.registryAccess());
          this.paperConfigurations.initializeWorldDefaultsConfiguration(this.registryAccess());
@@ -17,7 +17,7 @@ index bc857ea218018e5cf651ecd81093b4b4e566034e..9b79ab22b95e86f102fc609f493a6731
          this.server.spark.enableEarlyIfRequested(); // Paper - spark
          // Paper start - fix converting txt to json file; convert old users earlier after PlayerList creation but before file load/save
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
-index 2f2e0d13dd90e0d40bc56c55c08e797cca4b5c22..173a0605cdbbef5a9b672afc5b17f3dc065bba80 100644
+index 2dd623796c90d88c0ebb32003165e7a9b4ea7f44..a5d8754739559ef39126d538e61992a4251cb54a 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
 @@ -118,7 +118,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
@@ -30,7 +30,7 @@ index 2f2e0d13dd90e0d40bc56c55c08e797cca4b5c22..173a0605cdbbef5a9b672afc5b17f3dc
                  ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.popChunkWait();
              }
 diff --git a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
-index e3ef3686addda221f8d5af0f53f6441836f87356..a9f8180d042e516bcac4c1f26b441250b91bd1da 100644
+index 3f71a4994d0a9a1aba8c011b7bbf93c4d39bf21e..4ec1abf30cbf4897ccd18a720f4c5a9ac92a4076 100644
 --- a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
 +++ b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
 @@ -1,11 +1,12 @@
@@ -48,7 +48,7 @@ index e3ef3686addda221f8d5af0f53f6441836f87356..a9f8180d042e516bcac4c1f26b441250
  import net.minecraft.server.level.ServerLevel;
  import net.minecraft.server.threading.TickRegions;
 @@ -30,28 +31,32 @@ public final class ThreadedRegionsBlockingBarrier {
-         return Thread.currentThread() == server.serverThread;
+         return Thread.currentThread() == server.getRunningThread();
      }
  
 -    public static void awaitStartupChunkLoad(

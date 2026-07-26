@@ -5,10 +5,10 @@ Subject: [PATCH] Isolate parallel structure generation
 
 
 diff --git a/net/minecraft/world/level/levelgen/structure/StructurePiece.java b/net/minecraft/world/level/levelgen/structure/StructurePiece.java
-index d0ac9820f7e8a046c6b7838f00b796cd2db4263a..cd66e4b78cd3cc45258cb8bf9cab8b6d7cec1716 100644
+index a04be389ba8c0cd968837d2a381fe61f5a6a0f0f..ed7e541b422ef4cc8e86cc397b17311bafb5ae6f 100644
 --- a/net/minecraft/world/level/levelgen/structure/StructurePiece.java
 +++ b/net/minecraft/world/level/levelgen/structure/StructurePiece.java
-@@ -329,8 +329,9 @@ public abstract class StructurePiece {
+@@ -318,8 +318,9 @@ public abstract class StructurePiece {
              for (int x = x0; x <= x1; x++) {
                  for (int z = z0; z <= z1; z++) {
                      if (!skipAir || !this.getBlock(level, x, y, z, chunkBB).isAir()) {
@@ -20,7 +20,7 @@ index d0ac9820f7e8a046c6b7838f00b796cd2db4263a..cd66e4b78cd3cc45258cb8bf9cab8b6d
                      }
                  }
              }
-@@ -639,12 +640,6 @@ public abstract class StructurePiece {
+@@ -626,12 +627,6 @@ public abstract class StructurePiece {
      }
  
      public abstract static class BlockSelector {
@@ -54,10 +54,10 @@ index a9da88f3865b98a80388ef82332df326fdb10b40..a1fd4b1214644d898fc4b6ae8d7cc371
          }
      }
 diff --git a/net/minecraft/world/level/levelgen/structure/structures/NetherFortressPieces.java b/net/minecraft/world/level/levelgen/structure/structures/NetherFortressPieces.java
-index 13adadccd76ff8e590f89653a356a3f4de7b34f2..aa60e4b6f558b501183feb68380c823893e132ed 100644
+index a225d3571f400ad6c2f4f29a0965829cfd32cb39..583d5ef32e08032153bb0dbad1c197c078a472ff 100644
 --- a/net/minecraft/world/level/levelgen/structure/structures/NetherFortressPieces.java
 +++ b/net/minecraft/world/level/levelgen/structure/structures/NetherFortressPieces.java
-@@ -1536,6 +1536,10 @@ public class NetherFortressPieces {
+@@ -1516,6 +1516,10 @@ public class NetherFortressPieces {
              this(pieceClass, weight, maxPlaceCount, false);
          }
  
@@ -68,7 +68,7 @@ index 13adadccd76ff8e590f89653a356a3f4de7b34f2..aa60e4b6f558b501183feb68380c8238
          public boolean doPlace(final int depth) {
              return this.maxPlaceCount == 0 || this.placeCount < this.maxPlaceCount;
          }
-@@ -1702,13 +1706,11 @@ public class NetherFortressPieces {
+@@ -1682,13 +1686,11 @@ public class NetherFortressPieces {
              super(west, north, getRandomHorizontalDirection(random));
  
              for (NetherFortressPieces.PieceWeight piece : NetherFortressPieces.BRIDGE_PIECE_WEIGHTS) {
@@ -85,7 +85,7 @@ index 13adadccd76ff8e590f89653a356a3f4de7b34f2..aa60e4b6f558b501183feb68380c8238
          }
  
 diff --git a/net/minecraft/world/level/levelgen/structure/structures/StrongholdPieces.java b/net/minecraft/world/level/levelgen/structure/structures/StrongholdPieces.java
-index 48e49486d36ef1d8e325fc57fd798e89851e5036..3bd3f07bde5bb8b89674a8589dd69f91e397a229 100644
+index e0cc438e2f9a6cddde9f55bcd74d8792ec225611..a4648518002feab94f5aa4a98cbdb09815c7e458 100644
 --- a/net/minecraft/world/level/levelgen/structure/structures/StrongholdPieces.java
 +++ b/net/minecraft/world/level/levelgen/structure/structures/StrongholdPieces.java
 @@ -55,48 +55,19 @@ public class StrongholdPieces {
@@ -141,7 +141,7 @@ index 48e49486d36ef1d8e325fc57fd798e89851e5036..3bd3f07bde5bb8b89674a8589dd69f91
      private static StrongholdPieces.@Nullable StrongholdPiece findAndCreatePieceFactory(
          final Class<? extends StrongholdPieces.StrongholdPiece> pieceClass,
          final StructurePieceAccessor structurePieceAccessor,
-@@ -145,14 +116,15 @@ public class StrongholdPieces {
+@@ -145,15 +116,16 @@ public class StrongholdPieces {
          final Direction direction,
          final int depth
      ) {
@@ -149,50 +149,51 @@ index 48e49486d36ef1d8e325fc57fd798e89851e5036..3bd3f07bde5bb8b89674a8589dd69f91
 +        StrongholdPieces.AssemblyState assemblyState = startPiece.assemblyState;
 +        if (!assemblyState.updatePieceWeight()) {
              return null;
-         } else {
--            if (imposedPiece != null) {
-+            if (assemblyState.imposedPiece != null) {
-                 StrongholdPieces.StrongholdPiece strongholdPiece = findAndCreatePieceFactory(
--                    imposedPiece, structurePieceAccessor, random, footX, footY, footZ, direction, depth
-+                    assemblyState.imposedPiece, structurePieceAccessor, random, footX, footY, footZ, direction, depth
-                 );
--                imposedPiece = null;
-+                assemblyState.imposedPiece = null;
-                 if (strongholdPiece != null) {
-                     return strongholdPiece;
-                 }
-@@ -162,23 +134,23 @@ public class StrongholdPieces {
+         }
  
-             while (numAttempts < 5) {
-                 numAttempts++;
--                int weightSelection = random.nextInt(totalWeight);
-+                int weightSelection = random.nextInt(assemblyState.totalWeight);
+-        if (imposedPiece != null) {
++        if (assemblyState.imposedPiece != null) {
+             StrongholdPieces.StrongholdPiece strongholdPiece = findAndCreatePieceFactory(
+-                imposedPiece, structurePieceAccessor, random, footX, footY, footZ, direction, depth
++                assemblyState.imposedPiece, structurePieceAccessor, random, footX, footY, footZ, direction, depth
+             );
+-            imposedPiece = null;
++            assemblyState.imposedPiece = null;
+             if (strongholdPiece != null) {
+                 return strongholdPiece;
+             }
+@@ -163,23 +135,23 @@ public class StrongholdPieces {
  
--                for (StrongholdPieces.PieceWeight piece : currentPieces) {
--                    weightSelection -= piece.weight;
-+                for (StrongholdPieces.PieceState piece : assemblyState.currentPieces) {
-+                    weightSelection -= piece.definition.weight;
-                     if (weightSelection < 0) {
--                        if (!piece.doPlace(depth) || piece == startPiece.previousPiece) {
-+                        if (!piece.doPlace(depth) || piece == assemblyState.previousPiece) {
-                             break;
+         while (numAttempts < 5) {
+             numAttempts++;
+-            int weightSelection = random.nextInt(totalWeight);
++            int weightSelection = random.nextInt(assemblyState.totalWeight);
+ 
+-            for (StrongholdPieces.PieceWeight piece : currentPieces) {
+-                weightSelection -= piece.weight;
++            for (StrongholdPieces.PieceState piece : assemblyState.currentPieces) {
++                weightSelection -= piece.definition.weight;
+                 if (weightSelection < 0) {
+-                    if (!piece.doPlace(depth) || piece == startPiece.previousPiece) {
++                    if (!piece.doPlace(depth) || piece == assemblyState.previousPiece) {
+                         break;
+                     }
+ 
+                     StrongholdPieces.StrongholdPiece strongholdPiece = findAndCreatePieceFactory(
+-                        piece.pieceClass, structurePieceAccessor, random, footX, footY, footZ, direction, depth
++                        piece.definition.pieceClass, structurePieceAccessor, random, footX, footY, footZ, direction, depth
+                     );
+                     if (strongholdPiece != null) {
+                         piece.placeCount++;
+-                        startPiece.previousPiece = piece;
++                        assemblyState.previousPiece = piece;
+                         if (!piece.isValid()) {
+-                            currentPieces.remove(piece);
++                            assemblyState.currentPieces.remove(piece);
                          }
  
-                         StrongholdPieces.StrongholdPiece strongholdPiece = findAndCreatePieceFactory(
--                            piece.pieceClass, structurePieceAccessor, random, footX, footY, footZ, direction, depth
-+                            piece.definition.pieceClass, structurePieceAccessor, random, footX, footY, footZ, direction, depth
-                         );
-                         if (strongholdPiece != null) {
-                             piece.placeCount++;
--                            startPiece.previousPiece = piece;
-+                            assemblyState.previousPiece = piece;
-                             if (!piece.isValid()) {
--                                currentPieces.remove(piece);
-+                                assemblyState.currentPieces.remove(piece);
-                             }
- 
-                             return strongholdPiece;
-@@ -752,7 +724,6 @@ public class StrongholdPieces {
+                         return strongholdPiece;
+@@ -754,7 +726,6 @@ public class StrongholdPieces {
      private static class PieceWeight {
          public final Class<? extends StrongholdPieces.StrongholdPiece> pieceClass;
          public final int weight;
@@ -200,7 +201,7 @@ index 48e49486d36ef1d8e325fc57fd798e89851e5036..3bd3f07bde5bb8b89674a8589dd69f91
          public final int maxPlaceCount;
  
          public PieceWeight(final Class<? extends StrongholdPieces.StrongholdPiece> pieceClass, final int weight, final int maxPlaceCount) {
-@@ -761,12 +732,57 @@ public class StrongholdPieces {
+@@ -763,12 +734,57 @@ public class StrongholdPieces {
              this.maxPlaceCount = maxPlaceCount;
          }
  
@@ -262,7 +263,7 @@ index 48e49486d36ef1d8e325fc57fd798e89851e5036..3bd3f07bde5bb8b89674a8589dd69f91
          }
      }
  
-@@ -1213,20 +1229,20 @@ public class StrongholdPieces {
+@@ -1215,20 +1231,20 @@ public class StrongholdPieces {
  
      private static class SmoothStoneSelector extends StructurePiece.BlockSelector {
          @Override
@@ -289,7 +290,7 @@ index 48e49486d36ef1d8e325fc57fd798e89851e5036..3bd3f07bde5bb8b89674a8589dd69f91
              }
          }
      }
-@@ -1269,7 +1285,7 @@ public class StrongholdPieces {
+@@ -1271,7 +1287,7 @@ public class StrongholdPieces {
          @Override
          public void addChildren(final StructurePiece startPiece, final StructurePieceAccessor structurePieceAccessor, final RandomSource random) {
              if (this.isSource) {
@@ -298,7 +299,7 @@ index 48e49486d36ef1d8e325fc57fd798e89851e5036..3bd3f07bde5bb8b89674a8589dd69f91
              }
  
              this.generateSmallDoorChildForward((StrongholdPieces.StartPiece)startPiece, structurePieceAccessor, random, 1, 1);
-@@ -1324,7 +1340,7 @@ public class StrongholdPieces {
+@@ -1326,7 +1342,7 @@ public class StrongholdPieces {
      }
  
      public static class StartPiece extends StrongholdPieces.StairsDown {

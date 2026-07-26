@@ -5,10 +5,10 @@ Subject: [PATCH] Confine transient runtime state
 
 
 diff --git a/src/main/java/org/bukkit/craftbukkit/block/CraftBlockEntityState.java b/src/main/java/org/bukkit/craftbukkit/block/CraftBlockEntityState.java
-index f117b5fdb0d158fb0754a11fbf4fc4ddf19ff050..83ad816c2629855087b940a6ba8f667c5e5eb108 100644
+index 1ef1943c9934400e40c3c060299c98659709a5cc..f441923163e88d58dead8b4342f7da77b042081f 100644
 --- a/src/main/java/org/bukkit/craftbukkit/block/CraftBlockEntityState.java
 +++ b/src/main/java/org/bukkit/craftbukkit/block/CraftBlockEntityState.java
-@@ -33,6 +33,26 @@ public abstract class CraftBlockEntityState<T extends BlockEntity> extends Craft
+@@ -34,6 +34,26 @@ public abstract class CraftBlockEntityState<T extends BlockEntity> extends Craft
      private final T snapshot;
      public boolean snapshotDisabled; // Paper
      public static boolean DISABLE_SNAPSHOT = false; // Paper
@@ -35,7 +35,7 @@ index f117b5fdb0d158fb0754a11fbf4fc4ddf19ff050..83ad816c2629855087b940a6ba8f667c
  
      public CraftBlockEntityState(World world, T blockEntity) {
          super(world, blockEntity.getBlockPos(), blockEntity.getBlockState());
-@@ -41,8 +61,9 @@ public abstract class CraftBlockEntityState<T extends BlockEntity> extends Craft
+@@ -42,8 +62,9 @@ public abstract class CraftBlockEntityState<T extends BlockEntity> extends Craft
  
          try { // Paper - Show blockstate location if we failed to read it
          // Paper start
@@ -48,10 +48,10 @@ index f117b5fdb0d158fb0754a11fbf4fc4ddf19ff050..83ad816c2629855087b940a6ba8f667c
          } else {
              this.snapshot = this.createSnapshot(blockEntity);
 diff --git a/src/main/java/org/bukkit/craftbukkit/block/CraftBlockStates.java b/src/main/java/org/bukkit/craftbukkit/block/CraftBlockStates.java
-index e3fbe9d9a4fdf6590f7d0635fb7b930311a2a5a3..14a12ce4f3bd5667338f2a5ad56c7ba10f7b3bee 100644
+index 6dcfe2cea0acf6100163ef8a097bd27cd34aa6f4..c97cfa828f46c13f4aa27e11db575c546d0a225a 100644
 --- a/src/main/java/org/bukkit/craftbukkit/block/CraftBlockStates.java
 +++ b/src/main/java/org/bukkit/craftbukkit/block/CraftBlockStates.java
-@@ -196,14 +196,13 @@ public final class CraftBlockStates {
+@@ -197,14 +197,13 @@ public final class CraftBlockStates {
          BlockPos pos = craftBlock.getPosition();
          net.minecraft.world.level.block.state.BlockState state = craftBlock.getBlockState();
          BlockEntity blockEntity = craftBlock.getLevel().getBlockEntity(pos);
@@ -69,10 +69,10 @@ index e3fbe9d9a4fdf6590f7d0635fb7b930311a2a5a3..14a12ce4f3bd5667338f2a5ad56c7ba1
      }
  
 diff --git a/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java b/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
-index 7a42d1810f74a041318c8a3c53793106e872081f..115a6c523d4cadea14b0e9a3d733b4eecdef9a3e 100644
+index a5ea91906abebf44cfbfa120c535b8c391ab1acd..85657793c21bcb8bae589d47f844737934e31aee 100644
 --- a/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
 +++ b/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
-@@ -928,6 +928,21 @@ public class CraftEventFactory {
+@@ -932,6 +932,21 @@ public class CraftEventFactory {
      }
  
      public static BlockPos sourceBlockOverride = null; // SPIGOT-7068: Add source block override, not the most elegant way but better than passing down a BlockPos up to five methods deep.
@@ -94,7 +94,7 @@ index 7a42d1810f74a041318c8a3c53793106e872081f..115a6c523d4cadea14b0e9a3d733b4ee
  
      public static boolean handleBlockSpreadEvent(LevelAccessor level, BlockPos source, BlockPos target, net.minecraft.world.level.block.state.BlockState state, @net.minecraft.world.level.block.Block.UpdateFlags int flags) {
          return handleBlockSpreadEvent(level, source, target, state, flags, false);
-@@ -943,7 +958,10 @@ public class CraftEventFactory {
+@@ -947,7 +962,10 @@ public class CraftEventFactory {
          CraftBlockState snapshot = CraftBlockStates.getBlockState(level, target);
          snapshot.setBlock(state);
  
@@ -106,7 +106,7 @@ index 7a42d1810f74a041318c8a3c53793106e872081f..115a6c523d4cadea14b0e9a3d733b4ee
          if (event.callEvent()) {
              boolean result = snapshot.place(flags);
              return !checkSetResult || result;
-@@ -2358,7 +2376,7 @@ public class CraftEventFactory {
+@@ -2344,7 +2362,7 @@ public class CraftEventFactory {
  
      }
  
@@ -115,7 +115,7 @@ index 7a42d1810f74a041318c8a3c53793106e872081f..115a6c523d4cadea14b0e9a3d733b4ee
  
      public static boolean callBlockLockCheckEvent(
          BlockEntity blockEntity,
-@@ -2366,6 +2384,7 @@ public class CraftEventFactory {
+@@ -2352,6 +2370,7 @@ public class CraftEventFactory {
          Component displayName,
          net.minecraft.world.entity.player.Player p
      ) {
@@ -123,7 +123,7 @@ index 7a42d1810f74a041318c8a3c53793106e872081f..115a6c523d4cadea14b0e9a3d733b4ee
          if (p instanceof net.minecraft.server.level.ServerPlayer player
              && blockEntity != null
              && blockEntity.getLevel() != null
-@@ -2378,7 +2397,7 @@ public class CraftEventFactory {
+@@ -2364,7 +2383,7 @@ public class CraftEventFactory {
              if (event.getResult() == org.bukkit.event.Event.Result.ALLOW) {
                  return true;
              } else if (event.getResult() == org.bukkit.event.Event.Result.DENY || !code.canUnlock(player, event.isUsingCustomKeyItemStack() ? org.bukkit.craftbukkit.inventory.CraftItemStack.asNMSCopy(event.getKeyItem()) : player.getMainHandItem())) {
@@ -132,7 +132,7 @@ index 7a42d1810f74a041318c8a3c53793106e872081f..115a6c523d4cadea14b0e9a3d733b4ee
                  return false;
              }
          }
-@@ -2386,9 +2405,9 @@ public class CraftEventFactory {
+@@ -2372,9 +2391,9 @@ public class CraftEventFactory {
      }
  
      public static boolean sendChestLockedNotifications(Vec3 pos) {

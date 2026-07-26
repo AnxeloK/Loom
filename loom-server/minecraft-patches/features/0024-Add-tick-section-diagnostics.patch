@@ -172,10 +172,10 @@ index 0000000000000000000000000000000000000000..85da845af413754031e7ebfb94e2f7bd
 +    }
 +}
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
-index 173a0605cdbbef5a9b672afc5b17f3dc065bba80..c0c5d5f8f26e910274a5be116eddd02c6dc404af 100644
+index a5d8754739559ef39126d538e61992a4251cb54a..2528158d9b6aaeb2fb35f6a77ad130cc354104a7 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
-@@ -485,6 +485,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+@@ -483,6 +483,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
  
      @Override
      public void tick(final BooleanSupplier haveTime, final boolean tickChunks) {
@@ -184,7 +184,7 @@ index 173a0605cdbbef5a9b672afc5b17f3dc065bba80..c0c5d5f8f26e910274a5be116eddd02c
          ProfilerFiller profiler = Profiler.get();
          profiler.push("purge");
          if (this.level.tickRateManager().runsNormally() || !tickChunks || this.level.spigotConfig.unloadFrozenChunks) { // Spigot
-@@ -492,17 +494,45 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+@@ -490,17 +492,45 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
          }
  
          this.runDistanceManagerUpdates();
@@ -230,7 +230,7 @@ index 173a0605cdbbef5a9b672afc5b17f3dc065bba80..c0c5d5f8f26e910274a5be116eddd02c
      }
  
      private void tickChunks() {
-@@ -524,6 +554,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+@@ -522,6 +552,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
      }
  
      private void broadcastChangedChunks(final ProfilerFiller profiler) {
@@ -239,7 +239,7 @@ index 173a0605cdbbef5a9b672afc5b17f3dc065bba80..c0c5d5f8f26e910274a5be116eddd02c
          profiler.push("broadcast");
  
          for (ChunkHolder chunkHolder : this.chunkHoldersToBroadcast) {
-@@ -535,9 +567,14 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+@@ -533,9 +565,14 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
  
          this.chunkHoldersToBroadcast.clear();
          profiler.pop();
@@ -254,7 +254,7 @@ index 173a0605cdbbef5a9b672afc5b17f3dc065bba80..c0c5d5f8f26e910274a5be116eddd02c
          profiler.push("naturalSpawnCount");
          int chunkCount = this.distanceManager.getNaturalSpawnChunkCount();
          // Paper start - Optional per player mob spawns
-@@ -563,6 +600,11 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+@@ -561,6 +598,11 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
          }
          // Paper end - Optional per player mob spawns
          this.lastSpawnState = spawnCookie;
@@ -266,7 +266,7 @@ index 173a0605cdbbef5a9b672afc5b17f3dc065bba80..c0c5d5f8f26e910274a5be116eddd02c
          boolean doMobSpawning = this.level.getGameRules().get(GameRules.SPAWN_MOBS) && !this.level.players().isEmpty(); // CraftBukkit
          int tickSpeed = this.level.getGameRules().get(GameRules.RANDOM_TICK_SPEED);
          List<MobCategory> spawningCategories;
-@@ -580,17 +622,32 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+@@ -578,17 +620,32 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
          } else {
              spawningCategories = List.of();
          }
@@ -299,7 +299,7 @@ index 173a0605cdbbef5a9b672afc5b17f3dc065bba80..c0c5d5f8f26e910274a5be116eddd02c
              profiler.popPush("tickSpawningChunks");
  
              for (LevelChunk chunk : spawningChunks) {
-@@ -599,12 +656,25 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+@@ -597,12 +654,25 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
          } finally {
              spawningChunks.clear();
          }
@@ -326,18 +326,18 @@ index 173a0605cdbbef5a9b672afc5b17f3dc065bba80..c0c5d5f8f26e910274a5be116eddd02c
  
          profiler.pop();
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index d223e7b15cb14713ee41c772049ae6bc289bade4..f46ebc5a29363621cbd2a742288a87319d3af82c 100644
+index 697a070576fa0488787063fc1fb42d23e764a6c6..b2a915da2e09226ceef244cbf1eb60870794a129 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -193,6 +193,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
-     private static final int MAX_SCHEDULED_TICKS_PER_TICK = 65536;
+@@ -194,6 +194,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     private static final AtomicInteger ENTITY_COUNTER = new AtomicInteger();
      private final List<ServerPlayer> players = Lists.newArrayList();
-     public final ServerChunkCache chunkSource;
+     private final ServerChunkCache chunkSource;
 +    private final @Nullable LoomTickSectionDiagnostics loomTickSectionDiagnostics = LoomTickSectionDiagnostics.create();
      private final MinecraftServer server;
      public final io.papermc.paper.world.saveddata.PaperLevelOverrides serverLevelData; // Paper - type
      private final EntityTickList entityTickList = new EntityTickList();
-@@ -766,6 +767,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -781,6 +782,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          return this.environmentAttributes;
      }
  
@@ -348,7 +348,7 @@ index d223e7b15cb14713ee41c772049ae6bc289bade4..f46ebc5a29363621cbd2a742288a8731
      @Deprecated
      @VisibleForTesting
      public EnvironmentAttributeSystem setEnvironmentAttributes(final EnvironmentAttributeSystem environmentAttributes) {
-@@ -775,6 +780,12 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -790,6 +795,12 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      }
  
      public void tick(final BooleanSupplier haveTime) {
@@ -360,8 +360,8 @@ index d223e7b15cb14713ee41c772049ae6bc289bade4..f46ebc5a29363621cbd2a742288a8731
 +        }
          ProfilerFiller profiler = Profiler.get();
          this.handlingTick = true;
-         TickRateManager tickRateManager = this.tickRateManager();
-@@ -828,6 +839,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         this.environmentAttributes().invalidateTickCache();
+@@ -844,6 +855,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              this.tickTime();
          }
  
@@ -373,7 +373,7 @@ index d223e7b15cb14713ee41c772049ae6bc289bade4..f46ebc5a29363621cbd2a742288a8731
          profiler.push("tickPending");
          if (!this.isDebug() && runs) {
              long tick = this.getGameTime();
-@@ -838,18 +854,37 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -854,18 +870,37 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              profiler.pop();
          }
  
@@ -411,7 +411,7 @@ index d223e7b15cb14713ee41c772049ae6bc289bade4..f46ebc5a29363621cbd2a742288a8731
          this.handlingTick = false;
          profiler.pop();
          boolean isActive = !paperConfig().unsupportedSettings.disableWorldTickingWhenEmpty || this.chunkSource.hasActiveTickets(); // CraftBukkit - this prevents entity cleanup, other issues on servers with no players // Paper - restore this
-@@ -863,6 +898,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -879,6 +914,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
          if (this.emptyTime < 300) {
              profiler.push("entities");
@@ -419,7 +419,7 @@ index d223e7b15cb14713ee41c772049ae6bc289bade4..f46ebc5a29363621cbd2a742288a8731
              if (this.dragonFight != null && runs) {
                  profiler.push("dragonFight");
                  this.dragonFight.tick();
-@@ -870,13 +906,22 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -886,13 +922,22 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              }
  
              io.papermc.paper.entity.activation.ActivationRange.activateEntities(this); // Paper - EAR
@@ -442,7 +442,7 @@ index d223e7b15cb14713ee41c772049ae6bc289bade4..f46ebc5a29363621cbd2a742288a8731
                                  profiler.pop();
                                  if (true) { // Paper - rewrite chunk system
                                      Entity vehicle = entity.getVehicle();
-@@ -889,7 +934,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -905,7 +950,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
                                      }
  
                                      profiler.push("tick");
@@ -454,7 +454,7 @@ index d223e7b15cb14713ee41c772049ae6bc289bade4..f46ebc5a29363621cbd2a742288a8731
                                      profiler.pop();
                                  }
                              }
-@@ -897,13 +946,23 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -913,13 +962,23 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
                      }
                  );
              profiler.popPush("blockEntities");
@@ -478,16 +478,13 @@ index d223e7b15cb14713ee41c772049ae6bc289bade4..f46ebc5a29363621cbd2a742288a8731
          profiler.push("debugSynchronizers");
          if (this.debugSynchronizers.hasAnySubscriberFor(DebugSubscriptions.NEIGHBOR_UPDATES)) {
              this.neighborUpdater
-@@ -914,7 +973,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -930,6 +989,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
          this.debugSynchronizers.tick(this.server.debugSubscribers());
          profiler.pop();
 +        if (loomDiagnostics != null) {
 +            final long now = System.nanoTime();
 +            loomDiagnostics.record(LoomTickSectionDiagnostics.DEBUG, now - loomSectionStart);
-+        }
-         this.environmentAttributes().invalidateTickCache();
-+        if (loomDiagnostics != null) {
 +            loomDiagnostics.endTick(this, loomTickStart);
 +        }
      }

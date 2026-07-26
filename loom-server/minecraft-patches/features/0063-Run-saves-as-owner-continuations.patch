@@ -5,8 +5,21 @@ Subject: [PATCH] Run saves as owner continuations
 
 Capture mutable player and saved-data state inside its owner domain, then write immutable snapshots through asynchronous I/O. Save commands now complete through a finite region I/O barrier instead of blocking the lifecycle owner or waiting for unrelated future writes.
 
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/io/ChunkSystemRegionFileStorage.java b/ca/spottedleaf/moonrise/patches/chunk_system/io/ChunkSystemRegionFileStorage.java
+index a814512fcfb85312474ae2c2c21443843bf57831..1d7cba490e4024a192503711963684c78fcd3926 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/io/ChunkSystemRegionFileStorage.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/io/ChunkSystemRegionFileStorage.java
+@@ -10,6 +10,8 @@ public interface ChunkSystemRegionFileStorage {
+ 
+     public RegionFile moonrise$getRegionFileIfLoaded(final int chunkX, final int chunkZ);
+ 
++    public long[] moonrise$getLoadedRegionKeys();
++
+     public RegionFile moonrise$getRegionFileIfExists(final int chunkX, final int chunkZ) throws IOException;
+ 
+     public MoonriseRegionFileIO.RegionDataController.WriteData moonrise$startWrite(
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/io/MoonriseRegionFileIO.java b/ca/spottedleaf/moonrise/patches/chunk_system/io/MoonriseRegionFileIO.java
-index 3bb9b58ee97464687e348e23b99159226415c267..90dd9c3980f71f4056adf1227267a9c45bb1f43f 100644
+index 3bb9b58ee97464687e348e23b99159226415c267..997dcfda4407977c932e034eb8bf239cc6a6ccbf 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/io/MoonriseRegionFileIO.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/io/MoonriseRegionFileIO.java
 @@ -17,6 +17,7 @@ import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
@@ -97,7 +110,7 @@ index 3bb9b58ee97464687e348e23b99159226415c267..90dd9c3980f71f4056adf1227267a9c4
          public Priority getPriority() {
              synchronized (this) {
                  return this.priority;
-@@ -1450,9 +1503,57 @@ public final class MoonriseRegionFileIO {
+@@ -1450,9 +1503,54 @@ public final class MoonriseRegionFileIO {
          }
  
          final void endTask(final ChunkIOTask task) {
@@ -115,10 +128,7 @@ index 3bb9b58ee97464687e348e23b99159226415c267..90dd9c3980f71f4056adf1227267a9c4
 +
 +        public List<CompletableFuture<Void>> flushLoadedRegionsAsync(final MinecraftServer server) {
 +            final RegionFileStorage cache = this.getCache();
-+            final long[] loadedRegions;
-+            synchronized (cache) {
-+                loadedRegions = cache.regionCache.keySet().toLongArray();
-+            }
++            final long[] loadedRegions = cache.moonrise$getLoadedRegionKeys();
 +
 +            final List<CompletableFuture<Void>> completions = new ArrayList<>(loadedRegions.length);
 +            for (final long regionKey : loadedRegions) {
@@ -156,10 +166,10 @@ index 3bb9b58ee97464687e348e23b99159226415c267..90dd9c3980f71f4056adf1227267a9c4
              return this.inProgressTasks.get() != 0L;
          }
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index d21a2932aff446f65dbdf2beaf0c614b50db19f2..f96fd129b740682ce903ef8818368886de1d14a0 100644
+index 084353670c8be6a0438914d476af7abd630142e9..81f10744a0fcf32a750b07feec863c18bac0350c 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -38,6 +38,7 @@ import java.util.Map.Entry;
+@@ -36,6 +36,7 @@ import java.util.Map.Entry;
  import java.util.concurrent.CompletableFuture;
  import java.util.concurrent.Executor;
  import java.util.concurrent.RejectedExecutionException;
@@ -167,7 +177,7 @@ index d21a2932aff446f65dbdf2beaf0c614b50db19f2..f96fd129b740682ce903ef8818368886
  import java.util.concurrent.atomic.AtomicReference;
  import java.util.concurrent.locks.LockSupport;
  import java.util.function.BooleanSupplier;
-@@ -310,7 +311,9 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -309,7 +310,9 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      public PotionBrewing potionBrewing;
      private FuelValues fuelValues;
      private int emptyTicks;
@@ -178,7 +188,7 @@ index d21a2932aff446f65dbdf2beaf0c614b50db19f2..f96fd129b740682ce903ef8818368886
      private final SuppressedExceptionCollector suppressedExceptions = new SuppressedExceptionCollector();
      private final DiscontinuousFrame tickFrame;
      private final PacketProcessor packetProcessor;
-@@ -1023,17 +1026,20 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -991,17 +994,20 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          // Paper - move to saveGlobalData()
  
          if (flush) {
@@ -205,24 +215,22 @@ index d21a2932aff446f65dbdf2beaf0c614b50db19f2..f96fd129b740682ce903ef8818368886
      // Paper start - split out global level data
      public void saveGlobalData(final boolean flush) {
          this.scoreboard.storeToSaveDataIfDirty(this.getDataStorage().computeIfAbsent(ScoreboardSaveData.TYPE));
-@@ -1051,18 +1057,133 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1018,15 +1024,130 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+ 
      public boolean saveEverything(final boolean silent, final boolean flush, final boolean force) {
-         boolean var5;
          try {
 -            this.isSaving = true;
 +            this.beginSaving();
              this.getPlayerList().saveAll(); // Paper - Incremental chunk and player saving; diff on change
              boolean result = this.saveAllChunks(silent, flush, force);
              this.warnOnLowDiskSpace();
-             var5 = result;
+             return result;
          } finally {
 -            this.isSaving = false;
 +            this.endSaving();
-         }
- 
-         return var5;
-     }
- 
++        }
++    }
++
 +    // Loom start - owner-domain save transaction
 +    public CompletableFuture<Boolean> saveEverythingAsync(final boolean silent, final boolean flush, final boolean force) {
 +        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this, "save-everything-async");
@@ -334,14 +342,13 @@ index d21a2932aff446f65dbdf2beaf0c614b50db19f2..f96fd129b740682ce903ef8818368886
 +        if (remaining < 0) {
 +            this.activeSaveOperations.set(0);
 +            throw new IllegalStateException("Save operation accounting underflow");
-+        }
-+    }
+         }
+     }
 +    // Loom end - owner-domain save transaction
-+
+ 
      @Override
      public void close() {
-         this.stopServer();
-@@ -1105,7 +1226,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1070,7 +1191,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          }
          // CraftBukkit end
          this.getConnection().stop();
@@ -350,7 +357,7 @@ index d21a2932aff446f65dbdf2beaf0c614b50db19f2..f96fd129b740682ce903ef8818368886
          if (this.playerList != null) {
              LOGGER.info("Saving players");
              this.playerList.saveAll();
-@@ -1141,7 +1262,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1107,7 +1228,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
  
          this.saveAllChunks(false, true, false, true); // Paper - rewrite chunk system
  
@@ -359,10 +366,10 @@ index d21a2932aff446f65dbdf2beaf0c614b50db19f2..f96fd129b740682ce903ef8818368886
          this.savedDataStorage.close();
          this.resources.close();
  
-@@ -1191,6 +1312,28 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
-         this.safeShutdown(wait, false);
+@@ -1157,6 +1278,28 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         this.halt(wait, false);
      }
-     public void safeShutdown(final boolean wait, final boolean isRestarting) {
+     public void halt(final boolean wait, final boolean isRestarting) {
 +        // Loom start - do not close region storage while a non-blocking durability barrier owns it
 +        if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this) && !this.pendingAsyncSave.isDone()) {
 +            this.isRestarting |= isRestarting;
@@ -374,7 +381,7 @@ index d21a2932aff446f65dbdf2beaf0c614b50db19f2..f96fd129b740682ce903ef8818368886
 +                            net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this, "shutdown-after-save"),
 +                            () -> {
 +                                this.shutdownQueuedAfterSave = false;
-+                                this.safeShutdown(false, this.isRestarting);
++                                this.halt(false, this.isRestarting);
 +                            }
 +                        );
 +                    } catch (final RejectedExecutionException rejected) {
@@ -388,7 +395,7 @@ index d21a2932aff446f65dbdf2beaf0c614b50db19f2..f96fd129b740682ce903ef8818368886
          this.isRestarting = isRestarting;
          this.hasLoggedStop = true; // Paper - Debugging
          if (this.isDebugging()) io.papermc.paper.util.TraceUtil.dumpTraceForThread("Server stopped"); // Paper - Debugging
-@@ -1864,7 +2007,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1830,7 +1973,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          Profiler.get().push("save");
          final boolean fullSave = this.autosavePeriod > 0 && this.tickCount % this.autosavePeriod == 0;
          try {
@@ -397,7 +404,7 @@ index d21a2932aff446f65dbdf2beaf0c614b50db19f2..f96fd129b740682ce903ef8818368886
              if (playerSaveInterval > 0) {
                  this.playerList.saveAll(playerSaveInterval);
              }
-@@ -1877,7 +2020,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1843,7 +1986,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
                  }
              }
          } finally {
@@ -406,7 +413,7 @@ index d21a2932aff446f65dbdf2beaf0c614b50db19f2..f96fd129b740682ce903ef8818368886
          }
          Profiler.get().pop();
          // Paper end - Incremental chunk and player saving
-@@ -3089,7 +3232,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -3061,7 +3204,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      }
  
      public boolean isCurrentlySaving() {
@@ -416,10 +423,10 @@ index d21a2932aff446f65dbdf2beaf0c614b50db19f2..f96fd129b740682ce903ef8818368886
  
      public boolean isTimeProfilerRunning() {
 diff --git a/net/minecraft/server/PlayerAdvancements.java b/net/minecraft/server/PlayerAdvancements.java
-index 658db8460122db271bbc3c2c0844574b8d75f044..f48ecb35c56bcb7793fe45136aed2cc26b101184 100644
+index d447b444abd9b62ab241419301a96d19ae77a7eb..079a532a4f2c471ed7bf6409980cbbc508dd2972 100644
 --- a/net/minecraft/server/PlayerAdvancements.java
 +++ b/net/minecraft/server/PlayerAdvancements.java
-@@ -129,19 +129,30 @@ public class PlayerAdvancements {
+@@ -127,19 +127,30 @@ public class PlayerAdvancements {
      }
  
      public void save() {
@@ -445,8 +452,8 @@ index 658db8460122db271bbc3c2c0844574b8d75f044..f48ecb35c56bcb7793fe45136aed2cc2
 -                GSON.toJson(json, GSON.newJsonWriter(outputWriter));
 +                GSON.toJson(snapshot, GSON.newJsonWriter(outputWriter));
              }
-         } catch (JsonIOException | IOException var7) {
-             LOGGER.error("Couldn't save player advancements to {}", this.playerSavePath, var7);
+         } catch (IOException | JsonIOException e) {
+             LOGGER.error("Couldn't save player advancements to {}", this.playerSavePath, e);
          }
      }
 +    // Loom end - split owner-bound capture from asynchronous file I/O
@@ -454,12 +461,12 @@ index 658db8460122db271bbc3c2c0844574b8d75f044..f48ecb35c56bcb7793fe45136aed2cc2
      private void applyFrom(final ServerAdvancementManager manager, final PlayerAdvancements.Data data) {
          data.forEach((id, progress) -> {
 diff --git a/net/minecraft/server/commands/SaveAllCommand.java b/net/minecraft/server/commands/SaveAllCommand.java
-index bc6d01996dde0870f6ebbda14176352777938a0c..361aa24d60c4bd937c1dc8256abb692c8b092f53 100644
+index 299991905c24a7018f8ac60d0c16e56fa43cd710..315622400592063d7dcf90bd5ed9e94460276ddd 100644
 --- a/net/minecraft/server/commands/SaveAllCommand.java
 +++ b/net/minecraft/server/commands/SaveAllCommand.java
-@@ -1,16 +1,12 @@
- package net.minecraft.server.commands;
+@@ -2,16 +2,12 @@ package net.minecraft.server.commands;
  
+ import com.mojang.brigadier.Command;
  import com.mojang.brigadier.CommandDispatcher;
 -import com.mojang.brigadier.exceptions.CommandSyntaxException;
 -import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
@@ -474,7 +481,7 @@ index bc6d01996dde0870f6ebbda14176352777938a0c..361aa24d60c4bd937c1dc8256abb692c
      public static void register(final CommandDispatcher<CommandSourceStack> dispatcher) {
          dispatcher.register(
              Commands.literal("save-all")
-@@ -20,15 +16,18 @@ public class SaveAllCommand {
+@@ -21,15 +17,18 @@ public class SaveAllCommand {
          );
      }
  
@@ -485,10 +492,9 @@ index bc6d01996dde0870f6ebbda14176352777938a0c..361aa24d60c4bd937c1dc8256abb692c
 -        boolean success = server.saveEverything(true, flush, true);
 -        if (!success) {
 -            throw ERROR_FAILED.create();
--        } else {
--            source.sendSuccess(() -> Component.translatable("commands.save.success"), true);
--            return 1;
 -        }
+-
+-        source.sendSuccess(() -> Component.translatable("commands.save.success"), true);
 +        // Loom - keep command execution responsive while owner domains capture state and ASYNC_IO
 +        // completes durability. The completion future is resolved back inside GLOBAL_CONTROL.
 +        server.saveEverythingAsync(true, flush, true).whenComplete((success, failure) -> {
@@ -498,11 +504,11 @@ index bc6d01996dde0870f6ebbda14176352777938a0c..361aa24d60c4bd937c1dc8256abb692c
 +                source.sendSuccess(() -> Component.translatable("commands.save.success"), true);
 +            }
 +        });
-+        return 1;
+         return Command.SINGLE_SUCCESS;
      }
  }
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index 6c9dcc756e128ccf0feb6b8401b42d732a5bc122..3f6e029667fde744f6f91607a645012762cb5c65 100644
+index f93a12c8e49d7d4da7ea7ddc622b29b711bc07d8..23058ff83012f0d1d6c80abdac76ca71db1f0f03 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
 @@ -3,6 +3,7 @@ package net.minecraft.server.players;
@@ -513,7 +519,7 @@ index 6c9dcc756e128ccf0feb6b8401b42d732a5bc122..3f6e029667fde744f6f91607a6450127
  import com.mojang.authlib.GameProfile;
  import com.mojang.logging.LogUtils;
  import java.io.File;
-@@ -20,6 +21,9 @@ import java.util.Objects;
+@@ -19,6 +20,9 @@ import java.util.Map;
  import java.util.Optional;
  import java.util.Set;
  import java.util.UUID;
@@ -523,7 +529,7 @@ index 6c9dcc756e128ccf0feb6b8401b42d732a5bc122..3f6e029667fde744f6f91607a6450127
  import java.util.function.Function;
  import java.util.function.Predicate;
  import net.minecraft.ChatFormatting;
-@@ -548,19 +552,79 @@ public abstract class PlayerList {
+@@ -544,19 +548,79 @@ public abstract class PlayerList {
      }
  
      protected void save(final ServerPlayer player) {
@@ -612,7 +618,7 @@ index 6c9dcc756e128ccf0feb6b8401b42d732a5bc122..3f6e029667fde744f6f91607a6450127
      public net.kyori.adventure.text.@Nullable Component remove(final ServerPlayer player) { // CraftBukkit - return string // Paper - return Component
          // Paper start - Fix kick event leave message not being sent
 diff --git a/net/minecraft/stats/ServerStatsCounter.java b/net/minecraft/stats/ServerStatsCounter.java
-index 6764f97ac88d63c1e1d4f62014d4c16b929767e8..0f68dcba8cffbbe330e59423961d8c8e23d8d7cf 100644
+index f5beb001b938072e78c0ead7e0ad0499784ed1cf..7c283b8503ed3fbb2114e66339448a1f393ee974 100644
 --- a/net/minecraft/stats/ServerStatsCounter.java
 +++ b/net/minecraft/stats/ServerStatsCounter.java
 @@ -36,6 +36,7 @@ import net.minecraft.util.StrictJsonParser;
@@ -648,16 +654,32 @@ index 6764f97ac88d63c1e1d4f62014d4c16b929767e8..0f68dcba8cffbbe330e59423961d8c8e
 -                GSON.toJson(this.toJson(), GSON.newJsonWriter(writer));
 +                GSON.toJson(snapshot, GSON.newJsonWriter(writer));
              }
-         } catch (JsonIOException | IOException var6) {
-             LOGGER.error("Couldn't save stats to {}", this.file, var6);
+         } catch (IOException | JsonIOException e) {
+             LOGGER.error("Couldn't save stats to {}", this.file, e);
          }
      }
 +    // Loom end - split owner-bound capture from asynchronous file I/O
  
      @Override
      public void setValue(final Player player, final Stat<?> stat, final int count) {
+diff --git a/net/minecraft/world/level/chunk/storage/RegionFileStorage.java b/net/minecraft/world/level/chunk/storage/RegionFileStorage.java
+index 63b40c420030d935bb81a219fb33defe0946e21f..a327fba23e89032ba44fdb350817a8649e44ab4c 100644
+--- a/net/minecraft/world/level/chunk/storage/RegionFileStorage.java
++++ b/net/minecraft/world/level/chunk/storage/RegionFileStorage.java
+@@ -94,6 +94,11 @@ public class RegionFileStorage implements AutoCloseable, ca.spottedleaf.moonrise
+         return this.regionCache.getAndMoveToFirst(ChunkPos.pack(chunkX >> REGION_SHIFT, chunkZ >> REGION_SHIFT));
+     }
+ 
++    @Override
++    public synchronized final long[] moonrise$getLoadedRegionKeys() {
++        return this.regionCache.keySet().toLongArray();
++    }
++
+     @Override
+     public synchronized final RegionFile moonrise$getRegionFileIfExists(final int chunkX, final int chunkZ) throws IOException {
+         final long key = ChunkPos.pack(chunkX >> REGION_SHIFT, chunkZ >> REGION_SHIFT);
 diff --git a/net/minecraft/world/level/storage/PlayerDataStorage.java b/net/minecraft/world/level/storage/PlayerDataStorage.java
-index c5898bfb8b4f075b08090cba2e9f980174e0a326..55a5b412c48ea7be470c8d5696beff4d7b91c496 100644
+index eddb6ebe3fa50a818e54079b73ba117be0abd195..b1fcc011349c44e27a51ab20f52bda71da26427f 100644
 --- a/net/minecraft/world/level/storage/PlayerDataStorage.java
 +++ b/net/minecraft/world/level/storage/PlayerDataStorage.java
 @@ -17,6 +17,7 @@ import net.minecraft.util.ProblemReporter;
@@ -705,8 +727,8 @@ index c5898bfb8b4f075b08090cba2e9f980174e0a326..55a5b412c48ea7be470c8d5696beff4d
 +            Path realFile = playerDirPath.resolve(pendingSave.playerId() + ".dat");
 +            Path oldFile = playerDirPath.resolve(pendingSave.playerId() + ".dat_old");
              Util.safeReplaceFile(realFile, tmpFile, oldFile);
--        } catch (Exception var11) {
--            LOGGER.warn("Failed to save player data for {}", player.getPlainTextName(), var11); // Paper - Print exception
+-        } catch (Exception ignored) {
+-            LOGGER.warn("Failed to save player data for {}", player.getPlainTextName(), ignored); // Paper - Print exception
 +        } catch (Exception exception) {
 +            LOGGER.warn("Failed to save player data for {}", pendingSave.playerName(), exception); // Paper - Print exception
          }
@@ -720,17 +742,17 @@ index c5898bfb8b4f075b08090cba2e9f980174e0a326..55a5b412c48ea7be470c8d5696beff4d
          Path playerDirPath = this.playerDir.toPath();
          String idString = nameAndId.id().toString();
 diff --git a/net/minecraft/world/level/storage/SavedDataStorage.java b/net/minecraft/world/level/storage/SavedDataStorage.java
-index e305e81ad573c0547015a65387dd9b2cf11440c1..07536e20e54dd6f4948bd6415d504bce93b1534c 100644
+index 27bee69ba6c0630c83295fc3e7bc76f3f61a9bca..528d7abcba6222a737fa7689ee835ad2059b18bc 100644
 --- a/net/minecraft/world/level/storage/SavedDataStorage.java
 +++ b/net/minecraft/world/level/storage/SavedDataStorage.java
-@@ -153,7 +153,9 @@ public class SavedDataStorage implements AutoCloseable {
-         } else {
-             Map<SavedDataType<?>, CompoundTag> tagsToSave = this.collectDirtyTagsToSave();
-             if (tagsToSave.isEmpty()) {
--                return CompletableFuture.completedFuture(null);
-+                // Loom - a durability barrier must observe writes scheduled by the immediately preceding
-+                // capture pass even though that pass already cleared every dirty flag.
-+                return this.pendingWriteFuture;
-             } else {
-                 int threads = Util.maxAllowedExecutorThreads();
-                 int taskCount = tagsToSave.size();
+@@ -151,7 +151,9 @@ public class SavedDataStorage implements AutoCloseable {
+ 
+         Map<SavedDataType<?>, CompoundTag> tagsToSave = this.collectDirtyTagsToSave();
+         if (tagsToSave.isEmpty()) {
+-            return CompletableFuture.completedFuture(null);
++            // Loom - a durability barrier must observe writes scheduled by the immediately preceding
++            // capture pass even though that pass already cleared every dirty flag.
++            return this.pendingWriteFuture;
+         }
+ 
+         int threads = Util.maxAllowedExecutorThreads();

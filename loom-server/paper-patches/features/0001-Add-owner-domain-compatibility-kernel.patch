@@ -227,7 +227,7 @@ index f9a2c55a354c877749db3f92956de802ae575788..10da4667a66266525a63282912b75106
      }
  }
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-index 7ce9ebba8ce304d1f3f21d4f15ee5f3560d7700b..d249cfe3a8a0acfde7fcb1d6324246e9b6aa7335 100644
+index 2a298ec2c95e9cc913926324dbbf192caa38b05f..d249cfe3a8a0acfde7fcb1d6324246e9b6aa7335 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 @@ -4,6 +4,21 @@ import co.aikar.timings.TimedEventExecutor;
@@ -252,7 +252,7 @@ index 7ce9ebba8ce304d1f3f21d4f15ee5f3560d7700b..d249cfe3a8a0acfde7fcb1d6324246e9
  import org.bukkit.Server;
  import org.bukkit.Warning;
  import org.bukkit.event.Event;
-@@ -18,104 +33,263 @@ import org.bukkit.plugin.Plugin;
+@@ -18,103 +33,263 @@ import org.bukkit.plugin.Plugin;
  import org.bukkit.plugin.RegisteredListener;
  import org.jetbrains.annotations.NotNull;
  
@@ -529,7 +529,7 @@ index 7ce9ebba8ce304d1f3f21d4f15ee5f3560d7700b..d249cfe3a8a0acfde7fcb1d6324246e9
              throw new IllegalPluginAccessException("Plugin attempted to register " + event + " while not enabled");
          }
  
-         executor = new TimedEventExecutor(executor, plugin, null, event);
++        executor = new TimedEventExecutor(executor, plugin, null, event);
          this.getEventListeners(event).register(new RegisteredListener(listener, executor, priority, plugin, ignoreCancelled));
 +        this.compatibilityKernel.eventSemanticIndex().recordRegistration(event, plugin, priority, ignoreCancelled);
      }
@@ -560,7 +560,7 @@ index 7ce9ebba8ce304d1f3f21d4f15ee5f3560d7700b..d249cfe3a8a0acfde7fcb1d6324246e9
              if (clazz.getSuperclass() != null
                  && !clazz.getSuperclass().equals(Event.class)
                  && Event.class.isAssignableFrom(clazz.getSuperclass())) {
-@@ -128,24 +302,29 @@ class PaperEventManager {
+@@ -127,24 +302,29 @@ class PaperEventManager {
  
      // JavaPluginLoader
      @NotNull
@@ -596,7 +596,7 @@ index 7ce9ebba8ce304d1f3f21d4f15ee5f3560d7700b..d249cfe3a8a0acfde7fcb1d6324246e9
              // Do not register bridge or synthetic methods to avoid event duplication
              // Fixes SPIGOT-893
              if (method.isBridge() || method.isSynthetic()) {
-@@ -158,13 +337,13 @@ class PaperEventManager {
+@@ -157,13 +337,13 @@ class PaperEventManager {
              }
              final Class<? extends Event> eventClass = checkClass.asSubclass(Event.class);
              method.setAccessible(true);
@@ -613,7 +613,7 @@ index 7ce9ebba8ce304d1f3f21d4f15ee5f3560d7700b..d249cfe3a8a0acfde7fcb1d6324246e9
                      if (!warningState.printFor(warning)) {
                          break;
                      }
-@@ -177,12 +356,13 @@ class PaperEventManager {
+@@ -176,12 +356,13 @@ class PaperEventManager {
                              method.toGenericString(),
                              (warning != null && warning.reason().length() != 0) ? warning.reason() : "Server performance will be affected",
                              Arrays.toString(plugin.getPluginMeta().getAuthors().toArray())),
@@ -624,7 +624,7 @@ index 7ce9ebba8ce304d1f3f21d4f15ee5f3560d7700b..d249cfe3a8a0acfde7fcb1d6324246e9
                  }
              }
  
--            EventExecutor executor = new TimedEventExecutor(EventExecutor.create(method, eventClass), plugin, method, eventClass);
+-            EventExecutor executor = EventExecutor.create(method, eventClass);
 +            final EventExecutor executor = new TimedEventExecutor(EventExecutor.create(method, eventClass), plugin, method, eventClass);
              eventSet.add(new RegisteredListener(listener, executor, eh.priority(), plugin, eh.ignoreCancelled()));
          }
@@ -2564,10 +2564,10 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..35444bb7b6dadce125417f699310470a
 +    }
 +}
 diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
-index e0cd28970dcd610313504d726dd2b7522a1c7f6d..5815523c21ae1a0b204a7766a5bb6872cc9a1985 100644
+index 17b6275956c09e827201a3eb9bf6ee1521334bd2..43a047d0d4acbdfee4f6582e4dda8cbd7fef5aae 100644
 --- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
 +++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
-@@ -245,7 +245,6 @@ import org.bukkit.plugin.PluginLoadOrder;
+@@ -246,7 +246,6 @@ import org.bukkit.plugin.PluginLoadOrder;
  import org.bukkit.plugin.PluginManager;
  import org.bukkit.plugin.ServicesManager;
  import org.bukkit.plugin.SimplePluginManager;
@@ -2575,7 +2575,7 @@ index e0cd28970dcd610313504d726dd2b7522a1c7f6d..5815523c21ae1a0b204a7766a5bb6872
  import org.bukkit.plugin.messaging.Messenger;
  import org.bukkit.plugin.messaging.StandardMessenger;
  import org.bukkit.profile.PlayerProfile;
-@@ -265,7 +264,7 @@ public final class CraftServer implements Server {
+@@ -266,7 +265,7 @@ public final class CraftServer implements Server {
      private final String serverVersion;
      private final String bukkitVersion = Versioning.getBukkitVersion();
      private final Logger logger = Logger.getLogger("Minecraft");
@@ -2584,7 +2584,7 @@ index e0cd28970dcd610313504d726dd2b7522a1c7f6d..5815523c21ae1a0b204a7766a5bb6872
      private final CraftScheduler scheduler = new CraftScheduler();
      private final CraftCommandMap commandMap; // Paper - Move down
      private final SimpleHelpMap helpMap = new SimpleHelpMap(this);
-@@ -413,6 +412,7 @@ public final class CraftServer implements Server {
+@@ -409,6 +408,7 @@ public final class CraftServer implements Server {
          this.commandMap = new CraftCommandMap(this);
          this.pluginManager = new SimplePluginManager(this, commandMap);
          this.paperPluginManager = new io.papermc.paper.plugin.manager.PaperPluginManagerImpl(this, this.commandMap, pluginManager);

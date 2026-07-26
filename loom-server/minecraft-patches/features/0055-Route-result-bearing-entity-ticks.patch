@@ -5,10 +5,10 @@ Subject: [PATCH] Route result-bearing entity ticks
 
 
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index ebc24e67575ea800494a854df4514cc0dd046d4a..87d356f0f1d8f37ae40b78d5e58c78ead23691c8 100644
+index 6c6b3efd1547d998a33fba067e01a873200ef1fb..b1ed577dff4d60e95ee24b202dd37b150733c890 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -1470,13 +1470,25 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1483,13 +1483,25 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          this.guardEntityTick(this.tickNonPassengerConsumer, entity);
      }
  
@@ -40,7 +40,7 @@ index ebc24e67575ea800494a854df4514cc0dd046d4a..87d356f0f1d8f37ae40b78d5e58c78ea
      }
  
      // Tick entities bucketed by region, running non-adjacent regions concurrently. The non-adjacency
-@@ -1601,7 +1613,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1614,7 +1626,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              loomEntityDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_REPLAY, System.nanoTime() - loomReplayStart);
          }
          // The parallel phase has joined; we are back on the world-owning thread holding the full-level lease.
@@ -50,10 +50,10 @@ index ebc24e67575ea800494a854df4514cc0dd046d4a..87d356f0f1d8f37ae40b78d5e58c78ea
              for (int i = 0, n = ownerTick.size(); i < n; ++i) {
                  this.tickOneEntity(ownerTick.get(i));
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index d34e038ac6309359116ea65c735b5c69ecc50090..5c04410d946447ab95145218bd62434578b3954f 100644
+index 256bf100bbb340aeb383145cea1e5ab9d2994e17..a459e6d5d2c5c1ba89d3e160cdc6d051d14a277c 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
-@@ -736,6 +736,15 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -716,6 +716,15 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
          return new ServerItemCooldowns(this);
      }
  
@@ -70,10 +70,10 @@ index d34e038ac6309359116ea65c735b5c69ecc50090..5c04410d946447ab95145218bd624345
      public void tick() {
          // CraftBukkit start
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 4a414250ad2ce1034ff5d6c2aa73c823eaff6425..176fbb9c3414b8f00e49b2ca519d62871e774712 100644
+index 38e6430e6fc62727e96110457aa695203df3428c..6d6cbffcc088b23aedd37fb7aa3a856a4591c4c3 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -5285,6 +5285,12 @@ public abstract class Entity
+@@ -5362,6 +5362,12 @@ public abstract class Entity
          return false;
      }
  
@@ -87,7 +87,7 @@ index 4a414250ad2ce1034ff5d6c2aa73c823eaff6425..176fbb9c3414b8f00e49b2ca519d6287
          return true;
      }
 diff --git a/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java b/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java
-index 3465a5fc23f7f91fbfadceed2f74fe643fab390c..aa93a6eeb47cba381564abe681d293ffd111d6b4 100644
+index 1628f7b43da9b5e936a5eedc3bd9c3aa55ae9a94..6b12a17adba665df63a26db9fa9042f1a6b859e6 100644
 --- a/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java
 +++ b/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java
 @@ -81,6 +81,13 @@ public class MinecartHopper extends AbstractMinecartContainer implements Hopper

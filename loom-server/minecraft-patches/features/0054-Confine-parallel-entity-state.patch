@@ -5,10 +5,10 @@ Subject: [PATCH] Confine parallel entity state
 
 
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
-index 4d9655f3858c476c9982654da4681f4a5401a626..0df4c5cc46b2fae40e93a90db0aab513b8155395 100644
+index fd73bbb06ccd8bf8db941fc4bb96599ee03f6930..657bc2b47ed5833a6c8f31cbcdc9297734a7659e 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/EntityLookup.java
-@@ -233,7 +233,14 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+@@ -237,7 +237,14 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
  
      public void entityStatusChange(final Entity entity, final ChunkEntitySlices slices, final Visibility oldVisibility, final Visibility newVisibility, final boolean moved,
                                     final boolean created, final boolean destroyed) {
@@ -24,7 +24,7 @@ index 4d9655f3858c476c9982654da4681f4a5401a626..0df4c5cc46b2fae40e93a90db0aab513
  
          if (((ChunkSystemEntity)entity).moonrise$isUpdatingSectionStatus()) {
              // recursive status update
-@@ -1026,12 +1033,15 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
+@@ -1030,12 +1037,15 @@ public abstract class EntityLookup implements LevelEntityGetter<Entity> {
          // on the world-owning thread. Package-visible so RegionTickStaging.applyAndClear can call it.
          public void applyRemove(final Entity.RemovalReason reason) {
              final Entity entity = this.entity;
@@ -43,10 +43,10 @@ index 4d9655f3858c476c9982654da4681f4a5401a626..0df4c5cc46b2fae40e93a90db0aab513
              EntityLookup.this.removeEntityCallback(entity);
  
 diff --git a/io/papermc/paper/entity/activation/ActivationRange.java b/io/papermc/paper/entity/activation/ActivationRange.java
-index f44f9be27f8d3e5f3d9607f3618f40c8074f73cc..d4b69d8199ec4bdb232f72c07c148883f5c0082b 100644
+index 1956b02ba18a39ec5987a5e8dc1a1b970b640ec6..58e67d0663a9528b5a651666876700878d5b67c5 100644
 --- a/io/papermc/paper/entity/activation/ActivationRange.java
 +++ b/io/papermc/paper/entity/activation/ActivationRange.java
-@@ -39,6 +39,7 @@ import net.minecraft.world.phys.AABB;
+@@ -40,6 +40,7 @@ import net.minecraft.world.phys.AABB;
  import org.spigotmc.SpigotWorldConfig;
  import java.util.List;
  import java.util.Set;
@@ -54,7 +54,7 @@ index f44f9be27f8d3e5f3d9607f3618f40c8074f73cc..d4b69d8199ec4bdb232f72c07c148883
  
  public final class ActivationRange {
  
-@@ -65,30 +66,46 @@ public final class ActivationRange {
+@@ -66,30 +67,46 @@ public final class ActivationRange {
          final SpigotWorldConfig config = world.spigotConfig;
          final long inactiveFor = currentTick(entity) - entity.activatedTick;
          if (entity.activationType == ActivationType.VILLAGER) {
@@ -110,7 +110,7 @@ index f44f9be27f8d3e5f3d9607f3618f40c8074f73cc..d4b69d8199ec4bdb232f72c07c148883
  
      /**
       * These entities are excluded from Activation range checks.
-@@ -136,10 +153,10 @@ public final class ActivationRange {
+@@ -137,10 +154,10 @@ public final class ActivationRange {
          final int waterActivationRange = world.spigotConfig.waterActivationRange;
          final int flyingActivationRange = world.spigotConfig.flyingMonsterActivationRange;
          final int villagerActivationRange = world.spigotConfig.villagerActivationRange;
@@ -125,7 +125,7 @@ index f44f9be27f8d3e5f3d9607f3618f40c8074f73cc..d4b69d8199ec4bdb232f72c07c148883
  
          int maxRange = Math.max(monsterActivationRange, animalActivationRange);
          maxRange = Math.max(maxRange, raiderActivationRange);
-@@ -156,23 +173,28 @@ public final class ActivationRange {
+@@ -157,23 +174,28 @@ public final class ActivationRange {
              }
  
              final int worldHeight = world.getHeight();
@@ -164,7 +164,7 @@ index f44f9be27f8d3e5f3d9607f3618f40c8074f73cc..d4b69d8199ec4bdb232f72c07c148883
              }
          }
      }
-@@ -182,14 +204,57 @@ public final class ActivationRange {
+@@ -183,14 +205,57 @@ public final class ActivationRange {
       *
       * @param entity
       */
@@ -225,10 +225,10 @@ index f44f9be27f8d3e5f3d9607f3618f40c8074f73cc..d4b69d8199ec4bdb232f72c07c148883
              }
          }
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index ceaeb1f438c9048716bb9be44ce831d227e02b7b..4a414250ad2ce1034ff5d6c2aa73c823eaff6425 100644
+index 357cdd17e6ca0a672941f765d5ed1a0b8a1c40fe..38e6430e6fc62727e96110457aa695203df3428c 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -176,31 +176,114 @@ public abstract class Entity
+@@ -173,31 +173,114 @@ public abstract class Entity
  
      // Paper start - Share random for entities to make them more random
      public static RandomSource SHARED_RANDOM = new RandomRandomSource();
@@ -357,10 +357,10 @@ index ceaeb1f438c9048716bb9be44ce831d227e02b7b..4a414250ad2ce1034ff5d6c2aa73c823
      public org.bukkit.event.entity.CreatureSpawnEvent.@Nullable SpawnReason spawnReason; // Paper - Entity#getEntitySpawnReason
  
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index feb26eff43ec71f91b8c3e7cf5302146a94f59af..48429f7711ede4ddde6816b0af711dc58290dab9 100644
+index c2d31016ad2a5e5232173a70aefbf975c4fd45e7..482ddd7194bf876b805482036ada7050392eb455 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
-@@ -157,10 +157,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -158,10 +158,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      public List<net.minecraft.world.entity.item.ItemEntity> captureDrops;
      public final it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<SpawnCategory> ticksPerSpawnCategory = new it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<>();
      // Paper start - EAR 2

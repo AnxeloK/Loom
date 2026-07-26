@@ -5,7 +5,7 @@ Subject: [PATCH] Confine neighbor update chains
 
 
 diff --git a/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java b/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java
-index deb62cf4b878f34ba13f83faf711c0666f12e6fa..8cb763a8f641f98f82844ab3027252d05bcad904 100644
+index 1c7862ae4eaeb4d83e0fb423c86489f534e92be5..c3c35fa9de1ccd2d19ff9c82145646475f92a64c 100644
 --- a/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java
 +++ b/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java
 @@ -18,10 +18,8 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
@@ -98,6 +98,6 @@ index deb62cf4b878f34ba13f83faf711c0666f12e6fa..8cb763a8f641f98f82844ab3027252d0
 +        private int count;
 +    }
 +
-     record FullNeighborUpdate(BlockState state, BlockPos pos, Block block, @Nullable Orientation orientation, boolean movedByPiston)
+     private record FullNeighborUpdate(BlockState state, BlockPos pos, Block block, @Nullable Orientation orientation, boolean movedByPiston)
          implements CollectingNeighborUpdater.NeighborUpdates {
          @Override

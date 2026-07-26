@@ -5,10 +5,10 @@ Subject: [PATCH] Use primitive chunk proximity checks
 
 
 diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
-index 777211d28f12f134d7ec05f4553db221aa73622b..3924448337922c43349cec27158003a363ae60c5 100644
+index 3e540926d9cdc773a5f4030d2c68f675fca94137..3e6b05efce804e012e281dddb48f010d169e0a16 100644
 --- a/net/minecraft/server/level/ChunkMap.java
 +++ b/net/minecraft/server/level/ChunkMap.java
-@@ -702,7 +702,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -703,7 +703,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
      }
  
      // Paper start - optimise chunk tick iteration
@@ -17,7 +17,7 @@ index 777211d28f12f134d7ec05f4553db221aa73622b..3924448337922c43349cec27158003a3
          final ca.spottedleaf.moonrise.patches.chunk_system.level.chunk.ChunkData chunkData = ((ca.spottedleaf.moonrise.patches.chunk_system.level.chunk.ChunkSystemLevelChunk)levelChunk).moonrise$getChunkHolder().holderData;
          final ca.spottedleaf.moonrise.common.misc.NearbyPlayers.TrackedChunk nearbyPlayers = chunkData.nearbyPlayers;
          if (nearbyPlayers == null) {
-@@ -728,7 +728,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -729,7 +729,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
                  continue;
              }
              double blockRange = (double) ((event.getSpawnRadius() << 4) * (event.getSpawnRadius() << 4));
@@ -26,7 +26,7 @@ index 777211d28f12f134d7ec05f4553db221aa73622b..3924448337922c43349cec27158003a3
                  // Paper end - PlayerNaturallySpawnCreaturesEvent
                  return true;
              }
-@@ -749,7 +749,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -750,7 +750,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
          for (int i = 0; i < size; ++i) {
              final LevelChunk levelChunk = raw[i];
  
@@ -35,10 +35,10 @@ index 777211d28f12f134d7ec05f4553db221aa73622b..3924448337922c43349cec27158003a3
                  continue;
              }
  
-@@ -782,10 +782,23 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -783,10 +783,23 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
      }
  
-     boolean anyPlayerCloseEnoughTo(final BlockPos pos, final int maxDistance) {
+     public boolean anyPlayerCloseEnoughTo(final BlockPos pos, final int maxDistance) {
 -        Vec3 target = new Vec3(pos);
 +        if (maxDistance <= 0) {
 +            return false;
@@ -61,16 +61,16 @@ index 777211d28f12f134d7ec05f4553db221aa73622b..3924448337922c43349cec27158003a3
                  return true;
              }
          }
-@@ -865,26 +878,26 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -866,26 +879,26 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
      }
  
      public boolean playerIsCloseEnoughForSpawning(final ServerPlayer player, final ChunkPos pos, final double range) { // Spigot // Paper - chunk tick iteration optimisation - public
 -        if (player.isSpectator()) {
 -            return false;
--        } else {
--            double distanceToChunk = euclideanDistanceSquared(pos, player.position());
--            return distanceToChunk < range; // Spigot
 -        }
+-
+-        double distanceToChunk = euclideanDistanceSquared(pos, player.position());
+-        return distanceToChunk < range; // Spigot
 +        return this.playerIsCloseEnoughForSpawning(player, pos.x(), pos.z(), range);
      }
  
@@ -83,12 +83,12 @@ index 777211d28f12f134d7ec05f4553db221aa73622b..3924448337922c43349cec27158003a3
 +    ) {
          if (player.isSpectator()) {
              return false;
-         } else {
--            double distanceToPos = player.position().distanceTo(pos);
--            return distanceToPos < maxDistance;
-+            double distanceToChunk = euclideanDistanceSquared(chunkX, chunkZ, player.position());
-+            return distanceToChunk < range; // Spigot
          }
+ 
+-        double distanceToPos = player.position().distanceTo(pos);
+-        return distanceToPos < maxDistance;
++        double distanceToChunk = euclideanDistanceSquared(chunkX, chunkZ, player.position());
++        return distanceToChunk < range; // Spigot
      }
  
 -    private static double euclideanDistanceSquared(final ChunkPos chunkPos, final Vec3 pos) {
@@ -101,10 +101,10 @@ index 777211d28f12f134d7ec05f4553db221aa73622b..3924448337922c43349cec27158003a3
          double zd = zPos - pos.z;
          return xd * xd + zd * zd;
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 5d45b22ccf161072032f5da1b41ddf514ccbf7a4..123c87f56a00c3cb29149c21ff2644f387a01df2 100644
+index 88e64c6d8ba1bf231368a212d3dd08f74461de86..2a5c024b2b40a9f78e91b7bd0c676ae36622ca4f 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -1041,9 +1041,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1054,9 +1054,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          final net.minecraft.util.RandomSource simpleRandom = net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom);
          final boolean doubleTickFluids = !ca.spottedleaf.moonrise.common.PlatformHooks.get().configFixMC224294();
  
@@ -116,7 +116,7 @@ index 5d45b22ccf161072032f5da1b41ddf514ccbf7a4..123c87f56a00c3cb29149c21ff2644f3
  
          for (int sectionIndex = 0, sectionsLen = sections.length; sectionIndex < sectionsLen; sectionIndex++) {
              final int offsetY = (sectionIndex + minSection) << 4;
-@@ -1086,9 +1085,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1099,9 +1098,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
      public void tickChunk(final LevelChunk chunk, final int tickSpeed) {
          final net.minecraft.util.RandomSource simpleRandom = net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom); // Loom - per-domain RNG (was this.simpleRandom; torn seed under parallel ticking)
@@ -128,7 +128,7 @@ index 5d45b22ccf161072032f5da1b41ddf514ccbf7a4..123c87f56a00c3cb29149c21ff2644f3
          ProfilerFiller profiler = Profiler.get();
          profiler.push("iceandsnow");
  
-@@ -1109,10 +1107,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1122,10 +1120,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      }
  
      public void tickThunder(final LevelChunk chunk) {

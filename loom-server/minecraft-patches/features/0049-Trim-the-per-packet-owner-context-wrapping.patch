@@ -13,10 +13,10 @@ level, which is safe because both paths run on the single-threaded
 packet drain.
 
 diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
-index d953bb4edb1ae93667a3c8865cb3d2fc1354ada6..d31a01572d7427d95e2c82d42631d455a8e7b284 100644
+index e36483369fa969ee887fbfde9b068df24ae9611e..faf555b82c09044afa4727dabe6231100552fd79 100644
 --- a/net/minecraft/network/Connection.java
 +++ b/net/minecraft/network/Connection.java
-@@ -594,26 +594,50 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -593,26 +593,50 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
      private static int joinAttemptsThisTick; // Paper - Buffer joins to world
      private static int currTick; // Paper - Buffer joins to world
  
@@ -75,7 +75,7 @@ index d953bb4edb1ae93667a3c8865cb3d2fc1354ada6..d31a01572d7427d95e2c82d42631d455
              } finally {
                  net.minecraft.server.threading.TickRegions.popContext(context);
              }
-@@ -623,8 +647,8 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -622,8 +646,8 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          action.run();
      }
  
@@ -87,10 +87,10 @@ index d953bb4edb1ae93667a3c8865cb3d2fc1354ada6..d31a01572d7427d95e2c82d42631d455
  
      public void tick() {
 diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
-index 8a7830dfde27c293266d2c55538167331ca1981d..12bde1a921f18f9d60a670fcedcbfdb76c1aa28e 100644
+index 2900503c1278e339eac992d81c402b671a6c62ef..8aa2e8938f4cfc22cb185566e2c143f33dab35e2 100644
 --- a/net/minecraft/network/PacketProcessor.java
 +++ b/net/minecraft/network/PacketProcessor.java
-@@ -139,20 +139,28 @@ public class PacketProcessor implements AutoCloseable {
+@@ -138,20 +138,28 @@ public class PacketProcessor implements AutoCloseable {
              final int minChunkZ = chunkPos.z() - radius;
              final int maxChunkX = chunkPos.x() + radius;
              final int maxChunkZ = chunkPos.z() + radius;

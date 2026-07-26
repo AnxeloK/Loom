@@ -9,7 +9,7 @@ flushes. Flush inline after a bounded number of coalesced writes so
 the buffer never grows past backpressure thresholds.
 
 diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
-index 5d98833d368c60b76566828695c8ac4814658b76..11a3c9730c3e9e540f7065d0a6b795f26bb77f3d 100644
+index f2144fb078eedec3dd55de3e714ffa6db19cecd4..96c0a20ff6acd89a74e4799b2113db6050f5f332 100644
 --- a/net/minecraft/network/Connection.java
 +++ b/net/minecraft/network/Connection.java
 @@ -76,6 +76,10 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
@@ -23,7 +23,7 @@ index 5d98833d368c60b76566828695c8ac4814658b76..11a3c9730c3e9e540f7065d0a6b795f2
      public Channel channel;
      public SocketAddress address;
      // Spigot start
-@@ -492,7 +496,12 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -491,7 +495,12 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
              try {
                  this.channel.eventLoop().execute(() -> {
                      try {
@@ -37,7 +37,7 @@ index 5d98833d368c60b76566828695c8ac4814658b76..11a3c9730c3e9e540f7065d0a6b795f2
                      } finally {
                          this.loomPendingEventLoopWrites.decrementAndGet();
                      }
-@@ -500,6 +509,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -499,6 +508,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
                  if (batchFlush && this.loomFlushScheduled.compareAndSet(false, true)) {
                      this.channel.eventLoop().execute(() -> {
                          this.loomFlushScheduled.set(false);
