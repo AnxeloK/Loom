@@ -3,7 +3,12 @@ name: Patch and Build
 on:
   push:
     branches: [ "**" ]
+    tags: [ "v*" ]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -17,12 +22,49 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '21'
+          java-version: '25'
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
       - name: Configure Git User Details
         run: git config --global user.email "actions@github.com" && git config --global user.name "Github Actions"
       - name: Apply Patches
-        run: ./gradlew applyAllPatches --stacktrace
+        run: ./gradlew applyAllPatches --stacktrace --no-daemon --max-workers=2
       - name: Build
-        run: ./gradlew build
+        run: ./gradlew build :loom-server:createPaperclipJar --stacktrace --no-daemon --max-workers=2
+      - name: Package Build
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mc_version="$(sed -n 's/^mcVersion=//p' gradle.properties)"
+          jar_path="$(find loom-server/build/libs -maxdepth 1 -type f -name '*paperclip*.jar' -print -quit)"
+          test -n "${jar_path}"
+
+          mkdir -p artifacts
+          build_name="loom-mc${mc_version}-build.${GITHUB_RUN_NUMBER}.jar"
+          cp "${jar_path}" "artifacts/${build_name}"
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            release_name="loom-${GITHUB_REF_NAME#v}.jar"
+            cp "${jar_path}" "artifacts/${release_name}"
+            echo "release_asset=artifacts/${release_name}" >> "${GITHUB_OUTPUT}"
+          fi
+
+          echo "artifact_name=loom-mc${mc_version}-build.${GITHUB_RUN_NUMBER}" >> "${GITHUB_OUTPUT}"
+      - name: Upload Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: artifacts/loom-mc*-build.*.jar
+          if-no-files-found: error
+      - name: Publish GitHub Release
+        if: ${{ github.ref_type == 'tag' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ASSET: ${{ steps.package.outputs.release_asset }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${RELEASE_ASSET}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "${RELEASE_ASSET}" --verify-tag --generate-notes --title "${GITHUB_REF_NAME}"
+          fi
