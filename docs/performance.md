@@ -1,87 +1,67 @@
-# Performance and Tuning
+# Performance
 
-Loom spreads the server's heaviest work across CPU cores by default. World, chunk,
-and entity ticking run in parallel across a region scheduler pool, while the
-effects plugins can observe (block changes, events, spawns) are committed in a
-safe, ordered way so ordinary plugins still see Paper-like single-thread behavior.
-Chunk loading, generation, I/O, networking, and scheduled tasks also run off the
-main path.
+Tune Loom from a representative profile, not from a thread count alone. Player spread, chunk generation, plugins, view distance, packets, and garbage collection can all become the limiting factor.
 
-## What runs where
+## Start with a baseline
 
-- **World simulation** (chunk ticking, block/fluid ticks, entity ticking) runs in
-  parallel across the region scheduler pool. Writes that a plugin could observe are
-  staged during the parallel phase and replayed in order afterward, so plugin
-  callbacks keep Paper's main-thread guarantees.
-- **Chunk system** (load, generate, post-process, send) runs on a worker pool.
-- **Networking** runs on Netty I/O threads, with serverbound packet handlers
-  resumed inside the correct owner domain.
-- **Scheduled tasks and cross-region messages** drain on the region scheduler pool.
+Before changing settings, record:
 
-## Design tradeoffs
+- player count and the activity being tested
+- view distance and simulation distance
+- heap size and Java version
+- `/loom tps` output
+- `/loom compatibility` output
+- a profiler capture or JFR recording during the problem
 
-- Keeping plugins compatible is not free: observable writes are replayed in order
-  rather than committed in place, and per-world work is coordinated so plugins never
-  see partial state. Loom accepts that overhead in exchange for running unmodified
-  plugins across multiple cores.
-- Per-tick **drain budgets** bound chunk-task drains, packet bursts, and
-  mailbox/scheduler work to keep worst-case tick spikes low.
-- Region-scheduler and worker thread counts scale with the host's CPU count.
-- A faster path is only acceptable if it preserves vanilla behavior and owner
-  safety. Performance is never bought by weakening compatibility.
+Repeat the same activity after each change. One change at a time makes the result interpretable.
 
-## Recommended startup
+## CPU and containers
 
-A 3–6 GB heap is a sensible starting point; size it to your player count and
-available RAM, leaving headroom for the OS. The runtime benefits from G1 tuning —
-for example:
+Loom uses the processors visible to the JVM. On a dedicated host, that is usually the number of logical processors. In a container, CPU quota, cpuset limits, and the panel's allocation determine what Java sees.
+
+Logical processors are not the same as physical cores. Simultaneous multithreading can expose two logical processors per core, but those siblings share core resources. Treat the JVM's processor count as a scheduling limit, then validate it with a profile.
+
+## Memory and garbage collection
+
+Set an explicit heap and leave headroom outside it. A simple starting point is:
 
 ```bash
-java -Xms4G -Xmx4G \
-  -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 \
-  -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC \
-  -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M \
-  -XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 \
-  -XX:InitiatingHeapOccupancyPercent=15 -XX:SurvivorRatio=32 \
-  -XX:MaxTenuringThreshold=1 \
-  -jar server.jar nogui
+java -Xms4G -Xmx4G -XX:+UseG1GC -jar server.jar nogui
 ```
 
-Scale `-Xms`/`-Xmx` together and adjust to your hardware.
+Use the same `-Xms` and `-Xmx` only when the machine has enough spare memory. Increasing the heap can reduce allocation pressure, but it cannot fix CPU-bound tick work or a slow plugin.
 
-## Tuning properties
+## Thread settings
 
-All of the following are JVM system properties (`-Dname=value`). They do not
-require a rebuild, and the defaults target a typical modern multi-core host.
+Leave automatic values in place for the first profile:
 
-### Region scheduler
+```yaml
+chunk-system:
+  io-threads: -1
+  worker-threads: -1
+```
 
-| Property | Default | Effect |
-|---|---|---|
-| `paper.threadedregions.parallelScheduler.threads` | `cores / 2` | Threads in the pool that runs parallel world/chunk/entity ticking. |
-| `paper.threadedregions.parallelScheduler.bucketShift` | `3` | How large the region cells are that work is split into; larger is coarser. |
-| `loom.regionTaskBufferChunks` | `1` | Safety gap, in chunks, kept between cells that run in parallel. |
+`-1` lets the chunk system choose a value from the processors available to the JVM. Raising worker counts can improve generation throughput in some workloads, but it can also take CPU time from ticking, networking, and garbage collection. Make an override only when a profile shows the chunk worker pool is the bottleneck and the host has real CPU headroom.
 
-### Per-tick drain budgets (worst-case spike control)
+The same rule applies to `paper.threadedregions.parallelScheduler.threads`. More scheduler threads do not create more physical CPU. Start from Loom's automatic choice and test changes against the same player activity.
 
-| Property | Default | Effect |
-|---|---|---|
-| `Loom.TickStartChunkTaskMaxTasks` | `2` | Max chunk tasks drained at tick start. |
-| `Loom.TickStartChunkTaskBudgetNanos` | `1000000` | Time budget for the tick-start chunk drain. |
-| `Loom.PacketTickStartMaxPackets` | `2048` | Max packets drained at tick start. |
-| `Loom.PacketTickStartBudgetNanos` | `2000000` | Time budget for the tick-start packet drain. |
-| `paper.threadedregions.drain.targetSlackMillis` | `8` | Reduce drain budgets when close to the next tick. |
+## What to inspect first
 
-### Player chunk pipeline
+| Symptom | Likely next check |
+| --- | --- |
+| Tick time rises with players in one area | Entity count, block activity, plugin callbacks, and a profiler flame graph. |
+| Tick time rises when players spread out | Chunk generation, disk I/O, send queues, and worker saturation. |
+| Players rubber-band or see delayed movement | Packet handling, owner-domain handoffs, network latency, and tick spikes. |
+| High CPU but acceptable memory | CPU profile and runnable thread count. Do not raise the heap first. |
+| Long garbage collection pauses | Heap pressure, allocation sources, native memory headroom, and JVM flags. |
+| Frequent fallback or refusal diagnostics | The named plugin path. More worker threads will not fix unsafe plugin access. |
 
-| Property | Default | Effect |
-|---|---|---|
-| `Loom.PlayerChunkSendMaxPerTick` | `4` | Max chunks sent per player per tick. |
-| `Loom.PlayerChunkSendBudgetMillis` | `3` | Time budget for chunk sends. |
-| `Loom.PlayerChunkGenerationAdmissionBudgetMillis` | `2` | Time budget for admitting chunk generation. |
-| `Loom.PlayerChunkLoadScheduleBudgetMillis` | `2` | Time budget for scheduling chunk loads. |
-| `Loom.PlayerChunkPostProcessBudgetMillis` | `2` | Time budget for chunk post-processing. |
+## A practical tuning loop
 
-Raising the chunk pipeline budgets favors throughput; lowering them favors smoother
-per-tick latency. Tune to your workload and validate on a live server before
-committing to non-default values.
+1. Reproduce the problem with normal players or a realistic load test.
+2. Capture a profile for the same interval.
+3. Identify the largest cost in the profile.
+4. Change one setting or remove one source of work.
+5. Repeat the capture and compare it with the baseline.
+
+Keep profiler collection available on active servers. A profile taken while players are actually exploring, fighting, generating chunks, or using plugins is far more useful than an idle capture.
