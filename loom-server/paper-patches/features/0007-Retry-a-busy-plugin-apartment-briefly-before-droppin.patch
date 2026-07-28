@@ -18,17 +18,15 @@ existing strict-fallback handoff and get no retry. The budget is
 tunable with Loom.CompatApartmentWaitMillis and defaults to 5.
 
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-index 23fea5deafb8d19a27f989a457b477dd50baba9d..6dc33a90876efe448401e4bdc8c2e689b1d6a73b 100644
+index fb62c3167fd7ddf22cbbe2433f610c48cab1b555..ab438e9ee827fde2aa6f5756d3850eafcbe5cd5c 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-@@ -35,6 +35,14 @@ import org.jetbrains.annotations.NotNull;
+@@ -35,6 +35,12 @@ import org.jetbrains.annotations.NotNull;
  
  class PaperEventManager {
  
-+    // Loom - how long an owner-domain thread may retry a busy plugin apartment before giving up on the
-+    // dispatch. The lease holder is normally another worker finishing a listener within microseconds, so a
-+    // short bounded retry converts most contention losses into slightly delayed successful dispatches while
-+    // keeping a hard upper bound in case the holder is itself blocked on this thread's phase join.
++    // Maximum time an owner-domain thread may retry a busy plugin apartment. A hard deadline prevents the
++    // retry from waiting indefinitely when the lease holder is blocked on this thread's phase join.
 +    private static final long APARTMENT_CONTENTION_WAIT_NANOS = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(
 +        Math.max(0L, Long.getLong("Loom.CompatApartmentWaitMillis", 5L))
 +    );
@@ -36,18 +34,16 @@ index 23fea5deafb8d19a27f989a457b477dd50baba9d..6dc33a90876efe448401e4bdc8c2e689
      private final Server server;
      private final CompatibilityKernel compatibilityKernel;
  
-@@ -185,7 +193,7 @@ class PaperEventManager {
+@@ -185,20 +191,17 @@ class PaperEventManager {
          final String path
      ) throws Throwable {
          final CompatibilityApartment apartment = this.compatibilityKernel.apartmentFor(registration.getPlugin());
 -        try (CompatibilityApartment.Scope scope = apartment.enter(transaction, strictFallback, path)) {
 +        try (CompatibilityApartment.Scope scope = this.enterApartmentBounded(apartment, transaction, strictFallback, path, profile, event)) {
              if (!scope.acquired()) {
-                 // Loom Fix 0 - apartment contention is a TRANSIENT, per-dispatch condition (another thread
-                 // currently holds this plugin's single apartment lease). It must NOT permanently latch the
-@@ -196,14 +204,12 @@ class PaperEventManager {
-                 // escalated the sticky volatile mode). Instead the refusal — when we cannot run the listener
-                 // for this one dispatch — is a LOCAL, non-persistent decision recorded for diagnostics only.
+                 // Apartment contention is local to this dispatch. It must not persistently change the plugin
+                 // classification to LEGACY_STRICT or REFUSED: that would drop later events, including events
+                 // that can run safely on their owner thread. Record this refusal only for diagnostics.
                  if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
 -                    // The owner thread is hard-blocked in futures.join() during the parallel phase, so we can
 -                    // neither run the listener inline here (off-owner, would race shared plugin state) nor
@@ -55,27 +51,23 @@ index 23fea5deafb8d19a27f989a457b477dd50baba9d..6dc33a90876efe448401e4bdc8c2e689
 -                    // to the owner by RegionTickStaging.deferEventToOwner before reaching this path; anything
 -                    // still arriving here is the staged-veto class (cancellation must suppress a synchronous
 -                    // side effect) which cannot be deferred without firing-site staging. Drop ONLY this one
--                    // dispatch (no persistent mode change), recording it for the diagnostics counter so the
+-                    // dispatch (no persistent classification change), recording it for the diagnostics counter so the
 -                    // remaining gap stays visible.
 +                    // The bounded retry in enterApartmentBounded already waited for the lease. Reaching this
 +                    // point means the holder did not release it within the budget, so running the listener
 +                    // inline (off-owner, would race shared plugin state) and a synchronous round-trip to the
-+                    // owner (deadlock while it joins the parallel phase) both stay off the table. Drop ONLY
-+                    // this one dispatch (no persistent mode change), recording it for the diagnostics counter
-+                    // so the remaining firing-site staging gap stays visible.
++                    // owner (deadlock while it joins the parallel phase) both stay off the table. Drop this
++                    // dispatch without changing the persistent classification and record it for diagnostics.
                      this.compatibilityKernel.diagnostics().recordTransientRefusal(
                          profile,
                          "transient apartment contention for " + event.getEventName() + " lane=" + registration.getPriority()
-@@ -244,6 +250,43 @@ class PaperEventManager {
+@@ -239,6 +242,40 @@ class PaperEventManager {
          }
      }
  
-+    // Loom - acquire the plugin apartment, retrying briefly on an owner-domain thread instead of failing the
-+    // dispatch outright. The busy lease normally belongs to another worker that releases it within
-+    // microseconds; waiting a few milliseconds rescues the dispatch (and with it a protection plugin's
-+    // cancellation) in almost every contention case. The budget is a hard bound so a holder that is itself
-+    // blocked on this thread's phase join can only cost the budget, never a deadlock. Off-owner callers get
-+    // no retry: their path below hands off to the plugin's strict-fallback thread and blocks safely there.
++    // Attempts to acquire the plugin apartment and briefly retries on an owner-domain thread. The deadline
++    // bounds the wait when the lease holder is blocked on this thread's phase join. Off-owner callers use
++    // the strict-fallback executor instead.
 +    private CompatibilityApartment.Scope enterApartmentBounded(
 +        final CompatibilityApartment apartment,
 +        final CompatibilityTransaction transaction,

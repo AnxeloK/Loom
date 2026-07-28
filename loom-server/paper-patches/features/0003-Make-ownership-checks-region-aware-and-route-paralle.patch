@@ -121,7 +121,7 @@ index 071e2191bab8fd9de1fc4fb5fa2472f8315adaff..2c36922658ff18555c4f3dcbbf027501
 +    // Loom end
  }
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-index c6fb5dbd9a05b23f050cdb2a2712fe4a8445c0d1..23fea5deafb8d19a27f989a457b477dd50baba9d 100644
+index d0b25c2909647a55d878ba1e8e33ac6cf23ae354..fb62c3167fd7ddf22cbbe2433f610c48cab1b555 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 @@ -49,6 +49,23 @@ class PaperEventManager {
@@ -148,7 +148,7 @@ index c6fb5dbd9a05b23f050cdb2a2712fe4a8445c0d1..23fea5deafb8d19a27f989a457b477dd
          if (event.isAsynchronous() && this.server.isPrimaryThread()) {
              throw new IllegalStateException(event.getEventName() + " may only be triggered asynchronously.");
          } else if (!event.isAsynchronous() && !this.server.isPrimaryThread() && !this.server.isStopping()) {
-@@ -170,15 +187,27 @@ class PaperEventManager {
+@@ -170,15 +187,22 @@ class PaperEventManager {
          final CompatibilityApartment apartment = this.compatibilityKernel.apartmentFor(registration.getPlugin());
          try (CompatibilityApartment.Scope scope = apartment.enter(transaction, strictFallback, path)) {
              if (!scope.acquired()) {
@@ -157,14 +157,9 @@ index c6fb5dbd9a05b23f050cdb2a2712fe4a8445c0d1..23fea5deafb8d19a27f989a457b477dd
 -                    profile,
 -                    "apartment busy in " + event.getEventName() + " owner=" + scope.busyLease()
 -                );
-+                // Loom Fix 0 - apartment contention is a TRANSIENT, per-dispatch condition (another thread
-+                // currently holds this plugin's single apartment lease). It must NOT permanently latch the
-+                // plugin's persistent compatibility mode to LEGACY_STRICT / REFUSED: doing so dropped ALL of
-+                // that plugin's subsequent events on EVERY thread (incl. the owner thread, where the listener
-+                // could run safely), which silently bypassed e.g. WorldGuard's protection listeners. So we no
-+                // longer call noteApartmentContention / recordStrictFallback / recordRefusal here (each of which
-+                // escalated the sticky volatile mode). Instead the refusal — when we cannot run the listener
-+                // for this one dispatch — is a LOCAL, non-persistent decision recorded for diagnostics only.
++                // Apartment contention is local to this dispatch. It must not persistently change the plugin
++                // classification to LEGACY_STRICT or REFUSED: that would drop later events, including events
++                // that can run safely on their owner thread. Record this refusal only for diagnostics.
                  if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
 -                    this.compatibilityKernel.diagnostics().recordRefusal(
 +                    // The owner thread is hard-blocked in futures.join() during the parallel phase, so we can
@@ -173,7 +168,7 @@ index c6fb5dbd9a05b23f050cdb2a2712fe4a8445c0d1..23fea5deafb8d19a27f989a457b477dd
 +                    // to the owner by RegionTickStaging.deferEventToOwner before reaching this path; anything
 +                    // still arriving here is the staged-veto class (cancellation must suppress a synchronous
 +                    // side effect) which cannot be deferred without firing-site staging. Drop ONLY this one
-+                    // dispatch (no persistent mode change), recording it for the diagnostics counter so the
++                    // dispatch (no persistent classification change), recording it for the diagnostics counter so the
 +                    // remaining gap stays visible.
 +                    this.compatibilityKernel.diagnostics().recordTransientRefusal(
                          profile,
@@ -210,19 +205,15 @@ index 8bd9acfc677a854a19bf3e5b88473f0ad27120ef..63009af5233851977b4bb84099b8de84
                  final CompatibilityRuntimeContext.Scope context = transaction == null
                      ? CompatibilityRuntimeContext.enter(this.plugin, transactionId, strictFallback, path)
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
-index a9c393b7e563e78be3c17209453fe8064ba97628..95263f66f2515d9e07bcb8ccc7c35d0a1cb7698c 100644
+index a9c393b7e563e78be3c17209453fe8064ba97628..e7498fd873bfa16fc84d3e1f8cda85d272c11d96 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
-@@ -261,6 +261,24 @@ public final class CompatibilityDiagnostics {
+@@ -261,6 +261,20 @@ public final class CompatibilityDiagnostics {
          );
      }
  
-+    // Loom Fix 0 - a PER-DISPATCH refusal that does NOT latch the plugin's persistent compatibility mode.
-+    // Used for transient apartment contention: we drop only the current dispatch but leave the plugin fully
-+    // re-evaluated on the next one (so an event firing on the owner thread, or after the lease frees, runs
-+    // normally). It bumps the diagnostics counter and emits a distinct "transient_refusal" log so the
-+    // remaining staged-veto gap stays observable, but it never calls profile.noteRefusal (which would set the
-+    // sticky volatile mode to REFUSED and poison every future dispatch on every thread).
++    // Records a refusal for one dispatch without changing the plugin's persistent classification. Apartment
++    // contention can clear before the next event, so record it separately from profile.noteRefusal.
 +    public void recordTransientRefusal(final PluginCompatibilityProfile profile, final String reason) {
 +        this.refusals.increment();
 +        this.logStructured(

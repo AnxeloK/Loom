@@ -79,7 +79,7 @@ index 0000000000000000000000000000000000000000..08c7b5e38f200b2bf0503e22d1897665
 +    }
 +}
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-index d249cfe3a8a0acfde7fcb1d6324246e9b6aa7335..c6fb5dbd9a05b23f050cdb2a2712fe4a8445c0d1 100644
+index db7c8ffe444c6b4746fe4c405ec7fd6bfb40d451..d0b25c2909647a55d878ba1e8e33ac6cf23ae354 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 @@ -57,6 +57,10 @@ class PaperEventManager {
@@ -250,131 +250,18 @@ index 1244fe4c71adf3b6c70d9483b98e8cdc77ea3af0..a9c393b7e563e78be3c17209453fe806
              "strict_fallback",
              Map.of(
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
-index c7438c10b7442aa226fd53453651fd46c7a0fe20..54ff56466f3975faa8bc917eda7151734d306112 100644
+index ba2c63b1a1d786273d7611c91ace772b0b1c7aaa..0cdd808cba06096625a7dbd8252dac049712487f 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
-@@ -1,6 +1,5 @@
- package io.papermc.paper.plugin.manager.compat;
- 
--import io.papermc.paper.configuration.GlobalConfiguration;
- import java.util.Map;
- import java.util.concurrent.ConcurrentHashMap;
- import org.bukkit.event.Event;
-@@ -103,10 +102,10 @@ public final class CompatibilityKernel {
-         }
- 
-         if (hasStrictOrRefused) {
--            return new RoutingDecision(DispatchRoute.STRICT_REFUSAL, "strict/refused listener profile");
-+            return new RoutingDecision(DispatchRoute.STRICT_REFUSAL, "strict/refused listener state");
-         }
-         if (hasInternal) {
--            return new RoutingDecision(DispatchRoute.UNSAFE_INTERNAL, "internal listener profile");
-+            return new RoutingDecision(DispatchRoute.UNSAFE_INTERNAL, "internal listener state");
-         }
-         if (hasLegacy && transaction.semantics().observerOnly()) {
-             return new RoutingDecision(DispatchRoute.SNAPSHOT_OBSERVER, "legacy observer listeners only");
-@@ -137,36 +136,28 @@ public final class CompatibilityKernel {
-         final PluginCompatibilityProfile profile = this.profileFor(listener.getPlugin());
-         final String path = pathFor(transaction, listener);
-         final PluginCompatibilityProfile.State state = profile.stateForPath(path);
--        final CompatibilityMode compatibilityMode = configuredMode();
- 
-         if (profile.mode() == PluginCompatibilityProfile.Mode.REFUSED || state == PluginCompatibilityProfile.State.REFUSED) {
--            return new InvocationPlan(InvocationPolicy.REFUSE, ExecutionLane.REFUSAL_LANE, path, "profile/path refused");
-+            return new InvocationPlan(InvocationPolicy.REFUSE, ExecutionLane.REFUSAL_LANE, path, "listener/path refused");
-         }
- 
--        if (compatibilityMode == CompatibilityMode.STRICT && state == PluginCompatibilityProfile.State.FORCED_MAX_COMPAT) {
--            return new InvocationPlan(InvocationPolicy.REFUSE, ExecutionLane.REFUSAL_LANE, path, "strict mode refuses forced max-compat path");
-+        if (profile.mode() == PluginCompatibilityProfile.Mode.NATIVE_LOOM_AWARE && state == PluginCompatibilityProfile.State.NATIVE_FAST_PATH
-+            && routingDecision.route() == DispatchRoute.NATIVE_FAST_PATH) {
-+            return new InvocationPlan(InvocationPolicy.NATIVE, ExecutionLane.FAST_LANE, path, "loom preserved native fast path");
-         }
- 
--        if (compatibilityMode == CompatibilityMode.MAX_COMPAT) {
--            if (profile.mode() == PluginCompatibilityProfile.Mode.NATIVE_LOOM_AWARE && state == PluginCompatibilityProfile.State.NATIVE_FAST_PATH
--                && routingDecision.route() == DispatchRoute.NATIVE_FAST_PATH) {
--                return new InvocationPlan(InvocationPolicy.NATIVE, ExecutionLane.FAST_LANE, path, "max-compat preserved native fast path");
--            }
--            return new InvocationPlan(InvocationPolicy.EMERGENCY_COMPATIBILITY, ExecutionLane.EMERGENCY_COMPATIBILITY_LANE, path, "max-compat policy");
--        }
--
--        if (state == PluginCompatibilityProfile.State.FORCED_MAX_COMPAT) {
-+        if (requiresLoomEmergencyLane(profile, state)) {
-             return new InvocationPlan(
-                 InvocationPolicy.EMERGENCY_COMPATIBILITY,
-                 ExecutionLane.EMERGENCY_COMPATIBILITY_LANE,
-                 path,
--                "path forced to max compatibility"
-+                "loom degraded path"
-             );
-         }
+@@ -156,7 +156,7 @@ public final class CompatibilityKernel {
  
          final InvocationPolicy policy = this.policyFor(profile);
          final ExecutionLane lane = laneFor(policy, routingDecision);
 -        return new InvocationPlan(policy, lane, path, routingDecision.reason());
-+        return new InvocationPlan(policy, lane, path, "loom default path: " + routingDecision.reason());
++        return new InvocationPlan(policy, lane, path, "default path: " + routingDecision.reason());
      }
  
      public static String pathFor(final CompatibilityTransaction transaction, final RegisteredListener listener) {
-@@ -200,11 +191,13 @@ public final class CompatibilityKernel {
-         };
-     }
- 
--    private static CompatibilityMode configuredMode() {
--        final GlobalConfiguration globalConfiguration = GlobalConfiguration.get();
--        if (globalConfiguration == null || globalConfiguration.compatibility == null) {
--            return CompatibilityMode.HYBRID;
--        }
--        return CompatibilityMode.fromConfig(globalConfiguration.compatibility.mode);
-+    private static boolean requiresLoomEmergencyLane(
-+        final PluginCompatibilityProfile profile,
-+        final PluginCompatibilityProfile.State state
-+    ) {
-+        return state == PluginCompatibilityProfile.State.FORCED_MAX_COMPAT
-+            || state == PluginCompatibilityProfile.State.LEGACY_DEGRADED
-+            || profile.mode() == PluginCompatibilityProfile.Mode.LEGACY_INTERNAL
-+            || profile.mode() == PluginCompatibilityProfile.Mode.LEGACY_STRICT;
-     }
- }
-diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityMode.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityMode.java
-deleted file mode 100644
-index 040e250d770af49dddb1d26fa0c8439c13b39642..0000000000000000000000000000000000000000
---- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityMode.java
-+++ /dev/null
-@@ -1,31 +0,0 @@
--package io.papermc.paper.plugin.manager.compat;
--
--import java.util.Locale;
--
--public enum CompatibilityMode {
--    STRICT("strict"),
--    HYBRID("hybrid"),
--    MAX_COMPAT("max-compat");
--
--    private final String configValue;
--
--    CompatibilityMode(final String configValue) {
--        this.configValue = configValue;
--    }
--
--    public String configValue() {
--        return this.configValue;
--    }
--
--    public static CompatibilityMode fromConfig(final String value) {
--        if (value == null || value.isBlank()) {
--            return HYBRID;
--        }
--        final String normalized = value.trim().toLowerCase(Locale.ROOT);
--        return switch (normalized) {
--            case "strict" -> STRICT;
--            case "max-compat", "max_compat", "maxcompat" -> MAX_COMPAT;
--            default -> HYBRID;
--        };
--    }
--}
-\ No newline at end of file
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
 index a2088af44fc4cd5b24377c8a80ebc8afd8c55ba9..8734c7b3be4c85fc5237396960764990b1de67e0 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
@@ -632,7 +519,7 @@ index 2017f86f7206cdde736ee1a3c3988f03725643b4..021625f2d6af9ca62fedbb97cd1695b6
  
      public List<ListenerSemantic> snapshot(final Class<? extends Event> eventClass) {
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
-index 35444bb7b6dadce125417f699310470a409e2941..bc43c4aede04f37c59d9dc048209f2c007b9ade8 100644
+index f2a68f0b6baccaf9745c1a15878f41c2e259fd7c..682cea8cecaad40fa281fac81f516b4c8636f2c9 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
 @@ -147,7 +147,6 @@ public final class PluginCompatibilityProfile {
@@ -850,149 +737,6 @@ index 0000000000000000000000000000000000000000..e0b49507281e6cec722207efb0b4fe67
 +        Mockito.when(plugin.isEnabled()).thenReturn(true);
 +        return plugin;
 +    }
-+}
-diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
-index b7243a07463eebff557d34a4691672f54884f955..9603a8f5a64c7c81c59f1ef02f6b0fdf2932d208 100644
---- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
-+++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
-@@ -1,8 +1,6 @@
- package io.papermc.paper.plugin.manager.compat;
- 
--import io.papermc.paper.configuration.GlobalConfiguration;
- import io.papermc.paper.plugin.configuration.PluginMeta;
--import java.lang.reflect.Field;
- import java.util.List;
- import java.util.logging.Logger;
- import org.bukkit.event.Event;
-@@ -20,15 +18,6 @@ import org.mockito.Mockito;
- @Normal
- class CompatibilityKernelRoutingTest {
- 
--    @Test
--    void compatibilityModeParsingSupportsAliases() {
--        Assertions.assertEquals(CompatibilityMode.HYBRID, CompatibilityMode.fromConfig(null));
--        Assertions.assertEquals(CompatibilityMode.STRICT, CompatibilityMode.fromConfig("strict"));
--        Assertions.assertEquals(CompatibilityMode.MAX_COMPAT, CompatibilityMode.fromConfig("max-compat"));
--        Assertions.assertEquals(CompatibilityMode.MAX_COMPAT, CompatibilityMode.fromConfig("max_compat"));
--        Assertions.assertEquals(CompatibilityMode.MAX_COMPAT, CompatibilityMode.fromConfig("maxcompat"));
--    }
--
-     @Test
-     void pathLocalDegradationDoesNotImmediatelyGlobalize() {
-         final Plugin plugin = mockPlugin("LegacyNormal", "com.example.LegacyNormal", List.of(), List.of());
-@@ -44,40 +33,47 @@ class CompatibilityKernelRoutingTest {
-     }
- 
-     @Test
--    void maxCompatRoutesLegacyPathsToEmergencyLane() throws Exception {
--        final GlobalConfiguration previous = setGlobalMode("max-compat");
--        try {
--            final CompatibilityKernel kernel = new CompatibilityKernel();
--            final RegisteredListener listener = listenerFor(mockPlugin("LegacyNormal", "com.example.LegacyNormal", List.of(), List.of()));
--            final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
--            final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
--            final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
--
--            Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.EMERGENCY_COMPATIBILITY, plan.policy());
--            Assertions.assertEquals(CompatibilityKernel.ExecutionLane.EMERGENCY_COMPATIBILITY_LANE, plan.lane());
--        } finally {
--            setGlobal(previous);
--        }
-+    void loomRoutesObservedSafeLegacyPathsToApartmentLane() {
-+        final CompatibilityKernel kernel = new CompatibilityKernel();
-+        final RegisteredListener listener = listenerFor(mockPlugin("ObservedSafeLegacy", "com.example.ObservedSafeLegacy", List.of(), List.of()));
-+        final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
-+        final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
-+        final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
-+
-+        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.APARTMENT, plan.policy());
-+        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.APARTMENT_LANE, plan.lane());
-     }
- 
-     @Test
--    void strictModeRefusesForcedMaxCompatProfiles() throws Exception {
--        final GlobalConfiguration previous = setGlobalMode("strict");
--        try {
--            final CompatibilityKernel kernel = new CompatibilityKernel();
--            final Plugin plugin = mockPlugin("LegacyNormal", "com.example.LegacyNormal", List.of(), List.of());
--            final RegisteredListener listener = listenerFor(plugin);
--            final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
--            final String path = CompatibilityKernel.pathFor(transaction, listener);
--            kernel.profileFor(plugin).noteForcedMaxCompat(path, "test escalation");
--
--            final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
--            final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
--
--            Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.REFUSE, plan.policy());
--        } finally {
--            setGlobal(previous);
--        }
-+    void loomKeepsDegradedPathsOnEmergencyLane() {
-+        final CompatibilityKernel kernel = new CompatibilityKernel();
-+        final Plugin plugin = mockPlugin("ForcedCompatLegacy", "com.example.ForcedCompatLegacy", List.of(), List.of());
-+        final RegisteredListener listener = listenerFor(plugin);
-+        final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
-+        final String path = CompatibilityKernel.pathFor(transaction, listener);
-+        kernel.profileFor(plugin).noteForcedMaxCompat(path, "test forced path");
-+
-+        final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
-+        final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
-+
-+        Assertions.assertEquals(path, plan.path());
-+        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.EMERGENCY_COMPATIBILITY, plan.policy());
-+        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.EMERGENCY_COMPATIBILITY_LANE, plan.lane());
-+    }
-+
-+    @Test
-+    void refusedProfilesStillUseRefusalLane() {
-+        final CompatibilityKernel kernel = new CompatibilityKernel();
-+        final Plugin plugin = mockPlugin("RefusedLegacy", "com.example.RefusedLegacy", List.of(), List.of());
-+        final RegisteredListener listener = listenerFor(plugin);
-+        final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
-+        kernel.profileFor(plugin).noteRefusal("test refusal");
-+
-+        final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
-+        final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
-+
-+        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.REFUSE, plan.policy());
-+        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.REFUSAL_LANE, plan.lane());
-     }
- 
-     private static RegisteredListener listenerFor(final Plugin plugin) {
-@@ -108,27 +104,6 @@ class CompatibilityKernelRoutingTest {
-         return plugin;
-     }
- 
--    private static GlobalConfiguration setGlobalMode(final String mode) throws Exception {
--        final GlobalConfiguration previous = global();
--        final GlobalConfiguration config = new GlobalConfiguration();
--        config.compatibility = config.new Compatibility();
--        config.compatibility.mode = mode;
--        setGlobal(config);
--        return previous;
--    }
--
--    private static GlobalConfiguration global() throws Exception {
--        final Field field = GlobalConfiguration.class.getDeclaredField("instance");
--        field.setAccessible(true);
--        return (GlobalConfiguration)field.get(null);
--    }
--
--    private static void setGlobal(final GlobalConfiguration config) throws Exception {
--        final Field field = GlobalConfiguration.class.getDeclaredField("instance");
--        field.setAccessible(true);
--        field.set(null, config);
--    }
--
-     private static final class DummyEvent extends Event {
-         private static final HandlerList HANDLERS = new HandlerList();
- 
-@@ -141,4 +116,4 @@ class CompatibilityKernelRoutingTest {
-             return HANDLERS;
-         }
-     }
--}
-\ No newline at end of file
 +}
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java
 new file mode 100644
