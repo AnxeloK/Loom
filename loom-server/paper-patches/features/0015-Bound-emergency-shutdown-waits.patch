@@ -187,7 +187,7 @@ index ab6c553f0f5c228e65c95538fc2deef07d9cd077..fc51d410d45a4c2010c2d27cb793e2e1
                      break;
 diff --git a/src/test/java/org/bukkit/craftbukkit/util/ServerShutdownThreadTest.java b/src/test/java/org/bukkit/craftbukkit/util/ServerShutdownThreadTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..08c4f83335cde1c7b88b9dd0bce05831a89c053a
+index 0000000000000000000000000000000000000000..cf5185c5538f6afbdd17278f07c034cd56cc71e6
 --- /dev/null
 +++ b/src/test/java/org/bukkit/craftbukkit/util/ServerShutdownThreadTest.java
 @@ -0,0 +1,63 @@
@@ -216,14 +216,14 @@ index 0000000000000000000000000000000000000000..08c4f83335cde1c7b88b9dd0bce05831
 +        Mockito.doAnswer(invocation -> {
 +            Assertions.assertTrue(OwnerDomainExecutor.isGlobalOwner(server));
 +            return null;
-+        }).when(server).safeShutdown(false, true);
++        }).when(server).halt(false, true);
 +
 +        Assertions.assertTrue(ServerShutdownThread.requestShutdown(server, true));
 +
-+        Mockito.verify(server, Mockito.never()).safeShutdown(false, true);
++        Mockito.verify(server, Mockito.never()).halt(false, true);
 +        Assertions.assertNotNull(queued.get());
 +        queued.get().run();
-+        Mockito.verify(server).safeShutdown(false, true);
++        Mockito.verify(server).halt(false, true);
 +    }
 +
 +    @Test
@@ -233,7 +233,7 @@ index 0000000000000000000000000000000000000000..08c4f83335cde1c7b88b9dd0bce05831
 +
 +        Assertions.assertTrue(ServerShutdownThread.requestShutdown(server, false));
 +
-+        Mockito.verify(server, Mockito.never()).safeShutdown(Mockito.anyBoolean(), Mockito.anyBoolean());
++        Mockito.verify(server, Mockito.never()).halt(Mockito.anyBoolean(), Mockito.anyBoolean());
 +    }
 +
 +    @Test
