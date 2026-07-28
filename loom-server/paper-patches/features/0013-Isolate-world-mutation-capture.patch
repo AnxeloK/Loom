@@ -171,10 +171,10 @@ index 5d6116c55072c028e1e9409628de47932d06a4cf..ca3843d4ef7075f58f3beb4f553d0e2f
      @Override
 diff --git a/src/test/java/net/minecraft/world/level/LevelCaptureContextTest.java b/src/test/java/net/minecraft/world/level/LevelCaptureContextTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..8b5fe6c42c0ec42829960878dbfa8c295d32df9a
+index 0000000000000000000000000000000000000000..1f27c756769091682de932f59cebc503c94868a3
 --- /dev/null
 +++ b/src/test/java/net/minecraft/world/level/LevelCaptureContextTest.java
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,284 @@
 +package net.minecraft.world.level;
 +
 +import ca.spottedleaf.moonrise.common.util.TickThread;
@@ -308,6 +308,7 @@ index 0000000000000000000000000000000000000000..8b5fe6c42c0ec42829960878dbfa8c29
 +        final AtomicBoolean completed = new AtomicBoolean();
 +
 +        Mockito.when(level.getChunkSource()).thenReturn(chunkSource);
++        Mockito.when(loadedChunk.getPos()).thenReturn(new ChunkPos(2, 3));
 +        Mockito.when(state.isPlaced()).thenReturn(true);
 +        Mockito.when(state.getWorldHandle()).thenReturn(level);
 +        Mockito.when(state.getX()).thenReturn(position.getX());
@@ -332,11 +333,15 @@ index 0000000000000000000000000000000000000000..8b5fe6c42c0ec42829960878dbfa8c29
 +            Mockito.verify(state, Mockito.never()).place(Mockito.anyInt());
 +
 +            Mockito.when(chunkSource.getChunkAtIfLoadedImmediately(2, 3)).thenReturn(loadedChunk);
-+            final TickRegions.RegionContext context = TickRegions.pushRegionContext(level, 2, 3, 2, 3);
-+            try {
-+                loadCallback.get().accept(List.of(loadedChunk));
-+            } finally {
-+                TickRegions.popContext(context);
++            try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enterRegion(
++                level, 2, 3, 2, 3, "unloaded-tree-commit-test"
++            )) {
++                final TickRegions.RegionContext context = TickRegions.pushRegionContext(level, 2, 3, 2, 3);
++                try {
++                    loadCallback.get().accept(List.of(loadedChunk));
++                } finally {
++                    TickRegions.popContext(context);
++                }
 +            }
 +
 +            Assertions.assertTrue(completed.get());
