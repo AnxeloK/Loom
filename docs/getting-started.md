@@ -1,114 +1,77 @@
-# Getting Started
+# Getting started
 
-This page is the practical entry point. It explains how to build Loom, run the basic checks, and inspect the runtime once it starts.
+This is the shortest safe path from a release jar to a useful test.
 
-## Prerequisites
+## 1. Pick the right jar
 
-- Java `25` — a Java 25 JDK to build, and a Java 25 JRE to run the server
-- Bash or a compatible shell for `patch.sh` and `rb.sh`
-- The Gradle wrapper from this repository
-- Enough memory for a Paper-style server build
+Use the Loom release built for the exact Minecraft version you are running. Keep your existing world, plugins, and normal server files, but make a backup before replacing a production jar.
 
-The repository uses a patch workflow. The patch directories are the source of truth:
-
-- `loom-server/minecraft-patches/`
-- `loom-server/paper-patches/`
-
-Generated trees such as `paper-server/` and `paper-api/` are worktrees produced from those patches.
-
-## Build From Source
-
-Apply patches:
+Loom needs Java 25 or newer:
 
 ```bash
-./patch.sh
+java -version
 ```
 
-Build the Loom server:
+If the reported version is older, install Java 25 before launching the server.
+
+## 2. Start with an explicit heap
+
+This is a reasonable first command for a machine that can spare 4 GB to the JVM:
 
 ```bash
-./gradlew :loom-server:build
+java -Xms4G -Xmx4G -XX:+UseG1GC -jar loom-vX.Y.Z-mcX.Y.Z.jar nogui
 ```
 
-Run the required validation gates before treating the build as releasable:
+Do not copy the heap value blindly. Leave memory available for the operating system and native Java allocations. See [Performance](performance.md) before changing thread settings.
 
-```bash
-./gradlew applyAllPatches
-./gradlew :loom-server:compileJava
-./gradlew build
-```
+## 3. Check the running server
 
-`applyAllPatches` is important. If patches cannot apply from a clean state, the generated tree and the patch source of truth have drifted.
-
-## First Runtime Check
-
-Start a test server with the built jar — launch it on Java 25 with a real heap and garbage collector (see [Performance and Tuning](performance.md)), not a bare `-jar`. Wait for:
+Wait for the startup message that begins with `Done`. Then run:
 
 ```text
-Done (...)
-```
-
-Then run:
-
-```text
-plugins
 /loom tps
 /loom compatibility
 ```
 
-When debugging plugin routing, also run:
+The first command gives a quick view of tick health. The second identifies plugin callbacks, owner-domain handoffs, fallback work, and refused paths. Use `/loom compatibility json` when you need to compare runs or attach evidence to a bug report.
 
-```text
-/loom compatibility json
+## 4. Perform a real smoke test
+
+Test the behaviour your players use, not only the console:
+
+1. Join with more than one player.
+2. Move through unexplored terrain and use portals.
+3. Break and place blocks, use inventories, and run plugin commands.
+4. Test death, beds, respawn, and dimension changes.
+5. Stop the server cleanly and inspect the final log.
+
+Treat repeated `Owner-domain violation`, `Asynchronous`, blocking-wait, or refusal messages as an investigation item. A successful startup does not prove a plugin path is safe.
+
+## Build a jar locally
+
+Use this when you are working from source rather than a release:
+
+```bash
+./patch.sh
+./gradlew :loom-server:compileJava --no-daemon
+./gradlew :loom-server:createPaperclipJar --no-daemon
 ```
 
-The human-readable command is good for a quick read. The JSON command is better for comparing runs or feeding diagnostics into tooling.
+Before publishing the result, confirm the patch source can be applied again:
 
-## What A Clean Smoke Test Looks Like
+```bash
+./gradlew applyAllPatches --no-daemon
+./gradlew :loom-server:compileJava --no-daemon
+```
 
-A minimal smoke pass should show:
+## What the diagnostics mean
 
-- server reaches `Done (...)`
-- expected plugins load
-- commands execute
-- `/loom tps` responds
-- `/loom compatibility` responds
-- no unexpected `Owner-domain violation`
-- no unexpected `Asynchronous ...` errors
-- no repeated strict fallback or refusal for ordinary plugin paths
-- clean shutdown
+| Signal | What to check |
+| --- | --- |
+| High callback time | The plugin's own listener work may be expensive. |
+| High owner handoff or barrier time | The plugin is forcing work to wait for another owner domain. |
+| Repeated async violations | The plugin is touching Bukkit or world state from async work. |
+| Repeated fallback work | A plugin path needs extra serialization or routing. |
+| Refusal | Loom could not execute the path without breaking its safety rules. |
 
-Some diagnostics are not automatically failures. For example, a plugin may be escalated because it uses protocol or reflection-heavy internals. That may be expected for a protocol plugin. The rule is to understand the reason before accepting the run.
-
-## How To Read Compatibility Output
-
-Important fields:
-
-- `mode`: internal plugin compatibility classification.
-- `callback`: total time spent in that plugin's callbacks.
-- `ownerRpc`: time spent waiting for owner-routed compatibility work.
-- `barrier`: time spent in sync-bridge waits.
-- `ordered`: ordered/cancellable event transactions.
-- `monitor`: attempts to mutate from `MONITOR` event priority.
-- `async`: async Bukkit access violations.
-- `strictFallbacks`: paths forced into stricter compatibility handling.
-- `refusals`: paths Loom refused to execute for safety.
-- `lanes`: which compatibility lanes were used.
-- `hotEvents`: event names consuming the most callback time.
-
-High `callback` means the plugin itself is expensive. High `ownerRpc` or `barrier` means the plugin is leaning on compatibility waits. High `async`, `strictFallbacks`, or `refusals` means the plugin is doing something Loom considers risky.
-
-## Basic Runtime Vocabulary
-
-- **Owner domain:** the execution context allowed to touch a target state.
-- **Global owner:** lifecycle/global server state.
-- **Region owner:** chunk, block, entity, and world state for a chunk range.
-- **Player owner:** player-scoped mutable state.
-- **Compatibility apartment:** per-plugin serialization guard for legacy callbacks.
-- **Compatibility transaction:** event dispatch record that tracks ordering, cancellation, monitor mutation, and overlays.
-- **Strict fallback:** safer but slower compatibility path.
-- **Refusal:** a path Loom will not execute because it cannot be made safe.
-
-## Next Reading
-
-Read [Architecture Overview](architecture-overview.md) next. It explains why these checks exist and how the pieces fit together.
+For the full explanation, read [Compatibility diagnostics](compatibility-kernel.md).
