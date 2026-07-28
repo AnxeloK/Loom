@@ -1,136 +1,71 @@
-# Patch and Release Workflow
+# Patch and release workflow
 
-Loom uses a Paper-style patch workflow. This page explains how to change code without losing the actual source of truth.
+This page is the operating procedure for changing Loom and publishing a usable jar.
 
-## Source of Truth
+## Source of truth
 
-Authoritative patch directories:
+The authoritative changes are patch files:
 
 - `loom-server/minecraft-patches/`
 - `loom-server/paper-patches/`
 
-Generated worktrees:
+Generated directories such as `loom-server/src/minecraft/java` and `paper-server/` are where runtime code is edited. Rebuild the matching patches after an edit so a clean checkout can reproduce the same source tree.
 
-- `paper-server/`
-- `paper-api/`
-- other generated Paper/Paperweight workspaces
-
-The generated trees are where code is convenient to inspect and edit, but patch files are what preserve the changes.
-
-## Standard Development Loop
-
-Apply patches:
+## Normal development loop
 
 ```bash
 ./patch.sh
-```
-
-Edit generated source as needed.
-
-Rebuild patch files:
-
-```bash
+# edit generated source
 ./rb.sh
+./gradlew applyAllPatches --no-daemon
+./gradlew :loom-server:compileJava --no-daemon
 ```
 
-Run validation gates:
+`./rb.sh` rebuilds both Minecraft and Paper-server patches. When iterating on one area, use the matching targeted task instead: `:loom-server:rebuildMinecraftPatches` for generated Minecraft source or `:loom-server:rebuildPaperServerPatches` for Paper server source. Inspect the patch diff before committing. Generated source must be clean after the rebuild.
 
-```bash
-./gradlew applyAllPatches
-./gradlew :loom-server:compileJava
-./gradlew build
+## What gets a release
+
+Publish a release for every supported Minecraft line affected by a runtime change. A new Minecraft version has different upstream code, mappings, and packaging, so one jar does not cover all `26.x` versions.
+
+For example, if a fix applies to all maintained branches, port it to each branch, validate each build, and publish one jar and tag per line. Use a tag in this form:
+
+```text
+v<loom-version>-mc<minecraft-version>
 ```
 
-If `applyAllPatches` fails from a clean state, patch integrity is broken.
+Examples:
 
-## What To Edit
+```text
+v2.0.7-mc26.1.1
+v2.0.7-mc26.1.2
+v2.0.7-mc26.2
+```
 
-For runtime changes, inspect and edit generated sources first because they are easier to reason about:
+If a change is only documentation, no new server jar is required. If a runtime change affects only one version line, release only that line.
 
-- `loom-server/src/minecraft/java/...`
-- `paper-server/src/main/java/...`
+## Release checklist
 
-Then rebuild patches with `./rb.sh`.
+1. Apply the change to the relevant version branch.
+2. Rebuild patches and verify the generated trees are clean.
+3. Run `applyAllPatches`, compile, focused tests, and a smoke test appropriate to the change.
+4. Commit the complete patch and test change, then push the branch.
+5. Create and push the version tag.
+6. Wait for the tag workflow to build and upload the release jar.
+7. Download the uploaded jar, verify its version and checksum, then publish concise release notes.
 
-For documentation, edit the docs directly:
+The release workflow is triggered by `v*` tags. It packages the paperclip jar and attaches it to the matching GitHub release.
 
-- `README.md`
-- `docs/*.md`
+## Keep branches aligned
 
-Documentation changes do not require patch rebuilding unless they are inside a patch-managed generated tree.
+Treat every maintained Minecraft branch as its own release line. Port common runtime fixes deliberately rather than assuming a cherry-pick is safe. Resolve source differences, rebuild that branch's patches, and run the checks on that branch.
 
-## Safety Rules For Runtime Changes
+Keep a release matrix in the release notes or project tracker with:
 
-Do not weaken these for convenience:
+- Minecraft version
+- branch
+- Loom tag
+- commit SHA
+- jar filename and checksum
+- validation status
 
-- owner-domain checks
-- `AsyncCatcher`
-- region lease validation
-- blocking wait barriers
-- compatibility refusal behavior
-- plugin diagnostics
-
-If a path fails because it is unsafe, fix the routing. Do not silence the failure.
-
-## Compatibility Rules
-
-Loom has one runtime path. Do not add selectable runtime modes.
-
-The compatibility kernel is part of Loom by default. Performance changes must preserve broad Paper/Bukkit compatibility.
-
-When changing plugin-facing behavior, explain:
-
-- which plugin behavior changed
-- whether the path is sync, async, event, command, packet, scheduler, or internal
-- which owner domain is required
-- whether the compatibility apartment, transaction, sync bridge, or refusal behavior changed
-- what diagnostics should show
-
-## Performance Change Checklist
-
-Before accepting a performance patch:
-
-- verify tick health on a live server with a representative plugin pack (`/loom tps`)
-- confirm no regression in join/command/teleport reliability
-- inspect `/loom compatibility`
-- inspect strict fallback/refusal changes
-- inspect async violation changes
-- confirm no safety checks were weakened
-
-Validate on a live server under a realistic workload before and after the change,
-and keep the runtime stable across the full runbook below.
-
-## Runtime Verification Runbook
-
-After building and replacing runtime jars:
-
-1. Start server and wait for `Done (...)`.
-2. Run `plugins`.
-3. Run `/loom tps`.
-4. Run `/loom compatibility`.
-5. Run `/loom compatibility json` for deeper routing evidence.
-6. Exercise plugin paths: commands, GUI/menu actions, placeholders, teleports, join/disconnect, chunk movement.
-7. Confirm no unexpected owner-domain violations, async violations, strict fallback explosions, or refusals.
-8. Stop server cleanly.
-
-## Evidence Checklist
-
-Capture:
-
-- branch and commit SHA
-- exact commands run
-- Java version
-- server jar paths
-- plugin pack
-- runtime settings
-- pass/fail status per command
-- logs for startup, plugin commands, compatibility diagnostics, and shutdown
-
-## Contributor Hygiene
-
-- keep patches focused
-- avoid unrelated refactors
-- preserve generated-source and patch consistency
-- include tests when behavior changes
-- include diagnostics when changing compatibility behavior
-- treat performance changes without reliability evidence as incomplete
+This prevents a published tag from pointing at a jar that was only tested on another Minecraft version.
