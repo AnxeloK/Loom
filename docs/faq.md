@@ -1,147 +1,41 @@
 # FAQ
 
-## Is Loom just Paper with extra threads?
+## Which release jar should I use?
 
-No. Loom changes the runtime safety model. Mutable work must run in the correct owner domain. Paper's simple "main thread is safe" rule is not enough for Loom.
+Use the jar built for your exact Minecraft version. Keep a separate release for each supported Minecraft line. See [Releases](../../releases) and [the release workflow](patch-and-release-workflow.md).
 
-## Do I need to change my plugins to use Loom?
+## Do ordinary plugins need changes?
 
-No, and that is the whole point. Loom keeps normal Paper/Bukkit plugin behavior as the default and handles the threading internally, through owner domains. Ordinary plugins keep running without any changes.
+Usually not. Standard Bukkit and Paper usage should continue to work. Plugins that use unsafe async Bukkit access, blocking waits, reflection, NMS internals, packet internals, or timing assumptions need closer testing.
 
-## Are there runtime modes?
+## How does Loom choose a plugin route?
 
-No. Loom has one runtime path — there is nothing to switch between.
+It inspects the work being requested and routes it automatically. A safe callback can run directly; a legacy callback can be serialized; an unsafe path can be handed off or refused.
 
-## Is the compatibility kernel a bypass?
+## Can I disable owner-domain checks?
 
-No. The compatibility kernel routes, serializes, bridges, escalates, or refuses work. It does not disable owner-domain safety.
+No. An owner-domain error means code touched mutable state from the wrong execution context. Hiding that error risks corruption, races, and deadlocks.
 
-## Does every plugin work 100%?
+## Why does a player rubber-band or see delayed movement?
 
-No. That would not be honest.
+Check server tick time, packet handling, network latency, owner-domain diagnostics, and a profile captured during the problem. Do not assume the network is the only cause when the server is under load.
 
-Expected to work:
+## Why does chunk exploration become slow when players spread out?
 
-- normal Bukkit/Paper API usage
-- sync events
-- sync scheduler tasks
-- async tasks doing async-safe work
-- commands
-- permissions
-- placeholders
-- GUI/menu plugins
-- many gameplay plugins
+Exploration can be limited by generation, disk I/O, chunk send work, worker saturation, or the player chunk pipeline. Capture a profile while players are exploring before changing worker counts.
 
-Risky:
+## What should I inspect after a crash?
 
-- Bukkit/world access from async threads
-- blocking owner-domain waits
-- reflection/NMS internals
-- protocol/entity/chunk internals
-- plugins depending on exact Paper timing quirks
-- plugins with race conditions hidden by single-thread Paper
+Keep the first stack trace, the surrounding server log, the active jar version, Java version, plugin list, and the action that triggered it. Add `/loom compatibility json` and a profiler capture when the issue is performance-related.
 
-Loom should rescue many legacy mistakes, but it cannot safely rescue every possible plugin behavior.
+## Why is a plugin shown with fallback work or a refusal?
 
-## What happens if a plugin schedules a sync task?
+Loom found a path that needs extra serialization or cannot run safely. The named plugin, event, and log message are the starting point. Raising CPU limits or worker threads will not fix unsafe plugin behaviour.
 
-`Bukkit.getScheduler().runTask(...)` queues work through the normal sync scheduler. The scheduler heartbeat runs during the server tick, so the task can use normal sync Bukkit APIs.
+## Can an async task change a block or player state?
 
-This is compatible, but too many sync tasks can still raise MSPT.
+Not directly. Do the async data work first, then hand off the live state change to the owner domain that owns the block or player.
 
-## What happens if a plugin schedules an async task?
+## Is a larger heap always faster?
 
-`Bukkit.getScheduler().runTaskAsynchronously(...)` runs off the tick thread and is wrapped in plugin compatibility context.
-
-If the task does async-safe work, it runs normally.
-
-If it touches unsafe Bukkit/world APIs, `AsyncCatcher` can throw. Loom may then attempt an async rescue reroute through global owner strict fallback. Repeated violations escalate the plugin into stricter/slower handling.
-
-## Can an async plugin wait for sync work?
-
-Sometimes.
-
-A future-style wait inside plugin compatibility context can be bridged when the current thread is not an owner-domain thread.
-
-An owner-domain thread cannot block waiting for sync work. Loom refuses that because it can deadlock.
-
-## What is an owner-domain violation?
-
-It means code touched state without owning the required domain.
-
-Example:
-
-```text
-thread owns region A
-code touches region B
--> owner-domain violation
-```
-
-The fix is to route the work to the correct owner domain, not to silence the check.
-
-## What is p95 MSPT?
-
-`p95` means 95th percentile.
-
-For MSPT:
-
-```text
-95% of sampled ticks were at or below that value
-5% were worse
-```
-
-Average MSPT tells you the average cost. p95 MSPT tells you how bad the common spikes are.
-
-## Why can Loom's tick be bursty?
-
-Loom runs the world simulation tick serially through owner domains, so tick time
-can spike when too much owner/tick-path work lands in the same tick. Common burst
-sources:
-
-- packet draining
-- broad packet owner contexts
-- mailbox/task drains
-- chunk send/post-processing
-- plugin compatibility waits
-
-The per-tick drain budgets exist to smooth these bursts.
-
-## Why not just increase worker threads?
-
-Blunt worker increases can worsen tick time and reliability rather than help.
-Loom's bottleneck is often bursty owner/tick-path work, not simply a lack of
-workers.
-
-## Why not remove compatibility to go faster?
-
-Because that would fail Loom's real goal: strong performance while keeping
-Paper-style plugin compatibility as the default. A speedup that breaks normal
-plugins is not a Loom win.
-
-## What should I inspect when a plugin fails?
-
-Start with:
-
-```text
-/loom compatibility
-/loom compatibility json
-/loom tps
-```
-
-Then check logs for:
-
-- `Asynchronous ...`
-- `Owner-domain violation`
-- `strict_fallback`
-- `refusal`
-- `owner_domain_wait_violation`
-- `barrier_wait`
-
-## Where should I start learning the code?
-
-Read:
-
-1. [Architecture Overview](architecture-overview.md)
-2. [Runtime Ownership Model](runtime-ownership-model.md)
-3. [Compatibility Kernel](compatibility-kernel.md)
-4. [Performance and Tuning](performance.md)
+No. A larger heap can help allocation pressure, but it does not solve CPU saturation, slow plugins, disk I/O, or bad chunk settings. Leave memory headroom and compare changes with the same workload.
