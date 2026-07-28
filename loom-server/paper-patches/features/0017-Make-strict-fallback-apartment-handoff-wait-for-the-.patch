@@ -14,7 +14,7 @@ event dispatches degrade to the owner-domain transient-refusal path on
 timeout, service calls still throw since they must return a value.
 
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-index 990f92eb9c33957941c6594b17b269486b68f31e..271f1d993264e9bfa4d0016f5aa5f60d74df4282 100644
+index 63e0196fefb712c545116ebea8a80c99a4e233ee..b1ab3e07c85ab7371868ad451f1645f0743fde9a 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 @@ -42,6 +42,13 @@ class PaperEventManager {
@@ -31,7 +31,7 @@ index 990f92eb9c33957941c6594b17b269486b68f31e..271f1d993264e9bfa4d0016f5aa5f60d
  
      private final Server server;
      private final CompatibilityKernel compatibilityKernel;
-@@ -227,9 +234,31 @@ class PaperEventManager {
+@@ -222,9 +229,31 @@ class PaperEventManager {
                  final long handoffStart = System.nanoTime();
                  try {
                      apartment.submitStrictFallback(() -> {
@@ -67,7 +67,7 @@ index 990f92eb9c33957941c6594b17b269486b68f31e..271f1d993264e9bfa4d0016f5aa5f60d
                              try {
                                  this.callListener(registration, event, transaction, true, path);
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
-index 282070319db8bfbb15ad37028b2e490e5608efe0..9920c84fc8bd0471866a09c78001b10298337579 100644
+index 138397dff76ee7f66e7d27b5063a24e6c28f3c83..9faf357621bc38f7b7d4f5fda095633b6627aa33 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
 @@ -22,6 +22,14 @@ import org.jetbrains.annotations.Nullable;
@@ -85,7 +85,7 @@ index 282070319db8bfbb15ad37028b2e490e5608efe0..9920c84fc8bd0471866a09c78001b102
      private final SimpleServicesManager delegate = new SimpleServicesManager();
      private final CompatibilityKernel compatibilityKernel;
      private final CompatibilityServiceCallGraph callGraph = new CompatibilityServiceCallGraph();
-@@ -199,8 +207,18 @@ public final class CompatibilityServicesManager implements ServicesManager {
+@@ -197,8 +205,18 @@ public final class CompatibilityServicesManager implements ServicesManager {
                      try {
                          return compatibilityKernel.apartmentFor(this.providerPlugin)
                              .submitStrictFallback(() -> {

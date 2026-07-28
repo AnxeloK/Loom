@@ -12,7 +12,7 @@ functions of. The per-listener scope also allocated a facade cache
 map that almost no listener touches; it is lazy now.
 
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-index 6dc33a90876efe448401e4bdc8c2e689b1d6a73b..990f92eb9c33957941c6594b17b269486b68f31e 100644
+index 983cf1207ba1d338a2ef4db93e32648e31b91d4d..63e0196fefb712c545116ebea8a80c99a4e233ee 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 @@ -87,17 +87,24 @@ class PaperEventManager {
@@ -45,7 +45,7 @@ index 6dc33a90876efe448401e4bdc8c2e689b1d6a73b..990f92eb9c33957941c6594b17b26948
                  profile.noteLaneUsage(plan.lane());
  
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
-index 54ff56466f3975faa8bc917eda7151734d306112..f32d7b2e3c2d4968a5cbf907648ad172d5284033 100644
+index 0cdd808cba06096625a7dbd8252dac049712487f..00bfdcb7ea46d34157d75d1f2e81e953aff4af09 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
 @@ -76,6 +76,14 @@ public final class CompatibilityKernel {
@@ -91,9 +91,9 @@ index 54ff56466f3975faa8bc917eda7151734d306112..f32d7b2e3c2d4968a5cbf907648ad172
 +    ) {
          final String path = pathFor(transaction, listener);
          final PluginCompatibilityProfile.State state = profile.stateForPath(path);
- 
-@@ -160,10 +177,24 @@ public final class CompatibilityKernel {
-         return new InvocationPlan(policy, lane, path, "loom default path: " + routingDecision.reason());
+         if (profile.mode() == PluginCompatibilityProfile.Mode.REFUSED || state == PluginCompatibilityProfile.State.REFUSED) {
+@@ -159,10 +176,24 @@ public final class CompatibilityKernel {
+         return new InvocationPlan(policy, lane, path, "default path: " + routingDecision.reason());
      }
  
 +    // Path strings are pure functions of (event name, priority, ignoreCancelled) and events fire thousands
