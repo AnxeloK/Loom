@@ -5,10 +5,10 @@ Subject: [PATCH] Confine hopper tick state
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 562de80d567a72eea522dc13ef5e7cfa28fe0356..52eefa22787c45153feae72a45102ae3ee252375 100644
+index 5eeb0e8f07d407d335a3cf90794e3feb058b93a5..32b11048de202fb815dad075df57cd7a2928d469 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2052,7 +2052,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2051,7 +2051,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              level.hasPhysicsEvent = org.bukkit.event.block.BlockPhysicsEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - BlockPhysicsEvent
              level.hasEntityMoveEvent = io.papermc.paper.event.entity.EntityMoveEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - Add EntityMoveEvent
              level.updateLagCompensationTick(); // Paper - lag compensation
@@ -18,10 +18,10 @@ index 562de80d567a72eea522dc13ef5e7cfa28fe0356..52eefa22787c45153feae72a45102ae3
          }
          net.minecraft.server.threading.TickRegions.tickWorldsInParallel(parallelLevels, level -> {
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index dca78a87b16ba370d3b43cf2bc8e3bc55cfe9bdd..feb26eff43ec71f91b8c3e7cf5302146a94f59af 100644
+index bf9598b507ffc5638e57b0c27d3347f81872de3f..7ebe116e13299c502c288109b15c793345c0010b 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
-@@ -173,6 +173,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -172,6 +172,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
  
      public static @Nullable BlockPos lastPhysicsProblem; // Spigot
      public final Map<ServerExplosion.CacheKey, Float> explosionDensityCache = new java.util.HashMap<>(); // Paper - Optimize explosions

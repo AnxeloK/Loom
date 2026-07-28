@@ -85,7 +85,7 @@ index 56e71bf01f22579c294c6b33450bd282e082f6ae..7b88008f0a69bd522530abe9db96825a
  
      protected static final class NoOpCallback implements EntityInLevelCallback {
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 1c69ded5a8f948157a70535c32d452ee4d8522dd..3b2451b173b4bbe4f929c3ffa7c9ed8b7023bbf3 100644
+index d93359861647a17c338730c92eac9ba1669901b1..f0666930d0613df5ccc58ced3380eec896094dd1 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -480,6 +480,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
@@ -101,7 +101,7 @@ index 1c69ded5a8f948157a70535c32d452ee4d8522dd..3b2451b173b4bbe4f929c3ffa7c9ed8b
              long currTime = System.nanoTime();
              if (currTime - ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)world).moonrise$getLastMidTickFailure() <= TASK_EXECUTION_FAILURE_BACKOFF) {
                  continue;
-@@ -2031,32 +2037,35 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2030,32 +2036,35 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.updateEffectiveRespawnData();
  
          this.isIteratingOverLevels = true; // Paper - Throw exception on world create while being ticked
@@ -215,7 +215,7 @@ index c0c5d5f8f26e910274a5be116eddd02c6dc404af..55b1da8af2637207725ce993c6ed5851
      // Paper end - chunk tick iteration optimisations
  
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index d9f12606d27e2c8e6e780f7f9f7be9799bb8b573..f485932561d503ff896703f07fe03812c85ded98 100644
+index b910f32f98e06c46d9c5d820e467074ab186243d..142187b91734b448ba409eb9dc5740fcf5dab937 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -914,40 +914,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
@@ -1258,10 +1258,10 @@ index 8386e433dd1906bb45f8f5c9bfcd1425289ef91e..e0fecd726095a1fee1262d4c5359d3dc
  
      static <T, U> BiPredicate<T, U> rememberPositives(final int invocations, final BiPredicate<T, U> predicate) {
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index 49f828e1fdfd7fba8752c67c05cfc322332c3fa0..7946114fe520b3a5a7e1b9e1f113b7a1b9e5f174 100644
+index 96d9f5f4ad59c288e3bd220dc5f34a24a32e1a36..fc346f7545ca061e4778e34cff7637bc927e2adf 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
-@@ -1050,6 +1050,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1048,6 +1048,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
  
      @Override
      public boolean setBlock(final BlockPos pos, final BlockState blockState, @Block.UpdateFlags final int updateFlags, final int updateLimit) {
@@ -1273,7 +1273,7 @@ index 49f828e1fdfd7fba8752c67c05cfc322332c3fa0..7946114fe520b3a5a7e1b9e1f113b7a1
          // CraftBukkit start - tree generation
          if (this.captureTreeGeneration) {
              // Paper start - Protect Bedrock and End Portal/Frames from being destroyed
-@@ -1315,11 +1320,71 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1313,11 +1318,71 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
          if (!this.isInValidBounds(pos)) {
              return Blocks.VOID_AIR.defaultBlockState();
          } else {
@@ -1345,7 +1345,7 @@ index 49f828e1fdfd7fba8752c67c05cfc322332c3fa0..7946114fe520b3a5a7e1b9e1f113b7a1
      @Override
      public FluidState getFluidState(final BlockPos pos) {
          if (!this.isInValidBounds(pos)) {
-@@ -1524,7 +1589,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1522,7 +1587,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
              entity.discard(org.bukkit.event.entity.EntityRemoveEvent.Cause.DISCARD);
              // Paper end - Prevent block entity and entity crashes
          }

@@ -40,7 +40,7 @@ index 5c3271029b0a09a6f3a4bc39e64f65f9ded46097..f0517bf00ca13515aa3d4ca52d8545fc
          y = !Float.isInfinite(y) && !Float.isNaN(y) ? y % 360.0F : 0.0F;
          z = !Float.isInfinite(z) && !Float.isNaN(z) ? z % 360.0F : 0.0F;
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 87d356f0f1d8f37ae40b78d5e58c78ead23691c8..05a0aee7954828da19db6ee420c2f05c3744f404 100644
+index a842584ee4d89320deb11b7a7e686ebe9ebf6e23..2de38263efa6aca32e1848fc73db8622fddf8113 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -925,7 +925,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
@@ -65,6 +65,19 @@ index 7970c6f9189059e8fc0391709159ef395c56708c..648a9e0855dd3d4aac3a1212d00e4256
          this.handlePortal();
          this.applyGravity();
          this.move(MoverType.SELF, this.getDeltaMovement());
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index 4a63657d2adcbd621679a4d872f8813b991f619d..31e160e113e4afd9c098e427db68e1a99c7f6c19 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -1568,7 +1568,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+ 
+         this.blockEntityTickers.removeAll(toRemove); // Paper - Fix MC-117075 use removeAll
+         this.tickingBlockEntities = false;
+-        this.spigotConfig.currentPrimedTnt = 0; // Spigot
++        this.spigotConfig.currentPrimedTnt.set(0); // Spigot; Loom - reset the parallel TNT quota
+     }
+ 
+     public <T extends Entity> void guardEntityTick(final Consumer<T> tick, final T entity) {
 diff --git a/net/minecraft/world/level/block/entity/SculkCatalystBlockEntity.java b/net/minecraft/world/level/block/entity/SculkCatalystBlockEntity.java
 index e75fb2e83c58de051672c8edaf89c7cb8a68cac8..36aba804a3cf0072159fd45ef4f8fa4a1ad1bdfe 100644
 --- a/net/minecraft/world/level/block/entity/SculkCatalystBlockEntity.java

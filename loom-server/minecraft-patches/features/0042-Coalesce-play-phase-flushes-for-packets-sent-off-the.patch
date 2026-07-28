@@ -18,7 +18,7 @@ The play flag follows the outbound protocol transitions, so a
 connection returning to configuration also returns to eager flushes.
 
 diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
-index d953bb4edb1ae93667a3c8865cb3d2fc1354ada6..5d98833d368c60b76566828695c8ac4814658b76 100644
+index 6122b576da4a3d821d41ae872692554ef10bea3b..669164b419143dbf1aa4572f95e9fd977c0ea4dd 100644
 --- a/net/minecraft/network/Connection.java
 +++ b/net/minecraft/network/Connection.java
 @@ -70,6 +70,12 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
@@ -34,7 +34,7 @@ index d953bb4edb1ae93667a3c8865cb3d2fc1354ada6..5d98833d368c60b76566828695c8ac48
      public Channel channel;
      public SocketAddress address;
      // Spigot start
-@@ -348,6 +354,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -347,6 +353,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
              }
  
              boolean isLoginProtocol = protocol.id() == ConnectionProtocol.LOGIN;
@@ -42,7 +42,7 @@ index d953bb4edb1ae93667a3c8865cb3d2fc1354ada6..5d98833d368c60b76566828695c8ac48
              syncAfterConfigurationChange(this.channel.writeAndFlush(configMessage.andThen(ctx -> this.sendLoginDisconnect = isLoginProtocol)));
          }
      }
-@@ -474,15 +481,28 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -473,15 +480,28 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          if (this.channel.eventLoop().inEventLoop()) {
              this.doSendPacket(packet, listener, flush);
          } else {

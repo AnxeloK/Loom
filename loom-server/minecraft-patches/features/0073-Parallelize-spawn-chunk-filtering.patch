@@ -6,7 +6,7 @@ Subject: [PATCH] Parallelize spawn chunk filtering
 Player-spawn chunk filtering scans every player-ticking chunk before the parallel chunk phase. Cache its spatial plan and filter independent player clusters under bounded region leases, then preserve the original chunk order when collecting the results.
 
 diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
-index 3924448337922c43349cec27158003a363ae60c5..575329db231077f2fe04c6e40ad76163ad14f4b4 100644
+index 9c9ca4f75cc4bf835ffe6deb1843fbc3c314747c..da9c463900c24d803634dffd56da3e9b828bd799 100644
 --- a/net/minecraft/server/level/ChunkMap.java
 +++ b/net/minecraft/server/level/ChunkMap.java
 @@ -738,6 +738,8 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP

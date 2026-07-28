@@ -11,7 +11,7 @@ A context-walk fast path answers those; sub-region workers keep the
 precise per-chunk checks.
 
 diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
-index 263f04fb20a4c5fd6d21d2cfd7a3a1d60260e65a..777211d28f12f134d7ec05f4553db221aa73622b 100644
+index d2abbbb129154e047c029ad493d5d233930a17fb..e1e7cfb1cf9f159d85ae35d97017ab7d34aa1d6a 100644
 --- a/net/minecraft/server/level/ChunkMap.java
 +++ b/net/minecraft/server/level/ChunkMap.java
 @@ -1420,6 +1420,13 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP

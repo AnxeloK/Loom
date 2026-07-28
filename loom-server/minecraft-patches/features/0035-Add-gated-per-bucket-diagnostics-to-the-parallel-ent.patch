@@ -8,7 +8,7 @@ Logs each dispatch's bucket entity counts and task wall times under
 to one dominant bucket versus even per-entity cost.
 
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index efbeb483ab9f314435b29038675ece19088f6dfb..8cce6fcab93ed20e1f290ad28dc1d43b641e35c3 100644
+index d4038d66c1320f435c2dc770b329b659a2b52676..bd6f5d16a67480ab4117b93d64f97b3e1a8ae5d1 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -1488,6 +1488,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet

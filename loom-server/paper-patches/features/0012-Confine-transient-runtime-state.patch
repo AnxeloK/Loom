@@ -5,7 +5,7 @@ Subject: [PATCH] Confine transient runtime state
 
 
 diff --git a/src/main/java/org/bukkit/craftbukkit/block/CraftBlockEntityState.java b/src/main/java/org/bukkit/craftbukkit/block/CraftBlockEntityState.java
-index f117b5fdb0d158fb0754a11fbf4fc4ddf19ff050..83ad816c2629855087b940a6ba8f667c5e5eb108 100644
+index 2857d6144afe092e2870d12f48d944c771136871..944355af01e7df4c6869068c004b9a54f07a34ac 100644
 --- a/src/main/java/org/bukkit/craftbukkit/block/CraftBlockEntityState.java
 +++ b/src/main/java/org/bukkit/craftbukkit/block/CraftBlockEntityState.java
 @@ -33,6 +33,26 @@ public abstract class CraftBlockEntityState<T extends BlockEntity> extends Craft
@@ -69,10 +69,10 @@ index e3fbe9d9a4fdf6590f7d0635fb7b930311a2a5a3..14a12ce4f3bd5667338f2a5ad56c7ba1
      }
  
 diff --git a/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java b/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
-index 7a42d1810f74a041318c8a3c53793106e872081f..115a6c523d4cadea14b0e9a3d733b4eecdef9a3e 100644
+index 6d485bb4d91668070c28c3fe1dc2c4708760d924..8b0c4edb206a19e859d0526a9b75b95e10b0d4db 100644
 --- a/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
 +++ b/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
-@@ -928,6 +928,21 @@ public class CraftEventFactory {
+@@ -925,6 +925,21 @@ public class CraftEventFactory {
      }
  
      public static BlockPos sourceBlockOverride = null; // SPIGOT-7068: Add source block override, not the most elegant way but better than passing down a BlockPos up to five methods deep.
@@ -94,7 +94,7 @@ index 7a42d1810f74a041318c8a3c53793106e872081f..115a6c523d4cadea14b0e9a3d733b4ee
  
      public static boolean handleBlockSpreadEvent(LevelAccessor level, BlockPos source, BlockPos target, net.minecraft.world.level.block.state.BlockState state, @net.minecraft.world.level.block.Block.UpdateFlags int flags) {
          return handleBlockSpreadEvent(level, source, target, state, flags, false);
-@@ -943,7 +958,10 @@ public class CraftEventFactory {
+@@ -940,7 +955,10 @@ public class CraftEventFactory {
          CraftBlockState snapshot = CraftBlockStates.getBlockState(level, target);
          snapshot.setBlock(state);
  
@@ -106,7 +106,7 @@ index 7a42d1810f74a041318c8a3c53793106e872081f..115a6c523d4cadea14b0e9a3d733b4ee
          if (event.callEvent()) {
              boolean result = snapshot.place(flags);
              return !checkSetResult || result;
-@@ -2358,7 +2376,7 @@ public class CraftEventFactory {
+@@ -2355,7 +2373,7 @@ public class CraftEventFactory {
  
      }
  
@@ -115,7 +115,7 @@ index 7a42d1810f74a041318c8a3c53793106e872081f..115a6c523d4cadea14b0e9a3d733b4ee
  
      public static boolean callBlockLockCheckEvent(
          BlockEntity blockEntity,
-@@ -2366,6 +2384,7 @@ public class CraftEventFactory {
+@@ -2363,6 +2381,7 @@ public class CraftEventFactory {
          Component displayName,
          net.minecraft.world.entity.player.Player p
      ) {
@@ -123,7 +123,7 @@ index 7a42d1810f74a041318c8a3c53793106e872081f..115a6c523d4cadea14b0e9a3d733b4ee
          if (p instanceof net.minecraft.server.level.ServerPlayer player
              && blockEntity != null
              && blockEntity.getLevel() != null
-@@ -2378,7 +2397,7 @@ public class CraftEventFactory {
+@@ -2375,7 +2394,7 @@ public class CraftEventFactory {
              if (event.getResult() == org.bukkit.event.Event.Result.ALLOW) {
                  return true;
              } else if (event.getResult() == org.bukkit.event.Event.Result.DENY || !code.canUnlock(player, event.isUsingCustomKeyItemStack() ? org.bukkit.craftbukkit.inventory.CraftItemStack.asNMSCopy(event.getKeyItem()) : player.getMainHandItem())) {
@@ -132,7 +132,7 @@ index 7a42d1810f74a041318c8a3c53793106e872081f..115a6c523d4cadea14b0e9a3d733b4ee
                  return false;
              }
          }
-@@ -2386,9 +2405,9 @@ public class CraftEventFactory {
+@@ -2383,9 +2402,9 @@ public class CraftEventFactory {
      }
  
      public static boolean sendChestLockedNotifications(Vec3 pos) {
@@ -146,7 +146,7 @@ index 7a42d1810f74a041318c8a3c53793106e872081f..115a6c523d4cadea14b0e9a3d733b4ee
                  event.getPlayer().sendActionBar(event.getLockedMessage());
              }
 diff --git a/src/main/java/org/spigotmc/SpigotWorldConfig.java b/src/main/java/org/spigotmc/SpigotWorldConfig.java
-index 339832e312578ee385bbf3c9d5c131435abe7d7a..645788445a1da7df09340bd066e08774d12eb609 100644
+index 9e63995af22bb3cd60200282179be73ade70077f..e9262074e99d27df8c49ad415271fef783b0fcfa 100644
 --- a/src/main/java/org/spigotmc/SpigotWorldConfig.java
 +++ b/src/main/java/org/spigotmc/SpigotWorldConfig.java
 @@ -1,6 +1,7 @@
@@ -154,10 +154,10 @@ index 339832e312578ee385bbf3c9d5c131435abe7d7a..645788445a1da7df09340bd066e08774
  
  import java.util.List;
 +import java.util.concurrent.atomic.AtomicInteger;
- 
- import net.kyori.adventure.key.Key;
  import org.bukkit.Bukkit;
-@@ -406,8 +407,26 @@ public class SpigotWorldConfig {
+ import org.bukkit.configuration.file.YamlConfiguration;
+ 
+@@ -393,8 +394,26 @@ public class SpigotWorldConfig {
          this.otherMultiplier = (float) this.getDouble("hunger.other-multiplier", 0.0);
      }
  

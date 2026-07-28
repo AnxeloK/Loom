@@ -425,7 +425,7 @@ index f7390b91fe1866c6a11beb93711d0fcde4293164..d7087b7f9aedd2be6695582c52ea8d19
          if (this.hasDelayedDestroy) {
              BlockState blockState = this.level.getBlockStateIfLoaded(this.delayedDestroyPos); // Paper - Don't allow digging into unloaded chunks
 diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-index e11595a7b1132060c29f760053866f8d123f91de..7da3c00615ed46f013eb1be87d5f79c184e6edf5 100644
+index 8b694c3f234d46158cda0c9c4141603caadfb989..5115f653eb881d7bab5f7702b6cb1638ff841c61 100644
 --- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 @@ -325,6 +325,7 @@ public class ServerGamePacketListenerImpl
@@ -757,7 +757,7 @@ index 6a358dea5ab373775a541192be246087afc94b5b..a7e9c62b6d74db838347ccd40f18145e
  
          // Paper start
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..ceaeb1f438c9048716bb9be44ce831d227e02b7b 100644
+index 9cd46a8619e575a865f4d00ce71d249c9b028b2f..e6af888c1fdabe81fe0abed896479adbb5bdd3c1 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
 @@ -1133,7 +1133,7 @@ public abstract class Entity
@@ -845,35 +845,11 @@ index 82f6582a92f17bdeb3218c4c1fcac86981fd9c37..ceaeb1f438c9048716bb9be44ce831d2
                          }
                      }
  
-@@ -3781,10 +3813,11 @@ public abstract class Entity
-         }
- 
-         // CraftBukkit start
--        final DamageSource damageSource = this.damageSources().lightningBolt().eventEntityDamager(lightningBolt);
-         if (thisBukkitEntity instanceof org.bukkit.entity.Hanging) {
--            org.bukkit.event.hanging.HangingBreakByEntityEvent hangingEvent = new org.bukkit.event.hanging.HangingBreakByEntityEvent((org.bukkit.entity.Hanging) thisBukkitEntity, stormBukkitEntity, new org.bukkit.craftbukkit.damage.CraftDamageSource(damageSource));
--            if (!hangingEvent.callEvent()) {
-+            org.bukkit.event.hanging.HangingBreakByEntityEvent hangingEvent = new org.bukkit.event.hanging.HangingBreakByEntityEvent((org.bukkit.entity.Hanging) thisBukkitEntity, stormBukkitEntity, new org.bukkit.craftbukkit.damage.CraftDamageSource(this.damageSources().lightningBolt().eventEntityDamager(lightningBolt)));
-+            pluginManager.callEvent(hangingEvent);
-+
-+            if (hangingEvent.isCancelled()) {
-                 return;
-             }
-         }
-@@ -3793,7 +3826,7 @@ public abstract class Entity
-             return;
-         }
- 
--        if (!this.hurtServer(level, damageSource, 5.0F)) { // Paper - fix DamageSource API
-+        if (!this.hurtServer(level, this.damageSources().lightningBolt().eventEntityDamager(lightningBolt), 5.0F)) { // Paper - fix DamageSource API
-             return;
-         }
-         // CraftBukkit end
 diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
-index 36c0081e3e8f8776293ae619156cd0828fe5b21d..7cb742eb47b10aa8c409e268a47565fb2750670d 100644
+index 6a0ebbdfcc0bc07915574c1cf87463e82213ca7e..5bcb0b615824a71662719526cdfdf061bb880d9f 100644
 --- a/net/minecraft/world/entity/LivingEntity.java
 +++ b/net/minecraft/world/entity/LivingEntity.java
-@@ -3382,7 +3382,11 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+@@ -3395,7 +3395,11 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
  
      @Override
      public void tick() {
@@ -997,7 +973,7 @@ index 18cbe9735473eee408407e1f5944d2975d0d0b65..58811c877dc83d0c00ebaaef65d8f0c9
          }
          // Paper end - Perf: Optimise pathfinding
 diff --git a/net/minecraft/world/entity/player/Player.java b/net/minecraft/world/entity/player/Player.java
-index 391f3048f34edfa3d5759abfd56e17d5b5318309..088a9eaeeaac8e27741ebccac176f82a6456ddb5 100644
+index b8c40b7e9a52211181bcd3d8e8c6041b6319d727..f3ccbccf0756f6dd92d3b86108427b5812d838f7 100644
 --- a/net/minecraft/world/entity/player/Player.java
 +++ b/net/minecraft/world/entity/player/Player.java
 @@ -239,6 +239,7 @@ public abstract class Player extends Avatar implements ContainerUser {

@@ -5,10 +5,10 @@ Subject: [PATCH] Use cooperative region dispatch
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index b1e3fc29c6b53f72276aac474faa9b7a71d6adaa..562de80d567a72eea522dc13ef5e7cfa28fe0356 100644
+index ab005822ea3ac30d60ebbf5571fce3181eefc8e4..5eeb0e8f07d407d335a3cf90794e3feb058b93a5 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2042,10 +2042,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2041,10 +2041,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.updateEffectiveRespawnData();
  
          this.isIteratingOverLevels = true; // Paper - Throw exception on world create while being ticked
@@ -23,7 +23,7 @@ index b1e3fc29c6b53f72276aac474faa9b7a71d6adaa..562de80d567a72eea522dc13ef5e7cfa
          // main-thread only; each world's own tick still records into its thread-local profiler.
          final java.util.List<ServerLevel> parallelLevels = new java.util.ArrayList<>();
          for (ServerLevel level : this.getAllLevels()) {
-@@ -2069,7 +2069,15 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2068,7 +2068,15 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
                  net.minecraft.server.threading.TickRegions.popContext(tickRegionContext);
              }
              net.minecraft.server.threading.TickRegions.postWorldTick(level);

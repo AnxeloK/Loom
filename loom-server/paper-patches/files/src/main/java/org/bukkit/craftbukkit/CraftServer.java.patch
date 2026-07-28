@@ -1,14 +1,5 @@
 --- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
 +++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
-@@ -1303,7 +_,7 @@
-         }
- 
-         this.console.addLevel(serverLevel);
--        this.console.initWorld(serverLevel, creator);
-+        this.console.initWorld(serverLevel);
- 
-         serverLevel.setSpawnSettings(true);
- 
 @@ -2926,7 +_,7 @@
  
      @Override

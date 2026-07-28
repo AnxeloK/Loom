@@ -28,10 +28,10 @@ index 4d35b23970b92b2dea28c3780b295cd2561a343d..2ba82e076f30359585a4c76a272a9634
      // racing every parallel entity on one ThreadUnsafeRandom seed and Gaussian cache.
      public final ThreadUnsafeRandom entityRandom = new ThreadUnsafeRandom(
 diff --git a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
-index f77cb6d85c8947a96d41b96b31814c551dfd5258..2546d7377363787e20a694dbed5042d119c1fb16 100644
+index 0a3c290edcf675962d5489936368bdc3b705559e..9b8121194bbeed19935d543028f582dff6c66b33 100644
 --- a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
 +++ b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
-@@ -746,25 +746,25 @@ public class CraftWorld extends CraftRegionAccessor implements World {
+@@ -735,25 +735,25 @@ public class CraftWorld extends CraftRegionAccessor implements World {
  
      @Override
      public boolean generateTree(Location loc, TreeType type, BlockChangeDelegate delegate) {

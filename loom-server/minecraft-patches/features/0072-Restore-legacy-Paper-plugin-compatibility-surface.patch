@@ -13,7 +13,7 @@ active, preserving Paper's single-threaded contract without exposing
 region workers to the shared maps.
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index e32ec1f1b544a9881dd55cdece8847b0532dab44..81fcad4bbd0e5e4f752dffcf6854d66650ef8338 100644
+index 9a1805bc596206abfd75d3ff0ac955e23e5e3863..cc1d06b7715c48564aa8d4e266835a1797cd8c4f 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -357,6 +357,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
@@ -29,7 +29,7 @@ index e32ec1f1b544a9881dd55cdece8847b0532dab44..81fcad4bbd0e5e4f752dffcf6854d666
      public java.util.Queue<Runnable> processQueue = new java.util.concurrent.ConcurrentLinkedQueue<Runnable>();
      public int autosavePeriod;
      // Paper - don't store the vanilla dispatcher
-@@ -1709,6 +1715,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1708,6 +1714,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
                  this.lastOverloadWarningNanos = this.nextTickTimeNanos;
  
                  this.currentTickStart = tickStart;
@@ -38,10 +38,10 @@ index e32ec1f1b544a9881dd55cdece8847b0532dab44..81fcad4bbd0e5e4f752dffcf6854d666
  
                  boolean sprinting = thisTickNanos == 0L;
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index 176754124047d79da83ab9ea8bf7fa8143256998..4d444bedfa3d77724926eb189fdd030de125f018 100644
+index c52dcc0f8fd400687ae33eefa88a4b57a4bcbd02..22c62536a49a8e7ba4f75579ef45116eb5eb377b 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
-@@ -149,6 +149,32 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -148,6 +148,32 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      private final CraftWorld world;
      public org.bukkit.generator.@Nullable ChunkGenerator generator;
  
@@ -74,7 +74,7 @@ index 176754124047d79da83ab9ea8bf7fa8143256998..4d444bedfa3d77724926eb189fdd030d
      public final it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<SpawnCategory> ticksPerSpawnCategory = new it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<>();
      // Paper start - EAR 2
      public final java.util.concurrent.atomic.AtomicInteger wakeupInactiveRemainingAnimals = new java.util.concurrent.atomic.AtomicInteger();
-@@ -189,7 +215,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -188,7 +214,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
  
      public final boolean isCaptureModeActive(final int mode) {
          final LevelCaptureContext.Frame context = this.currentCaptureContext();
@@ -86,7 +86,7 @@ index 176754124047d79da83ab9ea8bf7fa8143256998..4d444bedfa3d77724926eb189fdd030d
      }
  
      public final void setCapturedTreeType(final org.bukkit.TreeType treeType) {
-@@ -209,6 +238,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -208,6 +237,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      public final boolean captureItemDrop(final net.minecraft.world.entity.item.ItemEntity item) {
          final LevelCaptureContext.Frame context = this.currentCaptureContext();
          if (context == null || !context.hasMode(LevelCaptureContext.DROPS)) {
@@ -99,7 +99,7 @@ index 176754124047d79da83ab9ea8bf7fa8143256998..4d444bedfa3d77724926eb189fdd030d
              return false;
          }
          context.captureDrop(item);
-@@ -1026,6 +1061,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1024,6 +1059,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
              if (previous != null) {
                  return previous.getHandle();
              }
@@ -111,7 +111,7 @@ index 176754124047d79da83ab9ea8bf7fa8143256998..4d444bedfa3d77724926eb189fdd030d
          }
          // CraftBukkit end
          if (this.isOutsideBuildHeight(pos)) {
-@@ -1102,6 +1142,22 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1100,6 +1140,22 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
              blockstate.setFlags(updateFlags);
              return true;
          }
@@ -134,7 +134,7 @@ index 176754124047d79da83ab9ea8bf7fa8143256998..4d444bedfa3d77724926eb189fdd030d
          // CraftBukkit end
          // Loom - during parallel chunk ticking, buffer the write and apply it serially after the parallel
          // phase instead of mutating another region's chunk / shared world state off-thread.
-@@ -1125,7 +1181,17 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1123,7 +1179,17 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
                      captured = true;
                  }
                  snapshot.setFlags(updateFlags); // Paper - always set the flag of the most recent call to mitigate issues with multiple update at the same pos with different flags
@@ -152,7 +152,7 @@ index 176754124047d79da83ab9ea8bf7fa8143256998..4d444bedfa3d77724926eb189fdd030d
              // CraftBukkit end - capture blockstates
              BlockState oldState = chunk.setBlockState(pos, blockState, updateFlags);
              this.chunkPacketBlockController.onBlockChange(this, pos, blockState, oldState, updateFlags, updateLimit); // Paper - Anti-Xray
-@@ -1133,6 +1199,8 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1131,6 +1197,8 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
                  // CraftBukkit start - remove blockstate if failed (or the same)
                  if (captureContext != null && captureContext.hasMode(LevelCaptureContext.BLOCK_STATES) && captured) {
                      captureContext.removeCapturedBlockState(pos);
@@ -161,7 +161,7 @@ index 176754124047d79da83ab9ea8bf7fa8143256998..4d444bedfa3d77724926eb189fdd030d
                  }
                  // CraftBukkit end
                  return false;
-@@ -1169,7 +1237,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1167,7 +1235,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
                  */ // CraftBukkit
  
                  // CraftBukkit start
@@ -170,7 +170,7 @@ index 176754124047d79da83ab9ea8bf7fa8143256998..4d444bedfa3d77724926eb189fdd030d
                      // Modularize client and physic updates
                      // Spigot start
                      try {
-@@ -1351,6 +1419,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1349,6 +1417,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
              if (previous != null) {
                  return previous.getHandle();
              }
@@ -182,7 +182,7 @@ index 176754124047d79da83ab9ea8bf7fa8143256998..4d444bedfa3d77724926eb189fdd030d
          }
          // CraftBukkit end
          if (!this.isInValidBounds(pos)) {
-@@ -1782,6 +1855,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1780,6 +1853,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
              if (captured != null) {
                  return captured;
              }
@@ -194,7 +194,7 @@ index 176754124047d79da83ab9ea8bf7fa8143256998..4d444bedfa3d77724926eb189fdd030d
          }
          // Paper end - Perf: Optimize captured block entity lookup
          if (!this.isInValidBounds(pos)) {
-@@ -1802,6 +1880,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1800,6 +1878,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
                  captureContext.putCapturedBlockEntity(pos, blockEntity);
                  return;
              }
@@ -208,7 +208,7 @@ index 176754124047d79da83ab9ea8bf7fa8143256998..4d444bedfa3d77724926eb189fdd030d
              this.getChunkAt(pos).addAndRegisterBlockEntity(blockEntity);
          }
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
-index 6de5efbff3e0d4b9b184626f0b661c671458c7de..c40df1c78b86b574fb2e912a4680e006143cd604 100644
+index 57bbf4b771c9328a3818a259ab3b0092d2fb4d1c..7ecd22d03a51cdd8c0cb3f252ef92d4925bfafbf 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
 +++ b/net/minecraft/world/level/chunk/LevelChunk.java
 @@ -568,6 +568,9 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot

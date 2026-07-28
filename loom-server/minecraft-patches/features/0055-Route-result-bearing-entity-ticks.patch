@@ -5,7 +5,7 @@ Subject: [PATCH] Route result-bearing entity ticks
 
 
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index ebc24e67575ea800494a854df4514cc0dd046d4a..87d356f0f1d8f37ae40b78d5e58c78ead23691c8 100644
+index 25a649ccf7b731d5382cbcfd21cd16e55ac09d4a..a842584ee4d89320deb11b7a7e686ebe9ebf6e23 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -1470,13 +1470,25 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
@@ -70,7 +70,7 @@ index d34e038ac6309359116ea65c735b5c69ecc50090..5c04410d946447ab95145218bd624345
      public void tick() {
          // CraftBukkit start
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 4a414250ad2ce1034ff5d6c2aa73c823eaff6425..176fbb9c3414b8f00e49b2ca519d62871e774712 100644
+index 58f613d447ca8430d0a360d771bc81c68f46a5f8..ee7a1956b7775b9c5b398f52d86375e00dfeca91 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
 @@ -5285,6 +5285,12 @@ public abstract class Entity

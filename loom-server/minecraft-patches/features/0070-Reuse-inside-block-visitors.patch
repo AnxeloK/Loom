@@ -5,7 +5,7 @@ Subject: [PATCH] Reuse inside-block visitors
 
 
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 281c1fe13e43e1b3da9120565d7a2f27bc54a5fa..72e1d22d2fb49c1834d1911ad2d9de250c6d4cc7 100644
+index 465f019c71d31b51e8cec261e245026464c37a3a..9335f5c39df5279e4024984e55541872aec12483 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
 @@ -437,6 +437,7 @@ public abstract class Entity

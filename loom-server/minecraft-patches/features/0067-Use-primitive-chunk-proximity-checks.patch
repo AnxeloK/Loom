@@ -5,7 +5,7 @@ Subject: [PATCH] Use primitive chunk proximity checks
 
 
 diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
-index 777211d28f12f134d7ec05f4553db221aa73622b..3924448337922c43349cec27158003a363ae60c5 100644
+index e1e7cfb1cf9f159d85ae35d97017ab7d34aa1d6a..9c9ca4f75cc4bf835ffe6deb1843fbc3c314747c 100644
 --- a/net/minecraft/server/level/ChunkMap.java
 +++ b/net/minecraft/server/level/ChunkMap.java
 @@ -702,7 +702,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
@@ -101,7 +101,7 @@ index 777211d28f12f134d7ec05f4553db221aa73622b..3924448337922c43349cec27158003a3
          double zd = zPos - pos.z;
          return xd * xd + zd * zd;
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 5d45b22ccf161072032f5da1b41ddf514ccbf7a4..123c87f56a00c3cb29149c21ff2644f387a01df2 100644
+index fae4b242466cdcb8967817b35f4966f7a3590aa9..29da6a9f2f7c7fb84a227993158ae829ec901553 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -1041,9 +1041,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet

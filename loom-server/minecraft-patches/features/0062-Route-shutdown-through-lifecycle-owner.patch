@@ -5,10 +5,10 @@ Subject: [PATCH] Route shutdown through lifecycle owner
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index cb3dbb2b74c6be2d47848ed5a196fe9e10b3aa29..d21a2932aff446f65dbdf2beaf0c614b50db19f2 100644
+index a6abbe1397ef854f6ebbdb00ef6cd43697842041..eef9e36f22b4f8ef15d8aba18c926f6f906be53e 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2472,6 +2472,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2471,6 +2471,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          return super.scheduleExecutables() && !this.isStopped();
      }
  

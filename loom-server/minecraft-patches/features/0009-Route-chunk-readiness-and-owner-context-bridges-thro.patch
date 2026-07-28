@@ -6,7 +6,7 @@ Subject: [PATCH] Route chunk readiness and owner-context bridges through
 
 
 diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
-index ce2d08456ed4ca4c2d349bd9043fa573bc9992b3..834942432c96af7a16de7a764b8dfad9321008de 100644
+index 0f59cd8e4f5ab2bbc80c2cb19c622e82c655486a..56ef93759cc9479f1cf2e41da3b57e226fa3d47a 100644
 --- a/net/minecraft/network/PacketProcessor.java
 +++ b/net/minecraft/network/PacketProcessor.java
 @@ -102,18 +102,23 @@ public class PacketProcessor implements AutoCloseable {
@@ -45,10 +45,10 @@ index ce2d08456ed4ca4c2d349bd9043fa573bc9992b3..834942432c96af7a16de7a764b8dfad9
              return;
          }
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 0809ea2e5e0975e8549fc3e1cd50dff6f72f90a2..c912bcbd6b0bfd723db88478b21d06c32122243e 100644
+index 7bd19857d8d1fd8c7d19d8f67ecb69edd316caa0..f45c2e825ef6f12c35f97a8b2083b8b2aa116c2b 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2778,7 +2778,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2777,7 +2777,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      // Paper start - rewrite chunk system
      @Override
      public boolean isSameThread() {
@@ -140,7 +140,7 @@ index f3ecddedbe3a8b963c9bf46e62820cda65de6755..d34e038ac6309359116ea65c735b5c69
          }
      }
 diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-index 7da3c00615ed46f013eb1be87d5f79c184e6edf5..346d2368831df6434cdb7fa06c31fee111b62893 100644
+index 5115f653eb881d7bab5f7702b6cb1638ff841c61..3a71e7a0aa2c4986a2a0442142195d0dde379606 100644
 --- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 @@ -1967,16 +1967,22 @@ public class ServerGamePacketListenerImpl

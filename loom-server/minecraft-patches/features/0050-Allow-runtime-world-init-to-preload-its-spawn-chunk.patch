@@ -16,10 +16,10 @@ init call by a depth counter so no other runtime path gains a
 blocking chunk wait.
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 3b2451b173b4bbe4f929c3ffa7c9ed8b7023bbf3..b1e3fc29c6b53f72276aac474faa9b7a71d6adaa 100644
+index f0666930d0613df5ccc58ced3380eec896094dd1..ab005822ea3ac30d60ebbf5571fce3181eefc8e4 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -831,6 +831,8 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -830,6 +830,8 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.server.getPluginManager().callEvent(new org.bukkit.event.world.WorldInitEvent(overworld.getWorld()));
      // Paper end - rework world loading process
          if (!levelData.isInitialized()) {
@@ -28,7 +28,7 @@ index 3b2451b173b4bbe4f929c3ffa7c9ed8b7023bbf3..b1e3fc29c6b53f72276aac474faa9b7a
              try {
                  setInitialSpawn(overworld, levelData, worldOptions.generateBonusChest(), isDebug, overworld.levelLoadListener); // Paper - per world level load listener
                  levelData.setInitialized(true);
-@@ -849,6 +851,9 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -848,6 +850,9 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              }
  
              levelData.setInitialized(true);

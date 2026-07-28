@@ -5,10 +5,10 @@ Subject: [PATCH] Add owner-domain compatibility kernel
 
 
 diff --git a/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java b/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java
-index 232bc5e8b7cbb528b96f8048ba683705cddc436e..998b8024a0077d99637fbfa640e35ceeaaeb2692 100644
+index e47f279b66b169e2cdf762bb739a261f2acebeb1..49110929962da7439051faaade0bb63fc04c18db 100644
 --- a/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java
 +++ b/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java
-@@ -209,6 +209,13 @@ public class GlobalConfiguration extends ConfigurationPart {
+@@ -220,6 +220,13 @@ public class GlobalConfiguration extends ConfigurationPart {
          public boolean saveEmptyScoreboardTeams = true;
      }
  
@@ -2564,7 +2564,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..35444bb7b6dadce125417f699310470a
 +    }
 +}
 diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
-index e0cd28970dcd610313504d726dd2b7522a1c7f6d..5815523c21ae1a0b204a7766a5bb6872cc9a1985 100644
+index 39644d292e023c8f0dee2bce16652a087c1b57a7..c1c01737d7154c65522dd070544107b7b0d4296d 100644
 --- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
 +++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
 @@ -245,7 +245,6 @@ import org.bukkit.plugin.PluginLoadOrder;
@@ -2765,7 +2765,7 @@ index 3e89574757a44e506c5ce8c856806768d87f527f..7c05be6a5450ce4a56dc8ffd117e0ac7
 \ No newline at end of file
 +}
 diff --git a/src/main/java/org/spigotmc/SpigotConfig.java b/src/main/java/org/spigotmc/SpigotConfig.java
-index 025ec3f3e84a3367b4d709c8c3ecd98f6dfecab4..bcabc539a8742587e8ee43a15eb2c05c8a4f552f 100644
+index 0e8ac5714bd8a3bc743f4f082af593eea7448413..c83b5e5be88110a186c42ef7c85cbdf22a2d78b1 100644
 --- a/src/main/java/org/spigotmc/SpigotConfig.java
 +++ b/src/main/java/org/spigotmc/SpigotConfig.java
 @@ -232,6 +232,10 @@ public class SpigotConfig {

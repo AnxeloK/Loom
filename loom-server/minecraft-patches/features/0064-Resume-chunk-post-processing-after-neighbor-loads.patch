@@ -50,10 +50,10 @@ index 9a9a599ef178f851ee5c783631a724013a693586..af17f9006e9d3a36b6b25e21651a8dd8
                          this.changeEntityChunkStatus(FullChunkStatus.BLOCK_TICKING);
                          PlatformHooks.get().onChunkTicking(chunk, this.vanillaChunkHolder);
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index f96fd129b740682ce903ef8818368886de1d14a0..e32ec1f1b544a9881dd55cdece8847b0532dab44 100644
+index 87cf14a06b278086b463352abcfc7c3cab40c266..9a1805bc596206abfd75d3ff0ac955e23e5e3863 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2203,6 +2203,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2202,6 +2202,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              final net.minecraft.server.threading.TickRegions.RegionContext tickRegionContext =
                  net.minecraft.server.threading.TickRegions.pushLevelContext(level);
              try {
@@ -194,7 +194,7 @@ index ffc7103102639214c60201a213df3ad042a05c85..0b4f17076ea84112c6ae5b93865f0825
              level,
              owner.chunkX(),
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
-index a7c9a0c69c8c6deef275a96102201b139e9fc53b..6de5efbff3e0d4b9b184626f0b661c671458c7de 100644
+index 29608e94b8efc06d3776e1e5f98b11186aa5449e..57bbf4b771c9328a3818a259ab3b0092d2fb4d1c 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
 +++ b/net/minecraft/world/level/chunk/LevelChunk.java
 @@ -12,6 +12,7 @@ import java.util.List;

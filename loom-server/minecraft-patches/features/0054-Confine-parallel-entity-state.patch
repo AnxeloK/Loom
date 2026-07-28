@@ -225,7 +225,7 @@ index f44f9be27f8d3e5f3d9607f3618f40c8074f73cc..d4b69d8199ec4bdb232f72c07c148883
              }
          }
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index ceaeb1f438c9048716bb9be44ce831d227e02b7b..4a414250ad2ce1034ff5d6c2aa73c823eaff6425 100644
+index e6af888c1fdabe81fe0abed896479adbb5bdd3c1..58f613d447ca8430d0a360d771bc81c68f46a5f8 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
 @@ -176,31 +176,114 @@ public abstract class Entity
@@ -357,10 +357,10 @@ index ceaeb1f438c9048716bb9be44ce831d227e02b7b..4a414250ad2ce1034ff5d6c2aa73c823
      public org.bukkit.event.entity.CreatureSpawnEvent.@Nullable SpawnReason spawnReason; // Paper - Entity#getEntitySpawnReason
  
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index feb26eff43ec71f91b8c3e7cf5302146a94f59af..48429f7711ede4ddde6816b0af711dc58290dab9 100644
+index 7ebe116e13299c502c288109b15c793345c0010b..4a63657d2adcbd621679a4d872f8813b991f619d 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
-@@ -157,10 +157,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -156,10 +156,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      public List<net.minecraft.world.entity.item.ItemEntity> captureDrops;
      public final it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<SpawnCategory> ticksPerSpawnCategory = new it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<>();
      // Paper start - EAR 2
