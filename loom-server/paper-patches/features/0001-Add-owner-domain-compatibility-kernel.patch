@@ -4,24 +4,6 @@ Date: Sun, 31 May 2026 13:58:45 +0000
 Subject: [PATCH] Add owner-domain compatibility kernel
 
 
-diff --git a/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java b/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java
-index 232bc5e8b7cbb528b96f8048ba683705cddc436e..998b8024a0077d99637fbfa640e35ceeaaeb2692 100644
---- a/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java
-+++ b/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java
-@@ -209,6 +209,13 @@ public class GlobalConfiguration extends ConfigurationPart {
-         public boolean saveEmptyScoreboardTeams = true;
-     }
- 
-+    public Compatibility compatibility;
-+
-+    public class Compatibility extends ConfigurationPart {
-+        @Comment("Compatibility kernel policy: strict | hybrid | max-compat")
-+        public String mode = "hybrid";
-+    }
-+
-     @SuppressWarnings("unused") // used in postProcess
-     public ChunkSystem chunkSystem;
- 
 diff --git a/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java b/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java
 index f9a2c55a354c877749db3f92956de802ae575788..10da4667a66266525a63282912b7510692df7172 100644
 --- a/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java
@@ -227,7 +209,7 @@ index f9a2c55a354c877749db3f92956de802ae575788..10da4667a66266525a63282912b75106
      }
  }
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-index 7ce9ebba8ce304d1f3f21d4f15ee5f3560d7700b..d249cfe3a8a0acfde7fcb1d6324246e9b6aa7335 100644
+index 7ce9ebba8ce304d1f3f21d4f15ee5f3560d7700b..db7c8ffe444c6b4746fe4c405ec7fd6bfb40d451 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 @@ -4,6 +4,21 @@ import co.aikar.timings.TimedEventExecutor;
@@ -359,7 +341,7 @@ index 7ce9ebba8ce304d1f3f21d4f15ee5f3560d7700b..d249cfe3a8a0acfde7fcb1d6324246e9
 +                        case NATIVE -> this.callListener(registration, event, transaction, false, plan.path());
 +                        case APARTMENT -> this.callThroughApartment(registration, event, transaction, profile, false, plan.path());
 +                        case EMERGENCY_COMPATIBILITY -> {
-+                            profile.noteForcedMaxCompat(plan.path(), "emergency lane: " + plan.reason());
++                            profile.noteForcedSerializedFallback(plan.path(), "emergency lane: " + plan.reason());
 +                            this.compatibilityKernel.diagnostics().recordStrictFallback(
 +                                profile,
 +                                "emergency compatibility lane for " + event.getEventName() + " path=" + plan.path()
@@ -1322,17 +1304,10 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
 \ No newline at end of file
 +}
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
-index b5c04022749001fb25b7386a38477f842fa3c744..c7438c10b7442aa226fd53453651fd46c7a0fe20 100644
+index b5c04022749001fb25b7386a38477f842fa3c744..ba2c63b1a1d786273d7611c91ace772b0b1c7aaa 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
-@@ -1,5 +1,6 @@
- package io.papermc.paper.plugin.manager.compat;
- 
-+import io.papermc.paper.configuration.GlobalConfiguration;
- import java.util.Map;
- import java.util.concurrent.ConcurrentHashMap;
- import org.bukkit.event.Event;
-@@ -11,10 +12,39 @@ public final class CompatibilityKernel {
+@@ -11,10 +11,39 @@ public final class CompatibilityKernel {
      public enum InvocationPolicy {
          NATIVE,
          APARTMENT,
@@ -1372,7 +1347,7 @@ index b5c04022749001fb25b7386a38477f842fa3c744..c7438c10b7442aa226fd53453651fd46
      private final EventSemanticIndex eventSemanticIndex = new EventSemanticIndex();
      private final BukkitFacadeRegistry facadeRegistry = new BukkitFacadeRegistry();
      private final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
-@@ -46,6 +76,50 @@ public final class CompatibilityKernel {
+@@ -46,6 +75,50 @@ public final class CompatibilityKernel {
          return new CompatibilityTransaction(event, semantics);
      }
  
@@ -1403,10 +1378,10 @@ index b5c04022749001fb25b7386a38477f842fa3c744..c7438c10b7442aa226fd53453651fd46
 +        }
 +
 +        if (hasStrictOrRefused) {
-+            return new RoutingDecision(DispatchRoute.STRICT_REFUSAL, "strict/refused listener profile");
++            return new RoutingDecision(DispatchRoute.STRICT_REFUSAL, "strict/refused listener state");
 +        }
 +        if (hasInternal) {
-+            return new RoutingDecision(DispatchRoute.UNSAFE_INTERNAL, "internal listener profile");
++            return new RoutingDecision(DispatchRoute.UNSAFE_INTERNAL, "internal listener state");
 +        }
 +        if (hasLegacy && transaction.semantics().observerOnly()) {
 +            return new RoutingDecision(DispatchRoute.SNAPSHOT_OBSERVER, "legacy observer listeners only");
@@ -1423,7 +1398,7 @@ index b5c04022749001fb25b7386a38477f842fa3c744..c7438c10b7442aa226fd53453651fd46
      public InvocationPolicy policyFor(final PluginCompatibilityProfile profile) {
          return switch (profile.mode()) {
              case NATIVE_LOOM_AWARE -> InvocationPolicy.NATIVE;
-@@ -55,6 +129,52 @@ public final class CompatibilityKernel {
+@@ -55,6 +128,43 @@ public final class CompatibilityKernel {
          };
      }
  
@@ -1435,30 +1410,21 @@ index b5c04022749001fb25b7386a38477f842fa3c744..c7438c10b7442aa226fd53453651fd46
 +        final PluginCompatibilityProfile profile = this.profileFor(listener.getPlugin());
 +        final String path = pathFor(transaction, listener);
 +        final PluginCompatibilityProfile.State state = profile.stateForPath(path);
-+        final CompatibilityMode compatibilityMode = configuredMode();
-+
 +        if (profile.mode() == PluginCompatibilityProfile.Mode.REFUSED || state == PluginCompatibilityProfile.State.REFUSED) {
-+            return new InvocationPlan(InvocationPolicy.REFUSE, ExecutionLane.REFUSAL_LANE, path, "profile/path refused");
++            return new InvocationPlan(InvocationPolicy.REFUSE, ExecutionLane.REFUSAL_LANE, path, "listener/path refused");
 +        }
 +
-+        if (compatibilityMode == CompatibilityMode.STRICT && state == PluginCompatibilityProfile.State.FORCED_MAX_COMPAT) {
-+            return new InvocationPlan(InvocationPolicy.REFUSE, ExecutionLane.REFUSAL_LANE, path, "strict mode refuses forced max-compat path");
++        if (profile.mode() == PluginCompatibilityProfile.Mode.NATIVE_LOOM_AWARE && state == PluginCompatibilityProfile.State.NATIVE_FAST_PATH
++            && routingDecision.route() == DispatchRoute.NATIVE_FAST_PATH) {
++            return new InvocationPlan(InvocationPolicy.NATIVE, ExecutionLane.FAST_LANE, path, "native fast path");
 +        }
 +
-+        if (compatibilityMode == CompatibilityMode.MAX_COMPAT) {
-+            if (profile.mode() == PluginCompatibilityProfile.Mode.NATIVE_LOOM_AWARE && state == PluginCompatibilityProfile.State.NATIVE_FAST_PATH
-+                && routingDecision.route() == DispatchRoute.NATIVE_FAST_PATH) {
-+                return new InvocationPlan(InvocationPolicy.NATIVE, ExecutionLane.FAST_LANE, path, "max-compat preserved native fast path");
-+            }
-+            return new InvocationPlan(InvocationPolicy.EMERGENCY_COMPATIBILITY, ExecutionLane.EMERGENCY_COMPATIBILITY_LANE, path, "max-compat policy");
-+        }
-+
-+        if (state == PluginCompatibilityProfile.State.FORCED_MAX_COMPAT) {
++        if (requiresEmergencyLane(profile, state)) {
 +            return new InvocationPlan(
 +                InvocationPolicy.EMERGENCY_COMPATIBILITY,
 +                ExecutionLane.EMERGENCY_COMPATIBILITY_LANE,
 +                path,
-+                "path forced to max compatibility"
++                "degraded path"
 +            );
 +        }
 +
@@ -1476,7 +1442,7 @@ index b5c04022749001fb25b7386a38477f842fa3c744..c7438c10b7442aa226fd53453651fd46
      public void finishTransaction(final CompatibilityTransaction transaction) {
          transaction.finish();
          this.diagnostics.recordTransaction(transaction);
-@@ -66,4 +186,25 @@ public final class CompatibilityKernel {
+@@ -66,4 +176,27 @@ public final class CompatibilityKernel {
      ) {
          profile.noteMonitorMutation("MONITOR lane mutated " + mutation.event() + " in tx=" + mutation.transactionId());
      }
@@ -1496,12 +1462,14 @@ index b5c04022749001fb25b7386a38477f842fa3c744..c7438c10b7442aa226fd53453651fd46
 +        };
 +    }
 +
-+    private static CompatibilityMode configuredMode() {
-+        final GlobalConfiguration globalConfiguration = GlobalConfiguration.get();
-+        if (globalConfiguration == null || globalConfiguration.compatibility == null) {
-+            return CompatibilityMode.HYBRID;
-+        }
-+        return CompatibilityMode.fromConfig(globalConfiguration.compatibility.mode);
++    private static boolean requiresEmergencyLane(
++        final PluginCompatibilityProfile profile,
++        final PluginCompatibilityProfile.State state
++    ) {
++        return state == PluginCompatibilityProfile.State.FORCED_SERIAL_FALLBACK
++            || state == PluginCompatibilityProfile.State.LEGACY_DEGRADED
++            || profile.mode() == PluginCompatibilityProfile.Mode.LEGACY_INTERNAL
++            || profile.mode() == PluginCompatibilityProfile.Mode.LEGACY_STRICT;
 +    }
 +}
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
@@ -2258,7 +2226,7 @@ index 879a3b3c6c6266ab23288b4adaeb5eef2a80803b..2017f86f7206cdde736ee1a3c3988f03
 \ No newline at end of file
 +}
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
-index 783a46529621a59437ceaf56f1a3ef6346f0e90b..35444bb7b6dadce125417f699310470a409e2941 100644
+index 783a46529621a59437ceaf56f1a3ef6346f0e90b..f2a68f0b6baccaf9745c1a15878f41c2e259fd7c 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
 @@ -6,7 +6,9 @@ import java.util.ArrayList;
@@ -2279,7 +2247,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..35444bb7b6dadce125417f699310470a
 +        NATIVE_FAST_PATH,
 +        LEGACY_OBSERVED_SAFE,
 +        LEGACY_DEGRADED,
-+        FORCED_MAX_COMPAT,
++        FORCED_SERIAL_FALLBACK,
 +        REFUSED
 +    }
 +
@@ -2325,7 +2293,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..35444bb7b6dadce125417f699310470a
 +    private final Map<String, State> pathStates = new ConcurrentHashMap<>();
 +    private final Map<CompatibilityKernel.ExecutionLane, LongAdder> laneUsage = new ConcurrentHashMap<>();
 +    private final LongAdder degradedPaths = new LongAdder();
-+    private final LongAdder forcedMaxCompatPaths = new LongAdder();
++    private final LongAdder forcedSerializedFallbackPaths = new LongAdder();
  
      public PluginCompatibilityProfile(final Plugin plugin) {
          this.plugin = plugin;
@@ -2393,7 +2361,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..35444bb7b6dadce125417f699310470a
      }
  
      public void noteOwnerDomainWaitViolation(final String detail) {
-+        this.markPathState(CompatibilityRuntimeContext.currentPath(), State.FORCED_MAX_COMPAT);
++        this.markPathState(CompatibilityRuntimeContext.currentPath(), State.FORCED_SERIAL_FALLBACK);
          this.ownerDomainWaitViolations.increment();
          this.escalate(Mode.LEGACY_STRICT, EscalationReason.OWNER_BLOCKING_WAIT, detail);
      }
@@ -2401,9 +2369,9 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..35444bb7b6dadce125417f699310470a
          this.escalate(Mode.REFUSED, EscalationReason.REFUSAL, detail);
      }
  
-+    public void noteForcedMaxCompat(final String path, final String detail) {
-+        this.markPathState(path, State.FORCED_MAX_COMPAT);
-+        this.noteStrictFallback("forced max compatibility: " + detail);
++    public void noteForcedSerializedFallback(final String path, final String detail) {
++        this.markPathState(path, State.FORCED_SERIAL_FALLBACK);
++        this.noteStrictFallback("forced serialized fallback: " + detail);
 +    }
 +
      public void noteCallbackCost(final String eventName, final long nanos) {
@@ -2450,7 +2418,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..35444bb7b6dadce125417f699310470a
 +        return "plugin=" + snapshot.plugin()
 +            + ", mode=" + snapshot.mode()
 +            + ", degradedPaths=" + this.degradedPaths.longValue()
-+            + ", forcedMaxCompatPaths=" + this.forcedMaxCompatPaths.longValue()
++            + ", forcedSerializedFallbackPaths=" + this.forcedSerializedFallbackPaths.longValue()
 +            + ", ordered=" + snapshot.orderedTransactions()
 +            + ", snapshots=" + snapshot.snapshotDeliveries()
 +            + ", monitorMutations=" + snapshot.monitorMutationAttempts()
@@ -2470,7 +2438,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..35444bb7b6dadce125417f699310470a
              }
          }
 +        if (to == Mode.REFUSED) {
-+            this.pathStates.replaceAll((ignored, existing) -> existing == State.FORCED_MAX_COMPAT ? existing : State.REFUSED);
++            this.pathStates.replaceAll((ignored, existing) -> existing == State.FORCED_SERIAL_FALLBACK ? existing : State.REFUSED);
 +        }
 +    }
 +
@@ -2480,7 +2448,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..35444bb7b6dadce125417f699310470a
 +            if (existing == State.REFUSED) {
 +                return State.REFUSED;
 +            }
-+            if (existing == State.FORCED_MAX_COMPAT && desiredState != State.REFUSED) {
++            if (existing == State.FORCED_SERIAL_FALLBACK && desiredState != State.REFUSED) {
 +                return existing;
 +            }
 +            if (desiredState == State.LEGACY_DEGRADED && existing == State.LEGACY_DEGRADED) {
@@ -2490,8 +2458,8 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..35444bb7b6dadce125417f699310470a
 +        });
 +        if (desiredState == State.LEGACY_DEGRADED) {
 +            this.degradedPaths.increment();
-+        } else if (desiredState == State.FORCED_MAX_COMPAT) {
-+            this.forcedMaxCompatPaths.increment();
++        } else if (desiredState == State.FORCED_SERIAL_FALLBACK) {
++            this.forcedSerializedFallbackPaths.increment();
 +        }
 +    }
 +
@@ -3134,6 +3102,61 @@ index 0000000000000000000000000000000000000000..179481e9a9a28aefe74b48130fc230be
 +        }
 +    }
 +}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
+index d5440b5995bca3f148e02552474103dc16ee938b..477ccff988a8640c0dfbb175cfbe8a67a34cd72d 100644
+--- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
+@@ -32,6 +32,50 @@ class CompatibilityKernelRoutingTest {
+         Assertions.assertEquals(PluginCompatibilityProfile.State.LEGACY_OBSERVED_SAFE, profile.stateForPath(coldPath));
+     }
+ 
++    @Test
++    void routesObservedSafeLegacyPathsToApartmentLane() {
++        final CompatibilityKernel kernel = new CompatibilityKernel();
++        final RegisteredListener listener = listenerFor(mockPlugin("ObservedSafeLegacy", "com.example.ObservedSafeLegacy", List.of(), List.of()));
++        final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
++        final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
++        final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
++
++        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.APARTMENT, plan.policy());
++        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.APARTMENT_LANE, plan.lane());
++    }
++
++    @Test
++    void keepsDegradedPathsOnEmergencyLane() {
++        final CompatibilityKernel kernel = new CompatibilityKernel();
++        final Plugin plugin = mockPlugin("ForcedFallbackLegacy", "com.example.ForcedFallbackLegacy", List.of(), List.of());
++        final RegisteredListener listener = listenerFor(plugin);
++        final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
++        final String path = CompatibilityKernel.pathFor(transaction, listener);
++        kernel.profileFor(plugin).noteForcedSerializedFallback(path, "test forced path");
++
++        final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
++        final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
++
++        Assertions.assertEquals(path, plan.path());
++        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.EMERGENCY_COMPATIBILITY, plan.policy());
++        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.EMERGENCY_COMPATIBILITY_LANE, plan.lane());
++    }
++
++    @Test
++    void refusedProfilesUseRefusalLane() {
++        final CompatibilityKernel kernel = new CompatibilityKernel();
++        final Plugin plugin = mockPlugin("RefusedLegacy", "com.example.RefusedLegacy", List.of(), List.of());
++        final RegisteredListener listener = listenerFor(plugin);
++        final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
++        kernel.profileFor(plugin).noteRefusal("test refusal");
++
++        final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
++        final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
++
++        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.REFUSE, plan.policy());
++        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.REFUSAL_LANE, plan.lane());
++    }
++
+     private static RegisteredListener listenerFor(final Plugin plugin) {
+         final Listener listener = new Listener() {
+         };
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java
 new file mode 100644
 index 0000000000000000000000000000000000000000..0521fd22f4dd6b434634f313ed54d3f3181a2815

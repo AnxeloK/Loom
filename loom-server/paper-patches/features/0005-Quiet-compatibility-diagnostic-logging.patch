@@ -5,7 +5,7 @@ Subject: [PATCH] Quiet compatibility diagnostic logging
 
 
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
-index 95263f66f2515d9e07bcb8ccc7c35d0a1cb7698c..0675127a5fe0e23ef8398007d15d5c123030c616 100644
+index e7498fd873bfa16fc84d3e1f8cda85d272c11d96..b742b626ad6d4797b13feb620ae9fc4094e39168 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
 @@ -67,6 +67,7 @@ public final class CompatibilityDiagnostics {
@@ -16,7 +16,7 @@ index 95263f66f2515d9e07bcb8ccc7c35d0a1cb7698c..0675127a5fe0e23ef8398007d15d5c12
  
      public static CompatibilityDiagnostics global() {
          return GLOBAL;
-@@ -471,11 +472,20 @@ public final class CompatibilityDiagnostics {
+@@ -467,11 +468,20 @@ public final class CompatibilityDiagnostics {
      }
  
      private void logStructured(final String type, final Map<String, Object> payload) {

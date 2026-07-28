@@ -3,32 +3,22 @@ From: anxelok <anxelok@localhost>
 Date: Fri, 3 Jul 2026 11:49:00 +0000
 Subject: [PATCH] Do not latch plugins to REFUSED on service call cycles
 
-A detected service call cycle threw to break the recursion but also
-recorded a persistent refusal, which escalated the provider plugin's
-compatibility mode to REFUSED. That mode is sticky and plugin-wide, so
-a single cycle silently dropped every future event dispatch for that
-plugin on every thread. This was the only remaining path that could
-push a plugin into REFUSED.
+A detected service call cycle throws to break recursion but used to record a persistent refusal. That marked the provider plugin REFUSED, so one cycle could drop later event dispatches for the plugin.
 
-Keep the recursion-breaking throw but record the cycle as a transient
-refusal, matching how apartment contention is handled: the dispatch at
-hand fails, diagnostics stay visible, and the plugin is re-evaluated
-normally on the next call.
+Keep the recursion-breaking throw and record the cycle as transient diagnostic data. The next call is evaluated normally.
 
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
-index cea50b424187f9a6003cfc798a5e16a32e8f08f4..282070319db8bfbb15ad37028b2e490e5608efe0 100644
+index cea50b424187f9a6003cfc798a5e16a32e8f08f4..138397dff76ee7f66e7d27b5063a24e6c28f3c83 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
-@@ -159,7 +159,12 @@ public final class CompatibilityServicesManager implements ServicesManager {
+@@ -159,7 +159,10 @@ public final class CompatibilityServicesManager implements ServicesManager {
  
              final PluginCompatibilityProfile profile = compatibilityKernel.profileFor(this.providerPlugin);
              if (graphEntry.cycleDetected()) {
 -                compatibilityKernel.diagnostics().recordRefusal(profile, "service cycle " + graphEntry.cyclePath());
-+                // Loom Fix 0 - a service call cycle is a PER-CALL condition: the throw below already breaks
-+                // the recursion for this one invocation. It must not latch the provider's persistent mode to
-+                // REFUSED, which silently dropped every future event dispatch for that plugin on every
-+                // thread. Record it transiently so the cycle stays visible in diagnostics without poisoning
-+                // the plugin.
++                // A service call cycle is local to this invocation. The throw below breaks the recursion;
++                // recording it must not persistently classify the provider as REFUSED, which would drop
++                // later event dispatches. Keep the cycle visible as a transient diagnostic instead.
 +                compatibilityKernel.diagnostics().recordTransientRefusal(profile, "service cycle " + graphEntry.cyclePath());
                  callGraph.exit();
                  throw new IllegalStateException("Compatibility service cycle detected: " + graphEntry.cyclePath());
