@@ -4,14 +4,16 @@ Loom is a multithreaded Minecraft server based on [Paper](https://papermc.io).
 
 It runs world work in parallel while keeping mutable state inside the owner domain that is responsible for it. That lets Loom use more of the machine without treating unsafe cross-thread access as normal plugin behaviour.
 
-## Use the matching release
+## Download Loom
 
-Download the release jar that matches your exact Minecraft version from [Releases](../../releases). A jar built for one Minecraft version is not a replacement for another version line.
+Each entry on the [Releases](../../releases) page contains a jar for every supported Minecraft version. Download the file whose `mc` suffix matches your server exactly. For example, a file ending in `-mc26.1.2.jar` is the Minecraft 26.1.2 build.
+
+A jar built for one Minecraft version cannot be used for another.
 
 Loom requires Java 25 or newer. A basic launch command looks like this:
 
 ```bash
-java -Xms4G -Xmx4G -XX:+UseG1GC -jar loom-vX.Y.Z-mcX.Y.Z.jar nogui
+java -Xms4G -Xmx4G -XX:+UseG1GC -jar loom-X.Y.Z-mcX.Y.Z.jar nogui
 ```
 
 Choose the heap size for the machine and player load. Leave enough RAM for the operating system, native memory, networking, and the server's direct buffers.
