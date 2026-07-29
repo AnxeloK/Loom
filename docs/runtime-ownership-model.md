@@ -69,4 +69,4 @@ When an async path must affect live state, calculate or fetch data asynchronousl
 
 Changes to ownership routing should be tested with the operation that crosses the boundary. Depending on the path, that can include chunk generation, teleports, portals, respawn, login, commands, plugin callbacks, and clean shutdown.
 
-Compile first, then test on a server with logs visible. A fix is incomplete if it only removes an exception but changes vanilla behaviour or moves mutation to the wrong owner.
+Compile first, then test on a server with logs visible. A fix is incomplete if it only removes an exception while leaving mutation on the wrong owner.
