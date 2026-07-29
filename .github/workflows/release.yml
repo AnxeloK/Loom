@@ -19,7 +19,7 @@ jobs:
       versions: ${{ steps.versions.outputs.matrix }}
     steps:
       - name: Checkout Release Metadata
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Check Release Metadata
@@ -59,16 +59,16 @@ jobs:
         minecraft: ${{ fromJSON(needs.prepare.outputs.versions) }}
     steps:
       - name: Checkout Minecraft Source Tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ format('{0}-mc{1}', github.ref_name, matrix.minecraft) }}
       - name: Set up JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "25"
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
       - name: Configure Git User Details
         run: git config --global user.email "actions@github.com" && git config --global user.name "GitHub Actions"
       - name: Apply Patches
@@ -92,7 +92,7 @@ jobs:
           mkdir -p artifacts
           cp "${jars[0]}" "artifacts/loom-${release_version}-mc${configured_version}.jar"
       - name: Upload Jar
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-mc${{ matrix.minecraft }}
           path: artifacts/*.jar
@@ -103,9 +103,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Release Metadata
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Download Jars
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-mc*
           path: dist
