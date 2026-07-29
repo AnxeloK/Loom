@@ -1,0 +1,151 @@
+name: Publish Release
+
+on:
+  push:
+    tags: [ "v*" ]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: ${{ !contains(github.ref_name, '-mc') }}
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.versions.outputs.matrix }}
+    steps:
+      - name: Checkout Release Metadata
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check Release Metadata
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must use vMAJOR.MINOR.PATCH."
+            exit 1
+          fi
+
+          notes_file="docs/releases/${GITHUB_REF_NAME}.md"
+          test -s "${notes_file}"
+
+          jq -e '
+            type == "array"
+            and length > 0
+            and length == (unique | length)
+            and all(.[]; type == "string" and test("^[0-9]+\\.[0-9]+(\\.[0-9]+)?$"))
+          ' .github/release-versions.json >/dev/null
+
+          while IFS= read -r minecraft_version; do
+            source_tag="${GITHUB_REF_NAME}-mc${minecraft_version}"
+            git ls-remote --exit-code --tags origin "refs/tags/${source_tag}" >/dev/null
+          done < <(jq -r '.[]' .github/release-versions.json)
+
+          echo "matrix=$(jq -c '.' .github/release-versions.json)" >> "${GITHUB_OUTPUT}"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        minecraft: ${{ fromJSON(needs.prepare.outputs.versions) }}
+    steps:
+      - name: Checkout Minecraft Source Tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ format('{0}-mc{1}', github.ref_name, matrix.minecraft) }}
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Configure Git User Details
+        run: git config --global user.email "actions@github.com" && git config --global user.name "GitHub Actions"
+      - name: Apply Patches
+        run: ./gradlew applyAllPatches --stacktrace --no-daemon --max-workers=2
+      - name: Build
+        run: ./gradlew build :loom-server:createPaperclipJar --stacktrace --no-daemon --max-workers=2
+      - name: Package Jar
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          configured_version="$(sed -n 's/^mcVersion=//p' gradle.properties)"
+          test "${configured_version}" = "${{ matrix.minecraft }}"
+
+          mapfile -t jars < <(
+            find loom-server/build/libs -maxdepth 1 -type f -name 'loom-paperclip-*.jar' -print | sort
+          )
+          test "${#jars[@]}" -eq 1
+
+          release_version="${GITHUB_REF_NAME#v}"
+          mkdir -p artifacts
+          cp "${jars[0]}" "artifacts/loom-${release_version}-mc${configured_version}.jar"
+      - name: Upload Jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-mc${{ matrix.minecraft }}
+          path: artifacts/*.jar
+          if-no-files-found: error
+
+  publish:
+    needs: [ prepare, build ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Release Metadata
+        uses: actions/checkout@v4
+      - name: Download Jars
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-mc*
+          path: dist
+          merge-multiple: true
+      - name: Check Release Files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_version="${GITHUB_REF_NAME#v}"
+          expected_count="$(jq 'length' .github/release-versions.json)"
+          actual_count="$(find dist -maxdepth 1 -type f -name "loom-${release_version}-mc*.jar" | wc -l)"
+          test "${actual_count}" -eq "${expected_count}"
+
+          while IFS= read -r minecraft_version; do
+            test -s "dist/loom-${release_version}-mc${minecraft_version}.jar"
+          done < <(jq -r '.[]' .github/release-versions.json)
+
+          (
+            cd dist
+            sha256sum *.jar > SHA256SUMS
+          )
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_version="${GITHUB_REF_NAME#v}"
+          release_title="Loom ${release_version}"
+          notes_file="docs/releases/${GITHUB_REF_NAME}.md"
+
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/*.jar dist/SHA256SUMS --clobber
+            gh release edit "${GITHUB_REF_NAME}" --title "${release_title}" --notes-file "${notes_file}" --latest
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/*.jar dist/SHA256SUMS \
+              --verify-tag \
+              --title "${release_title}" \
+              --notes-file "${notes_file}" \
+              --latest
+          fi
