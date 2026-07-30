@@ -1,0 +1,269 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Thu, 30 Jul 2026 03:02:49 +0000
+Subject: [PATCH] Service owner callbacks during serialized waits
+
+
+diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
+index 185abbc450eb03cf285854b0decd7950a7925f27..5974592669221273ef99aa192428e7a2a7683d3f 100644
+--- a/net/minecraft/server/threading/RegionTickStaging.java
++++ b/net/minecraft/server/threading/RegionTickStaging.java
+@@ -349,13 +349,11 @@ public final class RegionTickStaging {
+         return list == null ? 0 : list.size();
+     }
+ 
+-    // Fix 1c — route a non-async event fired on a genuinely OFF-OWNER region worker thread (but OUTSIDE any
+-    // staging window, so stageEvent did not catch it) back to the owning thread, where its plugin listeners
+-    // run single-threaded exactly as under serial ticking. Chunk-system events such as ChunkLoadEvent /
+-    // ChunkUnloadEvent fire on region workers in the chunk pipeline, not inside the random-tick/entity-tick
+-    // begin/end window, so CURRENT is null and they would otherwise run inline on a worker thread (and the
+-    // legacy compat layer then refuses them on apartment contention). We hand the whole event off to the
+-    // current region's mailbox via OwnerDomainExecutor.execute — a FIRE-AND-FORGET enqueue, drained by the
++    // Route a non-async event fired on an off-owner region worker outside a staging window back to the owning
++    // thread, where its plugin listeners run single-threaded exactly as under serial ticking. Chunk-system
++    // events can fire in the chunk pipeline rather than inside the random-tick/entity-tick begin/end window,
++    // so CURRENT is null and they would otherwise run inline on a worker thread. We hand the whole event off
++    // to the current region's mailbox via OwnerDomainExecutor.execute, a fire-and-forget enqueue drained by the
+     // owner in postWorldTick(world).drainMailbox() once the parallel phase joins. It must be fire-and-forget:
+     // the owner remains synchronously phase-bound and only helps owner-scoped region shards; it does not run
+     // global callbacks until every world completes, so a synchronous round-trip would deadlock.
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index 0b4f17076ea84112c6ae5b93865f08259f98f078..ac545c3c705f72032539b91df12102b459254351 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -1,16 +1,19 @@
+ package net.minecraft.server.threading.runtime;
+ 
++import com.mojang.logging.LogUtils;
+ import java.util.EnumMap;
+ import java.util.Map;
+ import java.util.Objects;
+ import java.util.UUID;
+ import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ConcurrentLinkedQueue;
+ import java.util.concurrent.Executor;
+ import java.util.concurrent.Executors;
+ import java.util.concurrent.RejectedExecutionException;
+ import java.util.concurrent.ThreadFactory;
+ import java.util.concurrent.atomic.AtomicInteger;
+ import java.util.concurrent.atomic.AtomicLong;
++import java.util.concurrent.locks.LockSupport;
+ import java.util.function.Supplier;
+ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerLevel;
+@@ -21,6 +24,7 @@ import net.minecraft.util.Util;
+ import net.minecraft.world.entity.Entity;
+ import net.minecraft.world.level.Level;
+ import org.jspecify.annotations.Nullable;
++import org.slf4j.Logger;
+ 
+ public final class OwnerDomainExecutor {
+ 
+@@ -32,8 +36,12 @@ public final class OwnerDomainExecutor {
+         ASYNC_IO
+     }
+ 
++    private static final Logger LOGGER = LogUtils.getLogger();
+     private static final ThreadLocal<@Nullable OwnerContext> CURRENT_OWNER = new ThreadLocal<>();
+     private static final Executor LOGIN_EXECUTOR = Executors.newSingleThreadExecutor(new NamedThreadFactory("Owner domain login"));
++    private static final Object COOPERATIVE_WAITS_LOCK = new Object();
++    private static final CooperativeWait[] NO_COOPERATIVE_WAITS = new CooperativeWait[0];
++    private static volatile CooperativeWait[] cooperativeWaits = NO_COOPERATIVE_WAITS;
+     private static final java.util.concurrent.atomic.LongAdder EXECUTE_INLINE = new java.util.concurrent.atomic.LongAdder();
+     private static final java.util.concurrent.atomic.LongAdder EXECUTE_HANDOFF = new java.util.concurrent.atomic.LongAdder();
+     private static final java.util.concurrent.atomic.LongAdder[] EXECUTE_INLINE_BY_DOMAIN = createDomainCounters();
+@@ -341,6 +349,9 @@ public final class OwnerDomainExecutor {
+         }
+ 
+         recordHandoff(owner);
++        if (onUnreachable != null && dispatchToCooperativeWait(owner, task)) {
++            return;
++        }
+         switch (owner.domain()) {
+             case GLOBAL_CONTROL -> enqueueGlobal(owner, task);
+             case REGION -> enqueueRegion(owner, task);
+@@ -390,6 +401,68 @@ public final class OwnerDomainExecutor {
+         return future;
+     }
+ 
++    /**
++     * Waits for a result without abandoning the current owner. Cross-thread work targeting an owner in the
++     * current stack is routed back to this thread and serviced while the result is pending. This is reserved
++     * for synchronous runtime contracts whose delegated work can call back into the originating owner.
++     */
++    public static <T> T awaitCooperatively(final CompletableFuture<T> future, final String operation) {
++        Objects.requireNonNull(future, "future");
++        if (future.isDone()) {
++            return future.getNow(null);
++        }
++        return awaitCooperatively(() -> future, operation);
++    }
++
++    /**
++     * Registers the cooperative owner before starting delegated work, closing the race where that work can
++     * immediately call back into this owner before the wait becomes visible.
++     */
++    public static <T> T awaitCooperatively(
++        final Supplier<? extends CompletableFuture<T>> futureSupplier,
++        final String operation
++    ) {
++        Objects.requireNonNull(futureSupplier, "futureSupplier");
++        Objects.requireNonNull(operation, "operation");
++        final OwnerContext ownerContext = CURRENT_OWNER.get();
++        if (ownerContext == null || !canRunSynchronousCallbacks()) {
++            throw new IllegalStateException("Cooperative wait requires a synchronous owner domain: " + operation);
++        }
++
++        final CooperativeWait wait = new CooperativeWait(Thread.currentThread(), ownerContext, operation);
++        registerCooperativeWait(wait);
++
++        boolean interrupted = false;
++        try {
++            final CompletableFuture<T> future = Objects.requireNonNull(futureSupplier.get(), "futureSupplier returned null future");
++            future.whenComplete((result, throwable) -> wait.signal());
++            while (!future.isDone()) {
++                if (!wait.runOne()) {
++                    LockSupport.park(wait);
++                    if (Thread.interrupted()) {
++                        interrupted = true;
++                    }
++                }
++            }
++
++            wait.stopAccepting();
++            while (wait.runOne()) {
++                // Drain every task accepted before the wait closed so no owner handoff is lost.
++            }
++            return future.getNow(null);
++        } finally {
++            wait.stopAccepting();
++            unregisterCooperativeWait(wait);
++            if (interrupted) {
++                Thread.currentThread().interrupt();
++            }
++        }
++    }
++
++    static int activeCooperativeWaits() {
++        return cooperativeWaits.length;
++    }
++
+     public static Diagnostics snapshotDiagnostics() {
+         final EnumMap<Domain, DomainDiagnostics> domains = new EnumMap<>(Domain.class);
+         for (final Domain domain : Domain.values()) {
+@@ -404,6 +477,51 @@ public final class OwnerDomainExecutor {
+         return new Diagnostics(EXECUTE_INLINE.sum(), EXECUTE_HANDOFF.sum(), Map.copyOf(domains));
+     }
+ 
++    private static boolean dispatchToCooperativeWait(final Owner owner, final Runnable task) {
++        final CooperativeWait[] waits = cooperativeWaits;
++        for (int i = waits.length - 1; i >= 0; --i) {
++            final CooperativeWait wait = waits[i];
++            if (wait.accepts(owner) && wait.offer(wrap(owner, task))) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private static void registerCooperativeWait(final CooperativeWait wait) {
++        synchronized (COOPERATIVE_WAITS_LOCK) {
++            final CooperativeWait[] current = cooperativeWaits;
++            final CooperativeWait[] updated = new CooperativeWait[current.length + 1];
++            System.arraycopy(current, 0, updated, 0, current.length);
++            updated[current.length] = wait;
++            cooperativeWaits = updated;
++        }
++    }
++
++    private static void unregisterCooperativeWait(final CooperativeWait wait) {
++        synchronized (COOPERATIVE_WAITS_LOCK) {
++            final CooperativeWait[] current = cooperativeWaits;
++            int index = -1;
++            for (int i = current.length - 1; i >= 0; --i) {
++                if (current[i] == wait) {
++                    index = i;
++                    break;
++                }
++            }
++            if (index < 0) {
++                return;
++            }
++            if (current.length == 1) {
++                cooperativeWaits = NO_COOPERATIVE_WAITS;
++                return;
++            }
++            final CooperativeWait[] updated = new CooperativeWait[current.length - 1];
++            System.arraycopy(current, 0, updated, 0, index);
++            System.arraycopy(current, index + 1, updated, index, current.length - index - 1);
++            cooperativeWaits = updated;
++        }
++    }
++
+     private static void enqueueGlobal(final Owner owner, final Runnable task) {
+         final MinecraftServer server = owner.server();
+         if (server == null || !server.enqueueGlobalOwnerTask(wrap(owner, task))) {
+@@ -519,6 +637,63 @@ public final class OwnerDomainExecutor {
+         }
+     }
+ 
++    private static final class CooperativeWait {
++        private final Thread thread;
++        private final OwnerContext ownerContext;
++        private final String operation;
++        private final ConcurrentLinkedQueue<Runnable> tasks = new ConcurrentLinkedQueue<>();
++        private boolean accepting = true;
++
++        private CooperativeWait(final Thread thread, final OwnerContext ownerContext, final String operation) {
++            this.thread = thread;
++            this.ownerContext = ownerContext;
++            this.operation = operation;
++        }
++
++        private boolean accepts(final Owner requested) {
++            if (requested.domain() == Domain.PLAYER
++                && (requested.player() == null || requested.player().hasDisconnected())) {
++                return false;
++            }
++            for (OwnerContext context = this.ownerContext; context != null; context = context.previous()) {
++                if (context.owner().contains(requested)) {
++                    return true;
++                }
++            }
++            return false;
++        }
++
++        private synchronized boolean offer(final Runnable task) {
++            if (!this.accepting) {
++                return false;
++            }
++            this.tasks.add(task);
++            this.signal();
++            return true;
++        }
++
++        private boolean runOne() {
++            final Runnable task = this.tasks.poll();
++            if (task == null) {
++                return false;
++            }
++            try {
++                task.run();
++            } catch (final Throwable throwable) {
++                LOGGER.error("Owner task failed during cooperative wait for {}", this.operation, throwable);
++            }
++            return true;
++        }
++
++        private synchronized void stopAccepting() {
++            this.accepting = false;
++        }
++
++        private void signal() {
++            LockSupport.unpark(this.thread);
++        }
++    }
++
+     public static final class Scope implements AutoCloseable {
+         private final @Nullable OwnerContext previous;
+         private final boolean requireEmptyOnClose;
