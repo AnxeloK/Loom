@@ -1,0 +1,404 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Thu, 30 Jul 2026 21:45:52 +0000
+Subject: [PATCH] Prepare end gateway destinations asynchronously
+
+
+diff --git a/net/minecraft/world/level/block/EndGatewayBlock.java b/net/minecraft/world/level/block/EndGatewayBlock.java
+index f9bb42aa5f85c3a4ef144d9131ae9e2d7d7ed78b..d5a0d35612222fce168235cffa4424d893863063 100644
+--- a/net/minecraft/world/level/block/EndGatewayBlock.java
++++ b/net/minecraft/world/level/block/EndGatewayBlock.java
+@@ -2,6 +2,7 @@ package net.minecraft.world.level.block;
+ 
+ import com.mojang.serialization.MapCodec;
+ import java.util.Set;
++import java.util.concurrent.CompletableFuture;
+ import net.minecraft.core.BlockPos;
+ import net.minecraft.core.particles.ParticleTypes;
+ import net.minecraft.server.level.ServerLevel;
+@@ -110,29 +111,39 @@ public class EndGatewayBlock extends BaseEntityBlock implements Portal {
+ 
+     @Override
+     public @Nullable TeleportTransition getPortalDestination(final ServerLevel currentLevel, final Entity entity, final BlockPos portalEntryPos) {
++        final CompletableFuture<@Nullable TeleportTransition> destination = this.getPortalDestinationAsync(currentLevel, entity, portalEntryPos);
++        return destination.isDone() ? destination.getNow(null) : null;
++    }
++
++    @Override
++    public CompletableFuture<@Nullable TeleportTransition> getPortalDestinationAsync(
++        final ServerLevel currentLevel,
++        final Entity entity,
++        final BlockPos portalEntryPos
++    ) {
+         if (currentLevel.getBlockEntity(portalEntryPos) instanceof TheEndGatewayBlockEntity endGatewayBlockEntity) {
+-            Vec3 teleportPosition = endGatewayBlockEntity.getPortalPosition(currentLevel, portalEntryPos);
+-            if (teleportPosition == null) {
+-                return null;
+-            } else {
+-                return entity instanceof ThrownEnderpearl
+-                    ? new TeleportTransition(currentLevel, teleportPosition, Vec3.ZERO, 0.0F, 0.0F, Set.of(), TeleportTransition.PLACE_PORTAL_TICKET, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.END_GATEWAY) // CraftBukkit
+-                    : new TeleportTransition(
+-                        currentLevel,
+-                        teleportPosition,
+-                        Vec3.ZERO,
+-                        0.0F,
+-                        0.0F,
+-                        Relative.union(Relative.DELTA, Relative.ROTATION),
+-                        TeleportTransition.PLACE_PORTAL_TICKET,
+-                        org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.END_GATEWAY // CraftBukkit
+-                    );
+-            }
++            return endGatewayBlockEntity.getPortalPositionAsync(currentLevel, portalEntryPos)
++                .thenApply(teleportPosition -> teleportPosition == null ? null : createTransition(currentLevel, entity, teleportPosition));
+         } else {
+-            return null;
++            return CompletableFuture.completedFuture(null);
+         }
+     }
+ 
++    private static TeleportTransition createTransition(final ServerLevel currentLevel, final Entity entity, final Vec3 teleportPosition) {
++        return entity instanceof ThrownEnderpearl
++            ? new TeleportTransition(currentLevel, teleportPosition, Vec3.ZERO, 0.0F, 0.0F, Set.of(), TeleportTransition.PLACE_PORTAL_TICKET, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.END_GATEWAY) // CraftBukkit
++            : new TeleportTransition(
++                currentLevel,
++                teleportPosition,
++                Vec3.ZERO,
++                0.0F,
++                0.0F,
++                Relative.union(Relative.DELTA, Relative.ROTATION),
++                TeleportTransition.PLACE_PORTAL_TICKET,
++                org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.END_GATEWAY // CraftBukkit
++            );
++    }
++
+     @Override
+     protected RenderShape getRenderShape(final BlockState state) {
+         return RenderShape.INVISIBLE;
+diff --git a/net/minecraft/world/level/block/entity/TheEndGatewayBlockEntity.java b/net/minecraft/world/level/block/entity/TheEndGatewayBlockEntity.java
+index 70500bb68965f1704ff87c9bcf1f2f28efca17c3..ad2317a22d7205172a1e81f95f7659e537b8721d 100644
+--- a/net/minecraft/world/level/block/entity/TheEndGatewayBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/TheEndGatewayBlockEntity.java
+@@ -1,6 +1,7 @@
+ package net.minecraft.world.level.block.entity;
+ 
+ import com.mojang.logging.LogUtils;
++import java.util.concurrent.CompletableFuture;
+ import net.minecraft.core.BlockPos;
+ import net.minecraft.core.Direction;
+ import net.minecraft.core.HolderLookup;
+@@ -9,6 +10,7 @@ import net.minecraft.data.worldgen.features.EndFeatures;
+ import net.minecraft.nbt.CompoundTag;
+ import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+ import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.runtime.OwnershipRouter;
+ import net.minecraft.util.Mth;
+ import net.minecraft.util.RandomSource;
+ import net.minecraft.world.level.BlockGetter;
+@@ -39,6 +41,7 @@ public class TheEndGatewayBlockEntity extends TheEndPortalBlockEntity {
+     private int teleportCooldown;
+     public @Nullable BlockPos exitPortal;
+     public boolean exactTeleport = false;
++    private @Nullable CompletableFuture<PreparedExitPortal> pendingExitPortalPreparation;
+ 
+     public TheEndGatewayBlockEntity(final BlockPos worldPosition, final BlockState blockState) {
+         super(BlockEntityType.END_GATEWAY, worldPosition, blockState);
+@@ -129,20 +132,27 @@ public class TheEndGatewayBlockEntity extends TheEndPortalBlockEntity {
+     }
+ 
+     public @Nullable Vec3 getPortalPosition(final ServerLevel currentLevel, final BlockPos portalEntryPos) {
+-        if (this.exitPortal == null && currentLevel.getTypeKey() == net.minecraft.world.level.dimension.LevelStem.END) { // CraftBukkit - work in alternate worlds
+-            BlockPos exitPortalPos = findOrCreateValidTeleportPos(currentLevel, portalEntryPos);
+-            exitPortalPos = exitPortalPos.above(10);
+-            LOGGER.debug("Creating portal at {}", exitPortalPos);
+-            spawnGatewayPortal(currentLevel, exitPortalPos, EndGatewayConfiguration.knownExit(portalEntryPos, false));
+-            this.setExitPosition(exitPortalPos, this.exactTeleport);
+-        }
++        final CompletableFuture<@Nullable Vec3> position = this.getPortalPositionAsync(currentLevel, portalEntryPos);
++        return position.isDone() ? position.getNow(null) : null;
++    }
+ 
++    public CompletableFuture<@Nullable Vec3> getPortalPositionAsync(final ServerLevel currentLevel, final BlockPos portalEntryPos) {
+         if (this.exitPortal != null) {
+-            BlockPos pos = this.exactTeleport ? this.exitPortal : findExitPosition(currentLevel, this.exitPortal);
+-            return pos.getBottomCenter();
+-        } else {
+-            return null;
++            return resolvePortalPositionAsync(currentLevel, this.exitPortal, this.exactTeleport);
++        }
++
++        if (currentLevel.getTypeKey() != net.minecraft.world.level.dimension.LevelStem.END) { // CraftBukkit - work in alternate worlds
++            return CompletableFuture.completedFuture(null);
+         }
++
++        if (this.pendingExitPortalPreparation == null) {
++            this.pendingExitPortalPreparation = findExitPortalXZPosTentativeAsync(currentLevel, portalEntryPos)
++                .thenCompose(tentativePosition -> prepareExitPortalAsync(currentLevel, portalEntryPos, tentativePosition));
++        }
++
++        return this.pendingExitPortalPreparation.thenCompose(
++            preparedExit -> this.applyPreparedExitPortalAsync(currentLevel, portalEntryPos, preparedExit)
++        );
+     }
+ 
+     private static BlockPos findExitPosition(final Level level, final BlockPos exitPortal) {
+@@ -151,53 +161,203 @@ public class TheEndGatewayBlockEntity extends TheEndPortalBlockEntity {
+         return pos.above();
+     }
+ 
+-    private static BlockPos findOrCreateValidTeleportPos(final ServerLevel level, final BlockPos endGatewayPos) {
+-        Vec3 exitPortalXZPosTentative = findExitPortalXZPosTentative(level, endGatewayPos);
+-        LevelChunk exitPortalChunk = getChunk(level, exitPortalXZPosTentative);
+-        BlockPos exitPortalPos = findValidSpawnInChunk(exitPortalChunk);
+-        if (exitPortalPos == null) {
+-            BlockPos newExitPortalPos = BlockPos.containing(exitPortalXZPosTentative.x + 0.5, 75.0, exitPortalXZPosTentative.z + 0.5);
+-            LOGGER.debug("Failed to find a suitable block to teleport to, spawning an island on {}", newExitPortalPos);
+-            level.registryAccess()
+-                .lookup(Registries.CONFIGURED_FEATURE)
+-                .flatMap(registry -> registry.get(EndFeatures.END_ISLAND))
+-                .ifPresent(
+-                    endIsland -> endIsland.value()
+-                        .place(level, level.getChunkSource().getGenerator(), RandomSource.create(newExitPortalPos.asLong()), newExitPortalPos)
+-                );
+-            exitPortalPos = newExitPortalPos;
+-        } else {
+-            LOGGER.debug("Found suitable block to teleport to: {}", exitPortalPos);
++    private static CompletableFuture<@Nullable Vec3> resolvePortalPositionAsync(
++        final ServerLevel level,
++        final BlockPos exitPortal,
++        final boolean exactTeleport
++    ) {
++        if (exactTeleport) {
++            return CompletableFuture.completedFuture(exitPortal.getBottomCenter());
+         }
+ 
+-        return findTallestBlock(level, exitPortalPos, 16, true);
++        final BlockPos searchOrigin = exitPortal.offset(0, 2, 0);
++        final int minChunkX = (searchOrigin.getX() - 5) >> 4;
++        final int minChunkZ = (searchOrigin.getZ() - 5) >> 4;
++        final int maxChunkX = (searchOrigin.getX() + 5) >> 4;
++        final int maxChunkZ = (searchOrigin.getZ() + 5) >> 4;
++        final CompletableFuture<@Nullable Vec3> result = new CompletableFuture<>();
++        OwnershipRouter.runWhenChunksReady(
++            level,
++            minChunkX,
++            minChunkZ,
++            maxChunkX,
++            maxChunkZ,
++            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "end-gateway-exit-ready",
++            chunks -> result.complete(findExitPosition(level, exitPortal).getBottomCenter())
++        ).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                result.completeExceptionally(throwable);
++            }
++        });
++        return result;
+     }
+ 
+-    private static Vec3 findExitPortalXZPosTentative(final ServerLevel level, final BlockPos endGatewayPos) {
+-        Vec3 teleportXZDirectionVector = new Vec3(endGatewayPos.getX(), 0.0, endGatewayPos.getZ()).normalize();
+-        int teleportDistance = 1024;
+-        Vec3 exitPortalXZPosTentative = teleportXZDirectionVector.scale(1024.0);
++    private static CompletableFuture<Vec3> findExitPortalXZPosTentativeAsync(final ServerLevel level, final BlockPos endGatewayPos) {
++        final Vec3 direction = new Vec3(endGatewayPos.getX(), 0.0, endGatewayPos.getZ()).normalize();
++        final Vec3 initialPosition = direction.scale(1024.0);
++        final CompletableFuture<Vec3> result = new CompletableFuture<>();
++        scanBackwardForEmptyChunk(level, direction, initialPosition, 16, result);
++        return result;
++    }
+ 
+-        for (int chunkLimit = 16;
+-            !isChunkEmpty(level, exitPortalXZPosTentative) && chunkLimit-- > 0;
+-            exitPortalXZPosTentative = exitPortalXZPosTentative.add(teleportXZDirectionVector.scale(-16.0))
+-        ) {
+-            LOGGER.debug("Skipping backwards past nonempty chunk at {}", exitPortalXZPosTentative);
+-        }
++    private static void scanBackwardForEmptyChunk(
++        final ServerLevel level,
++        final Vec3 direction,
++        final Vec3 position,
++        final int remainingChunks,
++        final CompletableFuture<Vec3> result
++    ) {
++        isChunkEmptyAsync(level, position).whenComplete((empty, throwable) -> {
++            if (throwable != null) {
++                result.completeExceptionally(throwable);
++            } else if (empty || remainingChunks == 0) {
++                scanForwardForNonEmptyChunk(level, direction, position, 16, result);
++            } else {
++                LOGGER.debug("Skipping backwards past nonempty chunk at {}", position);
++                scanBackwardForEmptyChunk(level, direction, position.add(direction.scale(-16.0)), remainingChunks - 1, result);
++            }
++        });
++    }
+ 
+-        for (int var6 = 16;
+-            isChunkEmpty(level, exitPortalXZPosTentative) && var6-- > 0;
+-            exitPortalXZPosTentative = exitPortalXZPosTentative.add(teleportXZDirectionVector.scale(16.0))
+-        ) {
+-            LOGGER.debug("Skipping forward past empty chunk at {}", exitPortalXZPosTentative);
+-        }
++    private static void scanForwardForNonEmptyChunk(
++        final ServerLevel level,
++        final Vec3 direction,
++        final Vec3 position,
++        final int remainingChunks,
++        final CompletableFuture<Vec3> result
++    ) {
++        isChunkEmptyAsync(level, position).whenComplete((empty, throwable) -> {
++            if (throwable != null) {
++                result.completeExceptionally(throwable);
++            } else if (!empty || remainingChunks == 0) {
++                LOGGER.debug("Found chunk at {}", position);
++                result.complete(position);
++            } else {
++                LOGGER.debug("Skipping forward past empty chunk at {}", position);
++                scanForwardForNonEmptyChunk(level, direction, position.add(direction.scale(16.0)), remainingChunks - 1, result);
++            }
++        });
++    }
++
++    private static CompletableFuture<Boolean> isChunkEmptyAsync(final ServerLevel level, final Vec3 position) {
++        final int chunkX = Mth.floor(position.x / 16.0);
++        final int chunkZ = Mth.floor(position.z / 16.0);
++        final CompletableFuture<Boolean> result = new CompletableFuture<>();
++        OwnershipRouter.runWhenChunksReady(
++            level,
++            chunkX,
++            chunkZ,
++            chunkX,
++            chunkZ,
++            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "end-gateway-scan-chunk-ready",
++            chunks -> result.complete(chunks.getFirst().getHighestFilledSectionIndex() == -1)
++        ).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                result.completeExceptionally(throwable);
++            }
++        });
++        return result;
++    }
++
++    private static CompletableFuture<PreparedExitPortal> prepareExitPortalAsync(
++        final ServerLevel level,
++        final BlockPos portalEntryPos,
++        final Vec3 tentativePosition
++    ) {
++        final int chunkX = Mth.floor(tentativePosition.x / 16.0);
++        final int chunkZ = Mth.floor(tentativePosition.z / 16.0);
++        final CompletableFuture<PreparedExitPortal> result = new CompletableFuture<>();
++        OwnershipRouter.runWhenChunksReady(
++            level,
++            chunkX - 1,
++            chunkZ - 1,
++            chunkX + 1,
++            chunkZ + 1,
++            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "end-gateway-destination-ready",
++            chunks -> {
++                final LevelChunk exitPortalChunk = level.getChunkSource().getChunkAtIfLoadedImmediately(chunkX, chunkZ);
++                if (exitPortalChunk == null) {
++                    throw new IllegalStateException("End gateway destination chunk was not available after readiness");
++                }
++
++                BlockPos exitPortalPos = findValidSpawnInChunk(exitPortalChunk);
++                if (exitPortalPos == null) {
++                    final BlockPos newExitPortalPos = BlockPos.containing(tentativePosition.x + 0.5, 75.0, tentativePosition.z + 0.5);
++                    LOGGER.debug("Failed to find a suitable block to teleport to, spawning an island on {}", newExitPortalPos);
++                    level.registryAccess()
++                        .lookup(Registries.CONFIGURED_FEATURE)
++                        .flatMap(registry -> registry.get(EndFeatures.END_ISLAND))
++                        .ifPresent(
++                            endIsland -> endIsland.value()
++                                .place(level, level.getChunkSource().getGenerator(), RandomSource.create(newExitPortalPos.asLong()), newExitPortalPos)
++                        );
++                    exitPortalPos = newExitPortalPos;
++                } else {
++                    LOGGER.debug("Found suitable block to teleport to: {}", exitPortalPos);
++                }
+ 
+-        LOGGER.debug("Found chunk at {}", exitPortalXZPosTentative);
+-        return exitPortalXZPosTentative;
++                final BlockPos gatewayPosition = findTallestBlock(level, exitPortalPos, 16, true).above(10);
++                LOGGER.debug("Creating portal at {}", gatewayPosition);
++                spawnGatewayPortal(level, gatewayPosition, EndGatewayConfiguration.knownExit(portalEntryPos, false));
++                result.complete(new PreparedExitPortal(gatewayPosition, findExitPosition(level, gatewayPosition).getBottomCenter()));
++            }
++        ).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                result.completeExceptionally(throwable);
++            }
++        });
++        return result;
+     }
+ 
+-    private static boolean isChunkEmpty(final ServerLevel level, final Vec3 xzPos) {
+-        return getChunk(level, xzPos).getHighestFilledSectionIndex() == -1;
++    private CompletableFuture<@Nullable Vec3> applyPreparedExitPortalAsync(
++        final ServerLevel level,
++        final BlockPos portalEntryPos,
++        final PreparedExitPortal preparedExit
++    ) {
++        final int chunkX = portalEntryPos.getX() >> 4;
++        final int chunkZ = portalEntryPos.getZ() >> 4;
++        final CompletableFuture<@Nullable Vec3> result = new CompletableFuture<>();
++        OwnershipRouter.runWhenChunksReady(
++            level,
++            chunkX,
++            chunkZ,
++            chunkX,
++            chunkZ,
++            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "end-gateway-source-ready",
++            chunks -> {
++                if (level.getBlockEntity(portalEntryPos) != this) {
++                    result.complete(null);
++                    return;
++                }
++
++                if (this.exitPortal == null) {
++                    this.setExitPosition(preparedExit.portalPosition(), this.exactTeleport);
++                }
++
++                if (this.exactTeleport) {
++                    result.complete(this.exitPortal.getBottomCenter());
++                } else if (this.exitPortal.equals(preparedExit.portalPosition())) {
++                    result.complete(preparedExit.teleportPosition());
++                } else {
++                    resolvePortalPositionAsync(level, this.exitPortal, false).whenComplete((position, throwable) -> {
++                        if (throwable != null) {
++                            result.completeExceptionally(throwable);
++                        } else {
++                            result.complete(position);
++                        }
++                    });
++                }
++            }
++        ).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                result.completeExceptionally(throwable);
++            }
++        });
++        return result;
+     }
+ 
+     private static BlockPos findTallestBlock(final BlockGetter level, final BlockPos around, final int dist, final boolean allowBedrock) {
+@@ -221,10 +381,6 @@ public class TheEndGatewayBlockEntity extends TheEndPortalBlockEntity {
+         return tallest == null ? around : tallest;
+     }
+ 
+-    private static LevelChunk getChunk(final Level level, final Vec3 pos) {
+-        return level.getChunk(Mth.floor(pos.x / 16.0), Mth.floor(pos.z / 16.0));
+-    }
+-
+     private static @Nullable BlockPos findValidSpawnInChunk(final LevelChunk chunk) {
+         ChunkPos chunkPos = chunk.getPos();
+         BlockPos start = new BlockPos(chunkPos.getMinBlockX(), 30, chunkPos.getMinBlockZ());
+@@ -275,4 +431,7 @@ public class TheEndGatewayBlockEntity extends TheEndPortalBlockEntity {
+         this.exitPortal = exactPosition;
+         this.setChanged();
+     }
++
++    private record PreparedExitPortal(BlockPos portalPosition, Vec3 teleportPosition) {
++    }
+ }
