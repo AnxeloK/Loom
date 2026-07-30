@@ -3103,7 +3103,7 @@ index 0000000000000000000000000000000000000000..179481e9a9a28aefe74b48130fc230be
 +    }
 +}
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
-index d5440b5995bca3f148e02552474103dc16ee938b..477ccff988a8640c0dfbb175cfbe8a67a34cd72d 100644
+index 1da4f39a3f418115034b49d6fa8715f2e4bd2831..d59b1d22bb7fd50395ce18b0d5ce05b86ec26f03 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
 @@ -32,6 +32,50 @@ class CompatibilityKernelRoutingTest {
