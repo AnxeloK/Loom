@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 31 Jul 2026 05:32:53 +0000
+Subject: [PATCH] Test primitive region bucket ordering
+
+Cover signed bucket ordering, stable task grouping, and aggregate bounds for the primitive region dispatch map.
+
+diff --git a/src/test/java/net/minecraft/server/threading/TickRegionsBucketOrderingTest.java b/src/test/java/net/minecraft/server/threading/TickRegionsBucketOrderingTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..e207fb8ac9219fdf95a887880cb1a41d01147029
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/TickRegionsBucketOrderingTest.java
+@@ -0,0 +1,103 @@
++package net.minecraft.server.threading;
++
++import java.lang.reflect.Field;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.util.List;
++import net.minecraft.server.level.ServerLevel;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class TickRegionsBucketOrderingTest {
++
++    private static final Method BUCKET_TASKS;
++    private static final Field TASKS;
++    private static final Field MIN_CHUNK_X;
++    private static final Field MIN_CHUNK_Z;
++    private static final Field MAX_CHUNK_X;
++    private static final Field MAX_CHUNK_Z;
++
++    static {
++        try {
++            final Class<?> bucketClass = Class.forName("net.minecraft.server.threading.TickRegions$RegionBoundBucket");
++            BUCKET_TASKS = TickRegions.class.getDeclaredMethod(
++                "bucketRegionBoundTasksByDispatchChunk", ServerLevel.class, List.class
++            );
++            BUCKET_TASKS.setAccessible(true);
++            TASKS = bucketClass.getDeclaredField("tasks");
++            TASKS.setAccessible(true);
++            MIN_CHUNK_X = bucketClass.getDeclaredField("minChunkX");
++            MIN_CHUNK_X.setAccessible(true);
++            MIN_CHUNK_Z = bucketClass.getDeclaredField("minChunkZ");
++            MIN_CHUNK_Z.setAccessible(true);
++            MAX_CHUNK_X = bucketClass.getDeclaredField("maxChunkX");
++            MAX_CHUNK_X.setAccessible(true);
++            MAX_CHUNK_Z = bucketClass.getDeclaredField("maxChunkZ");
++            MAX_CHUNK_Z.setAccessible(true);
++        } catch (final ReflectiveOperationException exception) {
++            throw new ExceptionInInitializerError(exception);
++        }
++    }
++
++    @Test
++    void primitiveBucketsKeepSignedKeyAndTaskOrder() {
++        final ServerLevel world = Mockito.mock(ServerLevel.class);
++        final TickRegions.RegionBoundTask zeroFirst = task(0, 0);
++        final TickRegions.RegionBoundTask positiveX = task(Integer.MAX_VALUE, 0);
++        final TickRegions.RegionBoundTask negativeZ = task(0, -1);
++        final TickRegions.RegionBoundTask zeroSecond = task(0, 0);
++        final TickRegions.RegionBoundTask negativeX = task(-1, 0);
++
++        final List<?> buckets = bucket(
++            world,
++            List.of(zeroFirst, positiveX, negativeZ, zeroSecond, negativeX)
++        );
++
++        Assertions.assertEquals(4, buckets.size());
++        Assertions.assertEquals(List.of(negativeX), tasks(buckets.get(0)));
++        Assertions.assertEquals(List.of(zeroFirst, zeroSecond), tasks(buckets.get(1)));
++        Assertions.assertEquals(List.of(negativeZ), tasks(buckets.get(2)));
++        Assertions.assertEquals(List.of(positiveX), tasks(buckets.get(3)));
++        Assertions.assertAll(
++            () -> Assertions.assertEquals(0, integer(MIN_CHUNK_X, buckets.get(1))),
++            () -> Assertions.assertEquals(0, integer(MIN_CHUNK_Z, buckets.get(1))),
++            () -> Assertions.assertEquals(0, integer(MAX_CHUNK_X, buckets.get(1))),
++            () -> Assertions.assertEquals(0, integer(MAX_CHUNK_Z, buckets.get(1)))
++        );
++    }
++
++    private static TickRegions.RegionBoundTask task(final int chunkX, final int chunkZ) {
++        return new TickRegions.RegionBoundTask(chunkX, chunkZ, () -> {
++        });
++    }
++
++    @SuppressWarnings("unchecked")
++    private static List<TickRegions.RegionBoundTask> tasks(final Object bucket) {
++        try {
++            return (List<TickRegions.RegionBoundTask>)TASKS.get(bucket);
++        } catch (final IllegalAccessException exception) {
++            throw new AssertionError(exception);
++        }
++    }
++
++    private static int integer(final Field field, final Object instance) {
++        try {
++            return field.getInt(instance);
++        } catch (final IllegalAccessException exception) {
++            throw new AssertionError(exception);
++        }
++    }
++
++    private static List<?> bucket(final ServerLevel world, final List<TickRegions.RegionBoundTask> tasks) {
++        try {
++            return (List<?>)BUCKET_TASKS.invoke(null, world, tasks);
++        } catch (final InvocationTargetException exception) {
++            throw new AssertionError(exception.getCause());
++        } catch (final ReflectiveOperationException exception) {
++            throw new AssertionError(exception);
++        }
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/threading/TickRegionsCooperativeDispatchTestSuite.java b/src/test/java/net/minecraft/server/threading/TickRegionsCooperativeDispatchTestSuite.java
+index fa9fcc970ba726cce7660cdf271b0d0a6da56b39..87deef404c0ad8477a24e684551020e4aea62afb 100644
+--- a/src/test/java/net/minecraft/server/threading/TickRegionsCooperativeDispatchTestSuite.java
++++ b/src/test/java/net/minecraft/server/threading/TickRegionsCooperativeDispatchTestSuite.java
+@@ -9,7 +9,7 @@ import org.junit.platform.suite.api.SuiteDisplayName;
+ @Suite
+ @SuiteDisplayName("Cooperative region dispatch")
+ @IncludeTags("Normal")
+-@SelectClasses(TickRegionsCooperativeDispatchTest.class)
++@SelectClasses({TickRegionsCooperativeDispatchTest.class, TickRegionsBucketOrderingTest.class})
+ @ConfigurationParameter(key = "TestSuite", value = "Normal")
+ public class TickRegionsCooperativeDispatchTestSuite {
+ }
