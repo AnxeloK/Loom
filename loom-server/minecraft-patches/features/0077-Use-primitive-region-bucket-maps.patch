@@ -1,0 +1,117 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 31 Jul 2026 05:32:53 +0000
+Subject: [PATCH] Use primitive region bucket maps
+
+Avoid boxed keys and hash nodes while keeping signed bucket order and stable task order across region dispatch paths.
+
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index dcffa1217cebeedb90a48dda8d04ff0c59adcfbe..b7c000a6ad55e580dfad9f14be4cc299efaba294 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -1,6 +1,7 @@
+ package net.minecraft.server.threading;
+ 
+ import ca.spottedleaf.moonrise.common.util.TickThread;
++import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
+ import net.minecraft.util.Util;
+@@ -11,6 +12,7 @@ import org.jspecify.annotations.Nullable;
+ 
+ import java.util.ArrayDeque;
+ import java.util.ArrayList;
++import java.util.Arrays;
+ import java.util.Comparator;
+ import java.util.EnumMap;
+ import java.util.HashMap;
+@@ -1037,18 +1039,26 @@ public class TickRegions {
+         final ServerLevel world,
+         final List<RegionBoundTask> tasks
+     ) {
+-        final Map<Long, RegionBoundBucket> bucketMap = new HashMap<>();
++        final Long2ObjectOpenHashMap<RegionBoundBucket> bucketMap = new Long2ObjectOpenHashMap<>();
+         for (int i = 0, len = tasks.size(); i < len; ++i) {
+             final RegionBoundTask task = tasks.get(i);
+             final long bucketKey = regionBucketKey(task.chunkX(), task.chunkZ());
+-            bucketMap.computeIfAbsent(bucketKey, ignored -> new RegionBoundBucket(world)).add(task);
++            RegionBoundBucket bucket = bucketMap.get(bucketKey);
++            if (bucket == null) {
++                bucket = new RegionBoundBucket(world);
++                bucketMap.put(bucketKey, bucket);
++            }
++            bucket.add(task);
+         }
++        return sortedBuckets(bucketMap);
++    }
+ 
+-        final List<Map.Entry<Long, RegionBoundBucket>> entries = new ArrayList<>(bucketMap.entrySet());
+-        entries.sort(Map.Entry.comparingByKey());
+-        final List<RegionBoundBucket> buckets = new ArrayList<>(entries.size());
+-        for (int i = 0, len = entries.size(); i < len; ++i) {
+-            buckets.add(entries.get(i).getValue());
++    private static <T> List<T> sortedBuckets(final Long2ObjectOpenHashMap<T> bucketMap) {
++        final long[] keys = bucketMap.keySet().toLongArray();
++        Arrays.sort(keys);
++        final List<T> buckets = new ArrayList<>(keys.length);
++        for (int i = 0; i < keys.length; ++i) {
++            buckets.add(bucketMap.get(keys[i]));
+         }
+         return buckets;
+     }
+@@ -1931,39 +1941,33 @@ public class TickRegions {
+         }
+ 
+         private List<TaskBucket> bucketTasks(final List<RegionScheduledTask> toRun) {
+-            final Map<Long, TaskBucket> bucketMap = new HashMap<>();
++            final Long2ObjectOpenHashMap<TaskBucket> bucketMap = new Long2ObjectOpenHashMap<>();
+             for (int i = 0, len = toRun.size(); i < len; ++i) {
+                 final RegionScheduledTask task = toRun.get(i);
+                 final long bucketKey = regionBucketKey(task.chunkX, task.chunkZ);
+-                bucketMap.computeIfAbsent(bucketKey, ignored -> new TaskBucket(this.world)).add(task);
+-            }
+-
+-            final List<Map.Entry<Long, TaskBucket>> entries = new ArrayList<>(bucketMap.entrySet());
+-            entries.sort(Map.Entry.comparingByKey());
+-
+-            final List<TaskBucket> buckets = new ArrayList<>(entries.size());
+-            for (int i = 0, len = entries.size(); i < len; ++i) {
+-                buckets.add(entries.get(i).getValue());
++                TaskBucket bucket = bucketMap.get(bucketKey);
++                if (bucket == null) {
++                    bucket = new TaskBucket(this.world);
++                    bucketMap.put(bucketKey, bucket);
++                }
++                bucket.add(task);
+             }
+-            return buckets;
++            return sortedBuckets(bucketMap);
+         }
+ 
+         private List<MessageBucket> bucketMessages(final List<CrossRegionMessage> messages) {
+-            final Map<Long, MessageBucket> bucketMap = new HashMap<>();
++            final Long2ObjectOpenHashMap<MessageBucket> bucketMap = new Long2ObjectOpenHashMap<>();
+             for (int i = 0, len = messages.size(); i < len; ++i) {
+                 final CrossRegionMessage message = messages.get(i);
+                 final long bucketKey = regionBucketKey(message.targetChunkX(), message.targetChunkZ());
+-                bucketMap.computeIfAbsent(bucketKey, ignored -> new MessageBucket(this.world)).add(message);
+-            }
+-
+-            final List<Map.Entry<Long, MessageBucket>> entries = new ArrayList<>(bucketMap.entrySet());
+-            entries.sort(Map.Entry.comparingByKey());
+-
+-            final List<MessageBucket> buckets = new ArrayList<>(entries.size());
+-            for (int i = 0, len = entries.size(); i < len; ++i) {
+-                buckets.add(entries.get(i).getValue());
++                MessageBucket bucket = bucketMap.get(bucketKey);
++                if (bucket == null) {
++                    bucket = new MessageBucket(this.world);
++                    bucketMap.put(bucketKey, bucket);
++                }
++                bucket.add(message);
+             }
+-            return buckets;
++            return sortedBuckets(bucketMap);
+         }
+ 
+         private void recordParallelDispatch(final int bucketCount) {
