@@ -6,9 +6,9 @@ It runs world work in parallel while keeping mutable state inside the owner doma
 
 ## Download Loom
 
-Each entry on the [Releases](../../releases) page contains a jar for every supported Minecraft version. Download the file whose `mc` suffix matches your server exactly. For example, a file ending in `-mc26.1.2.jar` is the Minecraft 26.1.2 build.
+New Loom releases target one latest stable Minecraft line. The `mc` suffix states the exact Minecraft version required by each jar.
 
-A jar built for one Minecraft version cannot be used for another.
+Historical releases through 2.0.9 retain their older multi-version assets. They remain downloadable, but only the repository's default version branch is maintained.
 
 Loom requires Java 25 or newer. A basic launch command looks like this:
 
@@ -41,7 +41,7 @@ Then exercise the real paths your server depends on: joins, teleports, commands,
 - [Performance](docs/performance.md) explains how to profile and tune a real workload.
 - [Compatibility diagnostics](docs/compatibility-kernel.md) explains `/loom compatibility`.
 - [Runtime ownership](docs/runtime-ownership-model.md) explains the safety model for contributors.
-- [Patch and release workflow](docs/patch-and-release-workflow.md) explains how to publish supported Minecraft versions.
+- [Patch and release workflow](docs/patch-and-release-workflow.md) explains how the latest Minecraft line is maintained and published.
 - [FAQ](docs/faq.md) gives short operational answers.
 
 ## Build from source

@@ -1,0 +1,101 @@
+name: Publish Release
+
+on:
+  push:
+    tags: [ "v*" ]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Release Tag
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Validate Release
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must use vMAJOR.MINOR.PATCH."
+            exit 1
+          fi
+
+          active_branch="${{ github.event.repository.default_branch }}"
+          git fetch --no-tags origin "${active_branch}:refs/remotes/origin/${active_branch}"
+          release_commit="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
+          git merge-base --is-ancestor "${release_commit}" "origin/${active_branch}"
+
+          notes_file="docs/releases/${GITHUB_REF_NAME}.md"
+          test -s "${notes_file}"
+
+          minecraft_version="$(sed -n 's/^mcVersion=//p' gradle.properties)"
+          if [[ ! "${minecraft_version}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "gradle.properties contains an invalid mcVersion."
+            exit 1
+          fi
+
+          echo "loom_version=${GITHUB_REF_NAME#v}" >> "${GITHUB_OUTPUT}"
+          echo "minecraft_version=${minecraft_version}" >> "${GITHUB_OUTPUT}"
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+      - name: Configure Git User Details
+        run: git config --global user.email "actions@github.com" && git config --global user.name "GitHub Actions"
+      - name: Apply Patches
+        run: ./gradlew applyAllPatches --stacktrace --no-daemon --max-workers=2
+      - name: Build
+        run: ./gradlew build :loom-server:createPaperclipJar --stacktrace --no-daemon --max-workers=2
+      - name: Package Jar
+        shell: bash
+        env:
+          LOOM_VERSION: ${{ steps.metadata.outputs.loom_version }}
+          MINECRAFT_VERSION: ${{ steps.metadata.outputs.minecraft_version }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t jars < <(
+            find loom-server/build/libs -maxdepth 1 -type f -name 'loom-paperclip-*.jar' -print | sort
+          )
+          test "${#jars[@]}" -eq 1
+
+          mkdir -p dist
+          cp "${jars[0]}" "dist/loom-${LOOM_VERSION}-mc${MINECRAFT_VERSION}.jar"
+          (
+            cd dist
+            sha256sum *.jar > SHA256SUMS
+          )
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_version="${GITHUB_REF_NAME#v}"
+          release_title="Loom ${release_version}"
+          notes_file="docs/releases/${GITHUB_REF_NAME}.md"
+
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/*.jar dist/SHA256SUMS --clobber
+            gh release edit "${GITHUB_REF_NAME}" --title "${release_title}" --notes-file "${notes_file}" --latest
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/*.jar dist/SHA256SUMS \
+              --verify-tag \
+              --title "${release_title}" \
+              --notes-file "${notes_file}" \
+              --latest
+          fi

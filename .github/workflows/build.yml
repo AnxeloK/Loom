@@ -2,14 +2,14 @@ name: Patch and Build
 
 on:
   push:
-    branches: [ "**" ]
+    branches: [ "ver/**" ]
   pull_request:
   workflow_dispatch:
 
 jobs:
   build:
-    # Only run on PRs if the source branch is on someone else's repo
-    if: ${{ github.event_name != 'pull_request' || github.repository != github.event.pull_request.head.repo.full_name }}
+    # Build only the active version on pushes and avoid duplicate same-repository pull request runs.
+    if: ${{ (github.event_name != 'push' || github.ref_name == github.event.repository.default_branch) && (github.event_name != 'pull_request' || github.repository != github.event.pull_request.head.repo.full_name) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Git Repository

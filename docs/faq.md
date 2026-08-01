@@ -2,7 +2,7 @@
 
 ## Which release jar should I use?
 
-Open [Releases](../../releases), choose the latest Loom release, and download the jar whose `mc` suffix exactly matches your Minecraft version. One Loom release contains all currently supported jars, but the jars themselves are not interchangeable. See [the release workflow](patch-and-release-workflow.md) for the version layout.
+Open [Releases](../../releases) and download the newest jar whose `mc` suffix exactly matches your server. Loom maintains the latest stable Minecraft line; use an older Loom release if your server remains on an older Minecraft version.
 
 ## Do ordinary plugins need changes?
 
