@@ -1,8 +1,9 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: anxelok <anxelok@localhost>
-Date: Sat, 11 Jul 2026 00:54:28 +0000
-Subject: [PATCH] Reuse block traversal scratch
+Date: Sat, 11 Jul 2026 00:42:34 +0000
+Subject: [PATCH] Reduce entity and block traversal overhead
 
+Reuse traversal state and remove transient predicates from entity and block hot paths without changing collision or push behavior.
 
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
 index 6d6cbffcc088b23aedd37fb7aa3a856a4591c4c3..b63602ab4b60bb04f234bbe1a99b1c09893fa64e 100644
@@ -34,6 +35,149 @@ index 6d6cbffcc088b23aedd37fb7aa3a856a4591c4c3..b63602ab4b60bb04f234bbe1a99b1c09
      }
  
      private void debugBlockIntersection(final ServerLevel level, final BlockPos pos, final boolean insideBlock, final boolean insideFluid) {
+diff --git a/net/minecraft/world/entity/EntitySelector.java b/net/minecraft/world/entity/EntitySelector.java
+index a3c13e421768f5e1a703b5b1167fa1c912b6f126..f46bf91053417527e63dbd6fc63b304aac89c5e4 100644
+--- a/net/minecraft/world/entity/EntitySelector.java
++++ b/net/minecraft/world/entity/EntitySelector.java
+@@ -45,32 +45,31 @@ public final class EntitySelector {
+     public static Predicate<Entity> pushableBy(final Entity entity) {
+         Team ownTeam = entity.getTeam();
+         Team.CollisionRule ownCollisionRule = ownTeam == null ? Team.CollisionRule.ALWAYS : ownTeam.getCollisionRule();
+-        return ownCollisionRule == Team.CollisionRule.NEVER
+-            ? Predicates.alwaysFalse()
+-            : NO_SPECTATORS.and(
+-                input -> {
+-                    if (!input.isPushable() || !input.canCollideWithBukkit(entity) || !entity.canCollideWithBukkit(input)) { // CraftBukkit - collidable API // Paper - Climbing should not bypass cramming gamerule
+-                        return false;
+-                    }
+-
+-                    if (!entity.level().isClientSide() || input instanceof Player player && player.isLocalPlayer()) {
+-                        Team theirTeam = input.getTeam();
+-                        Team.CollisionRule theirCollisionRule = theirTeam == null ? Team.CollisionRule.ALWAYS : theirTeam.getCollisionRule();
+-                        if (theirCollisionRule == Team.CollisionRule.NEVER || (input instanceof Player && !io.papermc.paper.configuration.GlobalConfiguration.get().collisions.enablePlayerCollisions)) { // Paper - Configurable player collision
+-                            return false;
+-                        }
++        if (ownCollisionRule == Team.CollisionRule.NEVER) {
++            return Predicates.alwaysFalse();
++        }
++        return input -> {
++            if (input.isSpectator() || !input.isPushable() || !input.canCollideWithBukkit(entity) || !entity.canCollideWithBukkit(input)) { // CraftBukkit - collidable API // Paper - Climbing should not bypass cramming gamerule
++                return false;
++            }
+ 
+-                        boolean sameTeam = ownTeam != null && ownTeam.isAlliedTo(theirTeam);
+-                        return (ownCollisionRule != Team.CollisionRule.PUSH_OWN_TEAM && theirCollisionRule != Team.CollisionRule.PUSH_OWN_TEAM || !sameTeam)
+-                            && (
+-                                ownCollisionRule != Team.CollisionRule.PUSH_OTHER_TEAMS && theirCollisionRule != Team.CollisionRule.PUSH_OTHER_TEAMS
+-                                    || sameTeam
+-                            );
+-                    } else {
+-                        return false;
+-                    }
++            if (!entity.level().isClientSide() || input instanceof Player player && player.isLocalPlayer()) {
++                Team theirTeam = input.getTeam();
++                Team.CollisionRule theirCollisionRule = theirTeam == null ? Team.CollisionRule.ALWAYS : theirTeam.getCollisionRule();
++                if (theirCollisionRule == Team.CollisionRule.NEVER || (input instanceof Player && !io.papermc.paper.configuration.GlobalConfiguration.get().collisions.enablePlayerCollisions)) { // Paper - Configurable player collision
++                    return false;
+                 }
+-            );
++
++                boolean sameTeam = ownTeam != null && ownTeam.isAlliedTo(theirTeam);
++                return (ownCollisionRule != Team.CollisionRule.PUSH_OWN_TEAM && theirCollisionRule != Team.CollisionRule.PUSH_OWN_TEAM || !sameTeam)
++                    && (
++                        ownCollisionRule != Team.CollisionRule.PUSH_OTHER_TEAMS && theirCollisionRule != Team.CollisionRule.PUSH_OTHER_TEAMS
++                            || sameTeam
++                    );
++            } else {
++                return false;
++            }
++        };
+     }
+ 
+     public static Predicate<Entity> notRiding(final Entity entity) {
+diff --git a/net/minecraft/world/entity/InsideBlockEffectApplier.java b/net/minecraft/world/entity/InsideBlockEffectApplier.java
+index fc7cfc75e3e5c274f01498e4afd8693236b4e394..6347a656f631838841eaaef685c5a931646090c5 100644
+--- a/net/minecraft/world/entity/InsideBlockEffectApplier.java
++++ b/net/minecraft/world/entity/InsideBlockEffectApplier.java
+@@ -53,30 +53,36 @@ public interface InsideBlockEffectApplier {
+         public void applyAndClear(final Entity entity) {
+             this.flushStep();
+ 
+-            for (Consumer<Entity> effect : this.finalEffects) {
+-                if (!entity.isAlive()) {
+-                    break;
+-                }
++            if (!this.finalEffects.isEmpty()) {
++                for (Consumer<Entity> effect : this.finalEffects) {
++                    if (!entity.isAlive()) {
++                        break;
++                    }
+ 
+-                effect.accept(entity);
++                    effect.accept(entity);
++                }
++                this.finalEffects.clear();
+             }
+ 
+-            this.finalEffects.clear();
+             this.lastStep = -1;
+         }
+ 
+         private void flushStep() {
+             for (InsideBlockEffectType type : APPLY_ORDER) {
+                 List<Consumer<Entity>> beforeEffects = this.beforeEffectsInStep.get(type);
+-                this.finalEffects.addAll(beforeEffects);
+-                beforeEffects.clear();
++                if (!beforeEffects.isEmpty()) {
++                    this.finalEffects.addAll(beforeEffects);
++                    beforeEffects.clear();
++                }
+                 if (this.effectsInStep.remove(type) instanceof final Consumer<Entity> recordedEffect) { // Paper - track position inside effect was triggered on - better than null check to avoid diff.
+                     this.finalEffects.add(recordedEffect); // Paper - track position inside effect was triggered on
+                 }
+ 
+                 List<Consumer<Entity>> afterEffects = this.afterEffectsInStep.get(type);
+-                this.finalEffects.addAll(afterEffects);
+-                afterEffects.clear();
++                if (!afterEffects.isEmpty()) {
++                    this.finalEffects.addAll(afterEffects);
++                    afterEffects.clear();
++                }
+             }
+         }
+ 
+diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
+index e23720de0df7759b1be384a4d118962ae6e23483..c9aa469f2b8c9d232c13adc6effeefe1ac1b58e1 100644
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -1328,6 +1328,9 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+     private void refreshDirtyAttributes() {
+         Set<AttributeInstance> attributesToUpdate = this.getAttributes().getAttributesToUpdate();
++        if (attributesToUpdate.isEmpty()) {
++            return;
++        }
+ 
+         for (AttributeInstance changedAttributeInstance : attributesToUpdate) {
+             this.onAttributeUpdated(changedAttributeInstance.getAttribute());
+diff --git a/net/minecraft/world/entity/ai/goal/GoalSelector.java b/net/minecraft/world/entity/ai/goal/GoalSelector.java
+index 0439543fbb25ddb974550fe9dbdaa479e330937d..6f948996b82827222d8612b0c5df0caafa92e523 100644
+--- a/net/minecraft/world/entity/ai/goal/GoalSelector.java
++++ b/net/minecraft/world/entity/ai/goal/GoalSelector.java
+@@ -91,7 +91,12 @@ public class GoalSelector {
+             }
+         }
+ 
+-        this.lockedFlags.entrySet().removeIf(entry -> !entry.getValue().isRunning());
++        for (final Goal.Flag flag : GOAL_FLAG_VALUES) {
++            final WrappedGoal lockedGoal = this.lockedFlags.get(flag);
++            if (lockedGoal != null && !lockedGoal.isRunning()) {
++                this.lockedFlags.remove(flag);
++            }
++        }
+         profiler.pop();
+         profiler.push("goalUpdate");
+ 
 diff --git a/net/minecraft/world/level/BlockGetter.java b/net/minecraft/world/level/BlockGetter.java
 index 2a4c928281c7e455d6f210aeb599881855d328f8..a3b79608f7e9c0652cd7ccaf27abf2b3a0cf90d7 100644
 --- a/net/minecraft/world/level/BlockGetter.java

@@ -1,0 +1,453 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Sun, 21 Jun 2026 20:32:23 +0000
+Subject: [PATCH] Refine compatibility dispatch
+
+Keep compatibility callbacks ordered under contention, avoid permanent refusal from transient cycles, and reduce diagnostic and per-event overhead.
+
+diff --git a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+index 2c36922658ff18555c4f3dcbbf027501b49a7435..d149bf927c61b7844443cd67c9863aa529d218e4 100644
+--- a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
++++ b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+@@ -9,6 +9,10 @@ import net.minecraft.world.phys.Vec3;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Set;
++import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.atomic.AtomicInteger;
+ 
+ public class TickThread extends Thread {
+@@ -105,6 +109,12 @@ public class TickThread extends Thread {
+     public final int id; /* We don't override getId as the spec requires that it be unique (with respect to all other threads) */
+ 
+     private static final AtomicInteger ID_GENERATOR = new AtomicInteger();
++    private static final Set<TickThread> TICK_THREADS = ConcurrentHashMap.newKeySet();
++
++    // Loom - each tick worker publishes its own diagnostic entity. A single process-wide atomic reference
++    // both lost all but one concurrently ticking entity and forced every worker to contend on the same cache
++    // line in the hottest entity path.
++    public volatile Entity currentlyTickingEntity;
+ 
+     public TickThread(final String name) {
+         this(null, name);
+@@ -121,6 +131,27 @@ public class TickThread extends Thread {
+     private TickThread(final ThreadGroup group, final Runnable run, final String name, final int id) {
+         super(group, run, name);
+         this.id = id;
++        TICK_THREADS.add(this);
++    }
++
++    @Override
++    public void run() {
++        try {
++            super.run();
++        } finally {
++            TICK_THREADS.remove(this);
++        }
++    }
++
++    public static List<Entity> getCurrentlyTickingEntities() {
++        final List<Entity> ret = new ArrayList<>();
++        for (final TickThread thread : TICK_THREADS) {
++            final Entity entity = thread.currentlyTickingEntity;
++            if (entity != null) {
++                ret.add(entity);
++            }
++        }
++        return ret;
+     }
+ 
+     public static TickThread getCurrentTickThread() {
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+index fb62c3167fd7ddf22cbbe2433f610c48cab1b555..63e0196fefb712c545116ebea8a80c99a4e233ee 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+@@ -35,6 +35,14 @@ import org.jetbrains.annotations.NotNull;
+ 
+ class PaperEventManager {
+ 
++    // Loom - how long an owner-domain thread may retry a busy plugin apartment before giving up on the
++    // dispatch. The lease holder is normally another worker finishing a listener within microseconds, so a
++    // short bounded retry converts most contention losses into slightly delayed successful dispatches while
++    // keeping a hard upper bound in case the holder is itself blocked on this thread's phase join.
++    private static final long APARTMENT_CONTENTION_WAIT_NANOS = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(
++        Math.max(0L, Long.getLong("Loom.CompatApartmentWaitMillis", 5L))
++    );
++
+     private final Server server;
+     private final CompatibilityKernel compatibilityKernel;
+ 
+@@ -79,17 +87,24 @@ class PaperEventManager {
+         }
+ 
+         final CompatibilityTransaction transaction = this.compatibilityKernel.beginTransaction(event, listeners);
+-        final CompatibilityKernel.RoutingDecision routingDecision = this.compatibilityKernel.routingDecision(transaction, listeners);
++        // Resolve each listener's plugin profile once for the whole dispatch; routingDecision and planFor
++        // used to re-resolve it via a name-keyed map lookup per listener (three lookups per listener per event).
++        final PluginCompatibilityProfile[] profiles = new PluginCompatibilityProfile[listeners.length];
++        for (int i = 0; i < listeners.length; ++i) {
++            profiles[i] = this.compatibilityKernel.profileFor(listeners[i].getPlugin());
++        }
++        final CompatibilityKernel.RoutingDecision routingDecision = this.compatibilityKernel.routingDecision(transaction, listeners, profiles);
+ 
+         try {
+-            for (final RegisteredListener registration : listeners) {
++            for (int listenerIndex = 0; listenerIndex < listeners.length; ++listenerIndex) {
++                final RegisteredListener registration = listeners[listenerIndex];
+                 if (!registration.getPlugin().isEnabled()) {
+                     continue;
+                 }
+ 
+                 final Plugin plugin = registration.getPlugin();
+-                final PluginCompatibilityProfile profile = this.compatibilityKernel.profileFor(plugin);
+-                final CompatibilityKernel.InvocationPlan plan = this.compatibilityKernel.planFor(registration, transaction, routingDecision);
++                final PluginCompatibilityProfile profile = profiles[listenerIndex];
++                final CompatibilityKernel.InvocationPlan plan = this.compatibilityKernel.planFor(registration, transaction, routingDecision, profile);
+                 final EventSemanticIndex.Lane lane = EventSemanticIndex.lane(registration.getPriority());
+                 profile.noteLaneUsage(plan.lane());
+ 
+@@ -185,20 +200,18 @@ class PaperEventManager {
+         final String path
+     ) throws Throwable {
+         final CompatibilityApartment apartment = this.compatibilityKernel.apartmentFor(registration.getPlugin());
+-        try (CompatibilityApartment.Scope scope = apartment.enter(transaction, strictFallback, path)) {
++        try (CompatibilityApartment.Scope scope = this.enterApartmentBounded(apartment, transaction, strictFallback, path, profile, event)) {
+             if (!scope.acquired()) {
+                 // Apartment contention is local to this dispatch. It must not persistently change the plugin
+                 // classification to LEGACY_STRICT or REFUSED: that would drop later events, including events
+                 // that can run safely on their owner thread. Record this refusal only for diagnostics.
+                 if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
+-                    // The owner thread is hard-blocked in futures.join() during the parallel phase, so we can
+-                    // neither run the listener inline here (off-owner, would race shared plugin state) nor
+-                    // synchronously round-trip to the owner (deadlock). Post-facto events were already routed
+-                    // to the owner by RegionTickStaging.deferEventToOwner before reaching this path; anything
+-                    // still arriving here is the staged-veto class (cancellation must suppress a synchronous
+-                    // side effect) which cannot be deferred without firing-site staging. Drop ONLY this one
+-                    // dispatch (no persistent classification change), recording it for the diagnostics counter so the
+-                    // remaining gap stays visible.
++                    // The bounded retry in enterApartmentBounded already waited for the lease. Reaching this
++                    // point means the holder did not release it within the budget, so running the listener
++                    // inline (off-owner, would race shared plugin state) and a synchronous round-trip to the
++                    // owner (deadlock while it joins the parallel phase) both stay off the table. Drop ONLY
++                    // this one dispatch (no persistent classification change), recording it for the diagnostics counter
++                    // so the remaining firing-site staging gap stays visible.
+                     this.compatibilityKernel.diagnostics().recordTransientRefusal(
+                         profile,
+                         "transient apartment contention for " + event.getEventName() + " lane=" + registration.getPriority()
+@@ -239,6 +252,43 @@ class PaperEventManager {
+         }
+     }
+ 
++    // Loom - acquire the plugin apartment, retrying briefly on an owner-domain thread instead of failing the
++    // dispatch outright. The busy lease normally belongs to another worker that releases it within
++    // microseconds; waiting a few milliseconds rescues the dispatch (and with it a protection plugin's
++    // cancellation) in almost every contention case. The budget is a hard bound so a holder that is itself
++    // blocked on this thread's phase join can only cost the budget, never a deadlock. Off-owner callers get
++    // no retry: their path below hands off to the plugin's strict-fallback thread and blocks safely there.
++    private CompatibilityApartment.Scope enterApartmentBounded(
++        final CompatibilityApartment apartment,
++        final CompatibilityTransaction transaction,
++        final boolean strictFallback,
++        final String path,
++        final PluginCompatibilityProfile profile,
++        final Event event
++    ) {
++        CompatibilityApartment.Scope scope = apartment.enter(transaction, strictFallback, path);
++        if (scope.acquired()
++            || APARTMENT_CONTENTION_WAIT_NANOS <= 0L
++            || !OwnerDomainExecutor.canRunSynchronousCallbacks()) {
++            return scope;
++        }
++        final long start = System.nanoTime();
++        final long deadline = start + APARTMENT_CONTENTION_WAIT_NANOS;
++        do {
++            java.util.concurrent.locks.LockSupport.parkNanos(50_000L);
++            scope = apartment.enter(transaction, strictFallback, path);
++            if (scope.acquired()) {
++                this.compatibilityKernel.diagnostics().recordOwnerRpcWait(
++                    profile,
++                    "apartment-contention-wait:" + event.getEventName(),
++                    System.nanoTime() - start
++                );
++                return scope;
++            }
++        } while (System.nanoTime() < deadline);
++        return scope;
++    }
++
+     private void callListener(
+         final RegisteredListener registration,
+         final Event event,
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
+index e7498fd873bfa16fc84d3e1f8cda85d272c11d96..b742b626ad6d4797b13feb620ae9fc4094e39168 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
+@@ -67,6 +67,7 @@ public final class CompatibilityDiagnostics {
+     private final LongAdder barrierWaitNanos = new LongAdder();
+     private final ConcurrentMap<String, BarrierCounter> barriers = new ConcurrentHashMap<>();
+     private final Set<String> strictFallbackLogKeys = ConcurrentHashMap.newKeySet();
++    private final Set<String> loggedEventKeys = ConcurrentHashMap.newKeySet();
+ 
+     public static CompatibilityDiagnostics global() {
+         return GLOBAL;
+@@ -467,11 +468,20 @@ public final class CompatibilityDiagnostics {
+     }
+ 
+     private void logStructured(final String type, final Map<String, Object> payload) {
++        // Log each distinct event once. A plugin hitting the same call site repeatedly (e.g. a metrics
++        // timer) would otherwise flood the console; the underlying counters still increment every time.
++        final String dedupKey = type + new java.util.TreeMap<>(payload);
++        if (!this.loggedEventKeys.add(dedupKey)) {
++            return;
++        }
++        if (this.loggedEventKeys.size() > 4096) {
++            this.loggedEventKeys.clear();
++        }
+         final Map<String, Object> event = new LinkedHashMap<>();
+         event.put("type", type);
+         event.put("timestamp", System.currentTimeMillis());
+         event.putAll(payload);
+-        LOGGER.info("[loom.compat] {}", toJson(event));
++        LOGGER.debug("[loom.compat] {}", toJson(event));
+     }
+ 
+     private static String formatNanos(final long nanos) {
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
+index 0cdd808cba06096625a7dbd8252dac049712487f..00bfdcb7ea46d34157d75d1f2e81e953aff4af09 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
+@@ -76,6 +76,14 @@ public final class CompatibilityKernel {
+     }
+ 
+     public RoutingDecision routingDecision(final CompatibilityTransaction transaction, final RegisteredListener[] listeners) {
++        return this.routingDecision(transaction, listeners, null);
++    }
++
++    public RoutingDecision routingDecision(
++        final CompatibilityTransaction transaction,
++        final RegisteredListener[] listeners,
++        final PluginCompatibilityProfile @org.jspecify.annotations.Nullable [] profiles
++    ) {
+         if (listeners.length == 0) {
+             return new RoutingDecision(DispatchRoute.NATIVE_FAST_PATH, "no listeners registered");
+         }
+@@ -84,8 +92,9 @@ public final class CompatibilityKernel {
+         boolean hasInternal = false;
+         boolean hasStrictOrRefused = false;
+ 
+-        for (final RegisteredListener listener : listeners) {
+-            final PluginCompatibilityProfile profile = this.profileFor(listener.getPlugin());
++        for (int i = 0; i < listeners.length; ++i) {
++            final RegisteredListener listener = listeners[i];
++            final PluginCompatibilityProfile profile = profiles != null ? profiles[i] : this.profileFor(listener.getPlugin());
+             switch (profile.mode()) {
+                 case NATIVE_LOOM_AWARE -> {
+                 }
+@@ -133,7 +142,15 @@ public final class CompatibilityKernel {
+         final CompatibilityTransaction transaction,
+         final RoutingDecision routingDecision
+     ) {
+-        final PluginCompatibilityProfile profile = this.profileFor(listener.getPlugin());
++        return this.planFor(listener, transaction, routingDecision, this.profileFor(listener.getPlugin()));
++    }
++
++    public InvocationPlan planFor(
++        final RegisteredListener listener,
++        final CompatibilityTransaction transaction,
++        final RoutingDecision routingDecision,
++        final PluginCompatibilityProfile profile
++    ) {
+         final String path = pathFor(transaction, listener);
+         final PluginCompatibilityProfile.State state = profile.stateForPath(path);
+         if (profile.mode() == PluginCompatibilityProfile.Mode.REFUSED || state == PluginCompatibilityProfile.State.REFUSED) {
+@@ -159,10 +176,24 @@ public final class CompatibilityKernel {
+         return new InvocationPlan(policy, lane, path, "default path: " + routingDecision.reason());
+     }
+ 
++    // Path strings are pure functions of (event name, priority, ignoreCancelled) and events fire thousands
++    // of times a second, so cache them instead of concatenating a fresh string per listener per event.
++    // Plain array-slot writes are a benign race: the value is idempotent.
++    private static final int PATH_SLOTS = org.bukkit.event.EventPriority.values().length * 2;
++    private static final java.util.concurrent.ConcurrentHashMap<String, String[]> PATH_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
++
+     public static String pathFor(final CompatibilityTransaction transaction, final RegisteredListener listener) {
+-        return "event:" + transaction.event().getEventName()
+-            + "#priority:" + listener.getPriority().name()
+-            + "#ignoreCancelled:" + listener.isIgnoringCancelled();
++        final String eventName = transaction.event().getEventName();
++        final String[] slots = PATH_CACHE.computeIfAbsent(eventName, ignored -> new String[PATH_SLOTS]);
++        final int index = listener.getPriority().ordinal() * 2 + (listener.isIgnoringCancelled() ? 1 : 0);
++        String path = slots[index];
++        if (path == null) {
++            path = "event:" + eventName
++                + "#priority:" + listener.getPriority().name()
++                + "#ignoreCancelled:" + listener.isIgnoringCancelled();
++            slots[index] = path;
++        }
++        return path;
+     }
+ 
+     public void finishTransaction(final CompatibilityTransaction transaction) {
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
+index 8734c7b3be4c85fc5237396960764990b1de67e0..f50dfaa72f341f69d7f73e1527fad61c6f7610ad 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
+@@ -10,15 +10,69 @@ import org.jspecify.annotations.Nullable;
+ 
+ public final class CompatibilityRuntimeContext {
+ 
+-    public record ScopeState(
+-        Plugin plugin,
+-        @Nullable CompatibilityTransaction transaction,
+-        long transactionId,
+-        boolean strictFallback,
+-        String path,
+-        long scopeId,
+-        Map<Object, Object> facadeScopeCache
+-    ) {
++    // A plain class rather than a record so the facade scope cache can be lazy: nearly every listener
++    // scope never touches a facade, so the per-scope HashMap is only allocated on first use.
++    public static final class ScopeState {
++        private final Plugin plugin;
++        private final @Nullable CompatibilityTransaction transaction;
++        private final long transactionId;
++        private final boolean strictFallback;
++        private final String path;
++        private final long scopeId;
++        private @Nullable Map<Object, Object> facadeScopeCache;
++
++        private ScopeState(
++            final Plugin plugin,
++            final @Nullable CompatibilityTransaction transaction,
++            final long transactionId,
++            final boolean strictFallback,
++            final String path,
++            final long scopeId
++        ) {
++            this.plugin = plugin;
++            this.transaction = transaction;
++            this.transactionId = transactionId;
++            this.strictFallback = strictFallback;
++            this.path = path;
++            this.scopeId = scopeId;
++        }
++
++        public Plugin plugin() {
++            return this.plugin;
++        }
++
++        public @Nullable CompatibilityTransaction transaction() {
++            return this.transaction;
++        }
++
++        public long transactionId() {
++            return this.transactionId;
++        }
++
++        public boolean strictFallback() {
++            return this.strictFallback;
++        }
++
++        public String path() {
++            return this.path;
++        }
++
++        public long scopeId() {
++            return this.scopeId;
++        }
++
++        @Nullable Map<Object, Object> facadeScopeCacheIfPresent() {
++            return this.facadeScopeCache;
++        }
++
++        Map<Object, Object> facadeScopeCacheOrCreate() {
++            Map<Object, Object> cache = this.facadeScopeCache;
++            if (cache == null) {
++                cache = new HashMap<>();
++                this.facadeScopeCache = cache;
++            }
++            return cache;
++        }
+     }
+ 
+     private static final ThreadLocal<Deque<ScopeState>> STACK = ThreadLocal.withInitial(ArrayDeque::new);
+@@ -41,8 +95,7 @@ public final class CompatibilityRuntimeContext {
+             transaction.id(),
+             strictFallback,
+             path == null ? "<unknown-path>" : path,
+-            NEXT_SCOPE_ID.getAndIncrement(),
+-            new HashMap<>()
++            NEXT_SCOPE_ID.getAndIncrement()
+         ));
+         return new Scope();
+     }
+@@ -64,8 +117,7 @@ public final class CompatibilityRuntimeContext {
+             transactionId,
+             strictFallback,
+             path == null ? "<unknown-path>" : path,
+-            NEXT_SCOPE_ID.getAndIncrement(),
+-            new HashMap<>()
++            NEXT_SCOPE_ID.getAndIncrement()
+         ));
+         return new Scope();
+     }
+@@ -105,7 +157,11 @@ public final class CompatibilityRuntimeContext {
+ 
+     public static @Nullable Object scopeLookup(final Object key) {
+         final Deque<ScopeState> stack = STACK.get();
+-        return stack.isEmpty() ? null : stack.getLast().facadeScopeCache().get(key);
++        if (stack.isEmpty()) {
++            return null;
++        }
++        final Map<Object, Object> cache = stack.getLast().facadeScopeCacheIfPresent();
++        return cache == null ? null : cache.get(key);
+     }
+ 
+     @SuppressWarnings("unchecked")
+@@ -114,7 +170,7 @@ public final class CompatibilityRuntimeContext {
+         if (stack.isEmpty()) {
+             return supplier.get();
+         }
+-        return (T)stack.getLast().facadeScopeCache().computeIfAbsent(key, ignored -> supplier.get());
++        return (T)stack.getLast().facadeScopeCacheOrCreate().computeIfAbsent(key, ignored -> supplier.get());
+     }
+ 
+     public static boolean isStrictFallback() {
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
+index cea50b424187f9a6003cfc798a5e16a32e8f08f4..138397dff76ee7f66e7d27b5063a24e6c28f3c83 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
+@@ -159,7 +159,10 @@ public final class CompatibilityServicesManager implements ServicesManager {
+ 
+             final PluginCompatibilityProfile profile = compatibilityKernel.profileFor(this.providerPlugin);
+             if (graphEntry.cycleDetected()) {
+-                compatibilityKernel.diagnostics().recordRefusal(profile, "service cycle " + graphEntry.cyclePath());
++                // A service call cycle is local to this invocation. The throw below breaks the recursion;
++                // recording it must not persistently classify the provider as REFUSED, which would drop
++                // later event dispatches. Keep the cycle visible as a transient diagnostic instead.
++                compatibilityKernel.diagnostics().recordTransientRefusal(profile, "service cycle " + graphEntry.cyclePath());
+                 callGraph.exit();
+                 throw new IllegalStateException("Compatibility service cycle detected: " + graphEntry.cyclePath());
+             }
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index cdccc7308335a3f7d51abf4e36c9cda58dfd19a3..9d4ec8381e0de6c0aa9272b3f694b346500c3ecb 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -2056,7 +2056,13 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+ 
+     @Override
+     public boolean canSee(org.bukkit.entity.Entity entity) {
+-        return this.equals(entity) || entity.isVisibleByDefault() ^ this.invertedVisibilityEntities.containsKey(entity.getUniqueId()); // SPIGOT-7312: Can always see self
++        if (this.equals(entity)) { // SPIGOT-7312: Can always see self
++            return true;
++        }
++        final boolean visibleByDefault = entity.isVisibleByDefault();
++        return this.invertedVisibilityEntities.isEmpty()
++            ? visibleByDefault
++            : visibleByDefault ^ this.invertedVisibilityEntities.containsKey(entity.getUniqueId());
+     }
+ 
+     public boolean canSeePlayer(UUID uuid) {

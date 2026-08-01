@@ -3,7 +3,184 @@ From: anxelok <anxelok@localhost>
 Date: Sun, 31 May 2026 13:58:45 +0000
 Subject: [PATCH] Add owner-domain compatibility kernel
 
+Route Paper APIs and plugin events through explicit owner domains while preserving supported synchronous contracts and recording unsafe paths.
 
+diff --git a/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java b/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java
+index b9f788693b0c4be48e8a923a3dec50555d135e7e..5b8bd9184e4b5a98dc2e7f874a3fa3fec978c231 100644
+--- a/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java
++++ b/src/main/java/ca/spottedleaf/moonrise/common/util/MoonriseCommon.java
+@@ -62,6 +62,21 @@ public final class MoonriseCommon {
+         LOGGER.info(PlatformHooks.get().getBrand() + " is using " + workerThreads + " worker threads, " + ioThreads + " I/O threads");
+     }
+ 
++    public static void applyLoomWorkerDefaults(final int configWorkerThreads, final int configIoThreads) {
++        final String workerThreadProperty = PlatformHooks.get().getBrand() + ".WorkerThreadCount";
++        if (configWorkerThreads > 0 || System.getProperty(workerThreadProperty) != null) {
++            return;
++        }
++
++        final int workerThreads = loomWorkerThreads(OSNuma.getNativeInstance().getTotalCores());
++        adjustWorkerThreads(workerThreads, configIoThreads);
++        LOGGER.info("Loom set the implicit chunk worker default to " + workerThreads + " threads");
++    }
++
++    static int loomWorkerThreads(final int totalCores) {
++        return Math.max(1, Math.min(3, totalCores / 4));
++    }
++
+     public static final long IO_QUEUE_HOLD_TIME = (long)(25.0e6); // 25ms
+     public static final BalancedPrioritisedThreadPool IO_POOL = new BalancedPrioritisedThreadPool(
+         IO_QUEUE_HOLD_TIME,
+diff --git a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+index 071e2191bab8fd9de1fc4fb5fa2472f8315adaff..2c36922658ff18555c4f3dcbbf027501b49a7435 100644
+--- a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
++++ b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+@@ -135,51 +135,85 @@ public class TickThread extends Thread {
+         return false;
+     }
+ 
++    // Loom start - region-aware tick-thread ownership checks
++    // Worlds and intra-world regions tick in parallel, so a tick thread is only valid for the world/region it
++    // actually owns; cross-world or cross-region access off the owning thread is detected as a loud throw
++    // instead of silently corrupting another region's state. The position-aware overloads check CHUNK
++    // ownership (region granularity); the level-only overload checks the world. The global owner (main thread)
++    // is always accepted.
++    private static boolean ownsLevel(final Level world) {
++        if (!(world instanceof final net.minecraft.server.level.ServerLevel level)) {
++            return true;
++        }
++        return net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(level.getServer())
++            || net.minecraft.server.threading.runtime.OwnerDomainExecutor.isCurrentRegionOwnerForLevel(level);
++    }
++
++    private static boolean ownsChunk(final Level world, final int chunkX, final int chunkZ) {
++        if (!(world instanceof final net.minecraft.server.level.ServerLevel level)) {
++            return true;
++        }
++        return net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(level.getServer())
++            || net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, chunkX, chunkZ);
++    }
++
++    private static boolean isTickThreadForLevel(final Level world) {
++        return isTickThread() && ownsLevel(world);
++    }
++
++    private static boolean isTickThreadForChunk(final Level world, final int chunkX, final int chunkZ) {
++        return isTickThread() && ownsChunk(world, chunkX, chunkZ);
++    }
++
+     public static boolean isTickThreadFor(final Level world, final BlockPos pos) {
+-        return isTickThread();
++        return isTickThreadForChunk(world, pos.getX() >> 4, pos.getZ() >> 4);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world) {
+-        return isTickThread();
++        return isTickThreadForLevel(world);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final BlockPos pos, final int blockRadius) {
+-        return isTickThread();
++        return isTickThreadForChunk(world, pos.getX() >> 4, pos.getZ() >> 4);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final ChunkPos pos) {
+-        return isTickThread();
++        return isTickThreadForChunk(world, pos.x(), pos.z());
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final Vec3 pos) {
+-        return isTickThread();
++        return isTickThreadForChunk(world, net.minecraft.util.Mth.floor(pos.x) >> 4, net.minecraft.util.Mth.floor(pos.z) >> 4);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final int chunkX, final int chunkZ) {
+-        return isTickThread();
++        return isTickThreadForChunk(world, chunkX, chunkZ);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final AABB aabb) {
+-        return isTickThread();
++        return isTickThreadForChunk(world, net.minecraft.util.Mth.floor((aabb.minX + aabb.maxX) * 0.5D) >> 4, net.minecraft.util.Mth.floor((aabb.minZ + aabb.maxZ) * 0.5D) >> 4);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final double blockX, final double blockZ) {
+-        return isTickThread();
++        return isTickThreadForChunk(world, net.minecraft.util.Mth.floor(blockX) >> 4, net.minecraft.util.Mth.floor(blockZ) >> 4);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final Vec3 position, final Vec3 deltaMovement, final int buffer) {
+-        return isTickThread();
++        return isTickThreadForChunk(world, net.minecraft.util.Mth.floor(position.x) >> 4, net.minecraft.util.Mth.floor(position.z) >> 4);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final int fromChunkX, final int fromChunkZ, final int toChunkX, final int toChunkZ) {
+-        return isTickThread();
++        return isTickThreadForChunk(world, fromChunkX, fromChunkZ);
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final int chunkX, final int chunkZ, final int radius) {
+-        return isTickThread();
++        return isTickThreadForChunk(world, chunkX, chunkZ);
+     }
+ 
+     public static boolean isTickThreadFor(final Entity entity) {
+-        return isTickThread();
++        if (!isTickThread()) {
++            return false;
++        }
++        return ownsChunk(entity.level(), net.minecraft.util.Mth.floor(entity.getX()) >> 4, net.minecraft.util.Mth.floor(entity.getZ()) >> 4);
+     }
++    // Loom end
+ }
+diff --git a/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java b/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..08c7b5e38f200b2bf0503e22d1897665425c8962
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/configuration/LoomConfiguration.java
+@@ -0,0 +1,42 @@
++package io.papermc.paper.configuration;
++
++import com.mojang.logging.LogUtils;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import org.slf4j.Logger;
++
++public final class LoomConfiguration {
++
++    private static final Logger LOGGER = LogUtils.getLogger();
++    private static final String DEPRECATED_LOOM_CONFIG_FILE = "loom.yml";
++    private static volatile boolean startupLogged;
++
++    private LoomConfiguration() {
++    }
++
++    public static synchronized void initialize(final Path configDirectory) {
++        final Path directory = configDirectory == null ? Path.of(PaperConfigurations.CONFIG_DIR) : configDirectory;
++        final Path deprecatedConfigFile = directory.resolve(DEPRECATED_LOOM_CONFIG_FILE);
++
++        if (Files.exists(deprecatedConfigFile)) {
++            LOGGER.warn("Ignoring deprecated Loom runtime config at {}; Loom now runs a single path.", deprecatedConfigFile.toAbsolutePath());
++        }
++
++        applyRuntimeDefaults();
++        if (!startupLogged) {
++            LOGGER.info("Loom runtime modes have been removed. This is now just Loom.");
++            startupLogged = true;
++        }
++    }
++
++    private static void applyRuntimeDefaults() {
++        final GlobalConfiguration globalConfiguration = GlobalConfiguration.get();
++        if (globalConfiguration == null || globalConfiguration.chunkSystem == null) {
++            return;
++        }
++        ca.spottedleaf.moonrise.common.util.MoonriseCommon.applyLoomWorkerDefaults(
++            globalConfiguration.chunkSystem.workerThreads,
++            globalConfiguration.chunkSystem.ioThreads
++        );
++    }
++}
 diff --git a/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java b/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java
 index f9a2c55a354c877749db3f92956de802ae575788..10da4667a66266525a63282912b7510692df7172 100644
 --- a/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java
@@ -209,7 +386,7 @@ index f9a2c55a354c877749db3f92956de802ae575788..10da4667a66266525a63282912b75106
      }
  }
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-index 2a298ec2c95e9cc913926324dbbf192caa38b05f..db7c8ffe444c6b4746fe4c405ec7fd6bfb40d451 100644
+index 2a298ec2c95e9cc913926324dbbf192caa38b05f..fb62c3167fd7ddf22cbbe2433f610c48cab1b555 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 @@ -4,6 +4,21 @@ import co.aikar.timings.TimedEventExecutor;
@@ -234,7 +411,7 @@ index 2a298ec2c95e9cc913926324dbbf192caa38b05f..db7c8ffe444c6b4746fe4c405ec7fd6b
  import org.bukkit.Server;
  import org.bukkit.Warning;
  import org.bukkit.event.Event;
-@@ -18,103 +33,263 @@ import org.bukkit.plugin.Plugin;
+@@ -18,103 +33,291 @@ import org.bukkit.plugin.Plugin;
  import org.bukkit.plugin.RegisteredListener;
  import org.jetbrains.annotations.NotNull;
  
@@ -264,6 +441,23 @@ index 2a298ec2c95e9cc913926324dbbf192caa38b05f..db7c8ffe444c6b4746fe4c405ec7fd6b
      // SimplePluginManager
 -    public void callEvent(@NotNull Event event) {
 +    public void callEvent(final @NotNull Event event) {
++        // Loom start - defer synchronous events fired on a region worker thread during parallel ticking to
++        // the owning (main) thread's serial replay, so plugin handlers run single-threaded as under serial
++        // ticking. This keeps legacy main-thread-only plugins safe with the parallel flags enabled.
++        if (!event.isAsynchronous() && net.minecraft.server.threading.RegionTickStaging.stageEvent(event)) {
++            return;
++        }
++        // Loom Fix 1c - the stageEvent path above only catches events fired INSIDE a random-tick / entity-tick
++        // staging window. Events fired on a region worker OUTSIDE that window (e.g. ChunkLoadEvent /
++        // ChunkUnloadEvent from the chunk pipeline, and other post-facto notifications) are routed back to the
++        // owning thread here, where their listeners run single-threaded. This replaces the old behaviour of
++        // running them inline on a worker and then REFUSING them on apartment contention (which silently
++        // dropped e.g. WorldGuard's protection listeners). Staged-veto events (cancellation gating a
++        // synchronous side effect) are intentionally NOT deferred and fall through unchanged.
++        if (!event.isAsynchronous() && net.minecraft.server.threading.RegionTickStaging.deferEventToOwner(event)) {
++            return;
++        }
++        // Loom end
          if (event.isAsynchronous() && this.server.isPrimaryThread()) {
              throw new IllegalStateException(event.getEventName() + " may only be triggered asynchronously.");
          } else if (!event.isAsynchronous() && !this.server.isPrimaryThread() && !this.server.isStopping()) {
@@ -274,34 +468,49 @@ index 2a298ec2c95e9cc913926324dbbf192caa38b05f..db7c8ffe444c6b4746fe4c405ec7fd6b
 -        RegisteredListener[] listeners = handlers.getRegisteredListeners();
 +        final HandlerList handlers = event.getHandlers();
 +        final RegisteredListener[] listeners = handlers.getRegisteredListeners();
-+        final CompatibilityTransaction transaction = this.compatibilityKernel.beginTransaction(event, listeners);
-+        final CompatibilityKernel.RoutingDecision routingDecision = this.compatibilityKernel.routingDecision(transaction, listeners);
++        if (listeners.length == 0) {
++            return;
++        }
  
 -        for (RegisteredListener registration : listeners) {
 -            if (!registration.getPlugin().isEnabled()) {
 -                continue;
 -            }
++        final CompatibilityTransaction transaction = this.compatibilityKernel.beginTransaction(event, listeners);
++        final CompatibilityKernel.RoutingDecision routingDecision = this.compatibilityKernel.routingDecision(transaction, listeners);
+ 
+-            try {
+-                registration.callEvent(event);
+-            } catch (AuthorNagException ex) {
+-                Plugin plugin = registration.getPlugin();
 +        try {
 +            for (final RegisteredListener registration : listeners) {
 +                if (!registration.getPlugin().isEnabled()) {
 +                    continue;
 +                }
  
--            try {
--                registration.callEvent(event);
--            } catch (AuthorNagException ex) {
--                Plugin plugin = registration.getPlugin();
+-                if (plugin.isNaggable()) {
+-                    plugin.setNaggable(false);
 +                final Plugin plugin = registration.getPlugin();
 +                final PluginCompatibilityProfile profile = this.compatibilityKernel.profileFor(plugin);
 +                final CompatibilityKernel.InvocationPlan plan = this.compatibilityKernel.planFor(registration, transaction, routingDecision);
 +                final EventSemanticIndex.Lane lane = EventSemanticIndex.lane(registration.getPriority());
 +                profile.noteLaneUsage(plan.lane());
  
--                if (plugin.isNaggable()) {
--                    plugin.setNaggable(false);
+-                    this.server.getLogger().log(Level.SEVERE, String.format(
+-                        "Nag author(s): '%s' of '%s' about the following: %s",
+-                        plugin.getPluginMeta().getAuthors(),
+-                        plugin.getPluginMeta().getDisplayName(),
+-                        ex.getMessage()
+-                    ));
 +                if (transaction.semantics().orderedDecision()) {
 +                    profile.noteOrderedTransaction();
-+                }
+                 }
+-            } catch (Throwable ex) {
+-                String msg = "Could not pass event " + event.getEventName() + " to " + registration.getPlugin().getPluginMeta().getDisplayName();
+-                this.server.getLogger().log(Level.SEVERE, msg, ex);
+-                if (!(event instanceof ServerExceptionEvent)) { // We don't want to cause an endless event loop
+-                    this.callEvent(new ServerExceptionEvent(new ServerEventException(msg, ex, registration.getPlugin(), registration.getListener(), event)));
 +                if (routingDecision.route() == CompatibilityKernel.DispatchRoute.SNAPSHOT_OBSERVER
 +                    && profile.mode() != PluginCompatibilityProfile.Mode.NATIVE_LOOM_AWARE) {
 +                    this.compatibilityKernel.diagnostics().recordSnapshotDelivery(profile, event.getEventName());
@@ -313,13 +522,7 @@ index 2a298ec2c95e9cc913926324dbbf192caa38b05f..db7c8ffe444c6b4746fe4c405ec7fd6b
 +                        "unsafe listener lane for " + event.getEventName() + " at " + registration.getPriority()
 +                    );
 +                }
- 
--                    this.server.getLogger().log(Level.SEVERE, String.format(
--                        "Nag author(s): '%s' of '%s' about the following: %s",
--                        plugin.getPluginMeta().getAuthors(),
--                        plugin.getPluginMeta().getDisplayName(),
--                        ex.getMessage()
--                    ));
++
 +                if (plan.policy() == CompatibilityKernel.InvocationPolicy.REFUSE) {
 +                    this.compatibilityKernel.diagnostics().recordRefusal(
 +                        profile,
@@ -327,13 +530,8 @@ index 2a298ec2c95e9cc913926324dbbf192caa38b05f..db7c8ffe444c6b4746fe4c405ec7fd6b
 +                    );
 +                    continue;
                  }
--            } catch (Throwable ex) {
--                String msg = "Could not pass event " + event.getEventName() + " to " + registration.getPlugin().getPluginMeta().getDisplayName();
--                this.server.getLogger().log(Level.SEVERE, msg, ex);
--                if (!(event instanceof ServerExceptionEvent)) { // We don't want to cause an endless event loop
--                    this.callEvent(new ServerExceptionEvent(new ServerEventException(msg, ex, registration.getPlugin(), registration.getListener(), event)));
 +
-+                final CompatibilityTransaction.ListenerSnapshot beforeListener = transaction.beforeListener();
++                final CompatibilityTransaction.ListenerSnapshot beforeListener = transaction.beforeListener(lane);
 +                final long callbackStart = System.nanoTime();
 +
 +                try {
@@ -404,15 +602,22 @@ index 2a298ec2c95e9cc913926324dbbf192caa38b05f..db7c8ffe444c6b4746fe4c405ec7fd6b
 +        final CompatibilityApartment apartment = this.compatibilityKernel.apartmentFor(registration.getPlugin());
 +        try (CompatibilityApartment.Scope scope = apartment.enter(transaction, strictFallback, path)) {
 +            if (!scope.acquired()) {
-+                profile.noteApartmentContention("contention in " + event.getEventName() + " lane=" + registration.getPriority());
-+                this.compatibilityKernel.diagnostics().recordStrictFallback(
-+                    profile,
-+                    "apartment busy in " + event.getEventName() + " owner=" + scope.busyLease()
-+                );
++                // Apartment contention is local to this dispatch. It must not persistently change the plugin
++                // classification to LEGACY_STRICT or REFUSED: that would drop later events, including events
++                // that can run safely on their owner thread. Record this refusal only for diagnostics.
 +                if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
-+                    this.compatibilityKernel.diagnostics().recordRefusal(
++                    // The owner thread is hard-blocked in futures.join() during the parallel phase, so we can
++                    // neither run the listener inline here (off-owner, would race shared plugin state) nor
++                    // synchronously round-trip to the owner (deadlock). Post-facto events were already routed
++                    // to the owner by RegionTickStaging.deferEventToOwner before reaching this path; anything
++                    // still arriving here is the staged-veto class (cancellation must suppress a synchronous
++                    // side effect) which cannot be deferred without firing-site staging. Drop ONLY this one
++                    // dispatch (no persistent classification change), recording it for the diagnostics counter so the
++                    // remaining gap stays visible.
++                    this.compatibilityKernel.diagnostics().recordTransientRefusal(
 +                        profile,
-+                        "owner-domain contention refusal for " + event.getEventName() + " lane=" + registration.getPriority()
++                        "transient apartment contention for " + event.getEventName() + " lane=" + registration.getPriority()
++                            + " owner=" + scope.busyLease()
 +                    );
 +                    return;
 +                }
@@ -442,7 +647,7 @@ index 2a298ec2c95e9cc913926324dbbf192caa38b05f..db7c8ffe444c6b4746fe4c405ec7fd6b
 +                        "apartment-handoff:" + event.getEventName(),
 +                        System.nanoTime() - handoffStart
 +                    );
-                 }
++                }
 +                return;
              }
 +            this.callListener(registration, event, transaction, strictFallback, path);
@@ -542,7 +747,7 @@ index 2a298ec2c95e9cc913926324dbbf192caa38b05f..db7c8ffe444c6b4746fe4c405ec7fd6b
              if (clazz.getSuperclass() != null
                  && !clazz.getSuperclass().equals(Event.class)
                  && Event.class.isAssignableFrom(clazz.getSuperclass())) {
-@@ -127,24 +302,29 @@ class PaperEventManager {
+@@ -127,24 +330,29 @@ class PaperEventManager {
  
      // JavaPluginLoader
      @NotNull
@@ -578,7 +783,7 @@ index 2a298ec2c95e9cc913926324dbbf192caa38b05f..db7c8ffe444c6b4746fe4c405ec7fd6b
              // Do not register bridge or synthetic methods to avoid event duplication
              // Fixes SPIGOT-893
              if (method.isBridge() || method.isSynthetic()) {
-@@ -157,13 +337,13 @@ class PaperEventManager {
+@@ -157,13 +365,13 @@ class PaperEventManager {
              }
              final Class<? extends Event> eventClass = checkClass.asSubclass(Event.class);
              method.setAccessible(true);
@@ -595,7 +800,7 @@ index 2a298ec2c95e9cc913926324dbbf192caa38b05f..db7c8ffe444c6b4746fe4c405ec7fd6b
                      if (!warningState.printFor(warning)) {
                          break;
                      }
-@@ -176,12 +356,13 @@ class PaperEventManager {
+@@ -176,12 +384,13 @@ class PaperEventManager {
                              method.toGenericString(),
                              (warning != null && warning.reason().length() != 0) ? warning.reason() : "Server performance will be affected",
                              Arrays.toString(plugin.getPluginMeta().getAuthors().toArray())),
@@ -775,7 +980,7 @@ index 6516bdf5387fdb1e4851ff5ef20c6d932b175717..23acf5b4f4de7e92f6074f9a069d2d57
 +    }
 +}
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
-index 15886f105717cefb08374bf132d8a1746c43a2e2..8bd9acfc677a854a19bf3e5b88473f0ad27120ef 100644
+index 15886f105717cefb08374bf132d8a1746c43a2e2..63009af5233851977b4bb84099b8de84e9e7a2e7 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
 @@ -1,6 +1,10 @@
@@ -789,7 +994,7 @@ index 15886f105717cefb08374bf132d8a1746c43a2e2..8bd9acfc677a854a19bf3e5b88473f0a
  import java.util.concurrent.atomic.AtomicInteger;
  import java.util.concurrent.atomic.AtomicReference;
  import org.bukkit.plugin.Plugin;
-@@ -31,28 +35,68 @@ public final class CompatibilityApartment {
+@@ -31,36 +35,91 @@ public final class CompatibilityApartment {
      }
  
      private final Plugin plugin;
@@ -860,9 +1065,23 @@ index 15886f105717cefb08374bf132d8a1746c43a2e2..8bd9acfc677a854a19bf3e5b88473f0a
                      return new Scope(EnterResult.ACQUIRED, this, created, context, null);
                  }
                  continue;
-@@ -60,7 +104,9 @@ public final class CompatibilityApartment {
+             }
  
-             if (current.ownerThread == currentThread && current.transactionId == transactionId) {
+-            if (current.ownerThread == currentThread && current.transactionId == transactionId) {
++            // Loom Fix 1d - re-enter on SAME-THREAD ownership alone, regardless of transactionId. This apartment
++            // is per-plugin, so a thread that already holds this plugin's lease and re-enters is ALWAYS the
++            // plugin's own synchronous, nested call — never a concurrent contender (a single thread cannot race
++            // itself). The previous `&& current.transactionId == transactionId` guard only re-entered the SAME
++            // event's re-dispatch and treated a NESTED dispatch of a DIFFERENT event as foreign contention. That
++            // is exactly the WorldGuard pattern: WG's listener on a Bukkit event (e.g. CreatureSpawnEvent /
++            // BlockPlaceEvent / BlockBreakEvent) synchronously fires WG's own delegate event (SpawnEntityEvent /
++            // PlaceBlockEvent / BreakBlockEvent) via Bukkit.getPluginManager().callEvent() from inside that
++            // listener. The delegate is a fresh transaction, so under the old guard the nested dispatch hit BUSY
++            // on the same thread and was REFUSED — so WG's region-protection listeners on the delegate never ran,
++            // silently bypassing place/break/spawn protection under parallel ticking. Matching on thread identity
++            // alone is both safe (same thread, no data race) and correct (it is the plugin re-entering itself),
++            // and leaves the cross-thread BUSY path (the apartment's actual purpose) unchanged.
++            if (current.ownerThread == currentThread) {
                  current.depth.incrementAndGet();
 -                final CompatibilityRuntimeContext.Scope context = CompatibilityRuntimeContext.enter(this.plugin, transactionId, strictFallback);
 +                final CompatibilityRuntimeContext.Scope context = transaction == null
@@ -871,7 +1090,7 @@ index 15886f105717cefb08374bf132d8a1746c43a2e2..8bd9acfc677a854a19bf3e5b88473f0a
                  return new Scope(EnterResult.REENTRANT, this, current, context, null);
              }
  
-@@ -107,4 +153,4 @@ public final class CompatibilityApartment {
+@@ -107,4 +166,4 @@ public final class CompatibilityApartment {
              }
          }
      }
@@ -956,11 +1175,114 @@ index 0000000000000000000000000000000000000000..f9e43219b2559dd37d968cc4803bb309
 +        return StackWalkerUtil.getFirstPluginCaller();
 +    }
 +}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridge.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridge.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d8ab93e57bf8522388c177529678397495b4a8b0
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridge.java
+@@ -0,0 +1,19 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import java.util.concurrent.CompletableFuture;
++
++public final class CompatibilityChunkBridge {
++
++    private static final String BARRIER_LANE = "LEGACY_SYNC_BRIDGE";
++
++    private CompatibilityChunkBridge() {
++    }
++
++    public static boolean isEnabledForCurrentContext() {
++        return CompatibilitySyncBridge.isEnabledForCurrentContext();
++    }
++
++    public static <T> T awaitChunkFuture(final CompletableFuture<T> future, final String operation) {
++        return CompatibilitySyncBridge.awaitFuture(future, operation, BARRIER_LANE);
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityContinuationBridge.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityContinuationBridge.java
+index 57ed04fa7c9010e168fec461653c7a7f436c9869..6c099d631ef9b1e6c80024b1a2759b6412f10824 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityContinuationBridge.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityContinuationBridge.java
+@@ -8,6 +8,11 @@ import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
+ 
+ public final class CompatibilityContinuationBridge {
+ 
++    @FunctionalInterface
++    public interface ThrowingSupplier<T> {
++        T get() throws Throwable;
++    }
++
+     private CompatibilityContinuationBridge() {
+     }
+ 
+@@ -16,6 +21,19 @@ public final class CompatibilityContinuationBridge {
+         final CompatibilityDiagnostics diagnostics,
+         final String operation,
+         final Supplier<CompletableFuture<T>> supplier
++    ) throws Throwable {
++        Objects.requireNonNull(supplier, "supplier");
++        return callOffOwner(profile, diagnostics, operation, () -> {
++            final CompletableFuture<T> delegated = Objects.requireNonNull(supplier.get(), "supplier returned null future");
++            return delegated.join();
++        });
++    }
++
++    public static <T> T callOffOwner(
++        final PluginCompatibilityProfile profile,
++        final CompatibilityDiagnostics diagnostics,
++        final String operation,
++        final ThrowingSupplier<T> supplier
+     ) throws Throwable {
+         Objects.requireNonNull(profile, "profile");
+         Objects.requireNonNull(diagnostics, "diagnostics");
+@@ -27,17 +45,16 @@ public final class CompatibilityContinuationBridge {
+             throw new IllegalStateException("Owner-domain violation: " + operation + " cannot synchronously wait");
+         }
+ 
+-        final CompletableFuture<T> delegated = Objects.requireNonNull(supplier.get(), "supplier returned null future");
+         final long started = System.nanoTime();
+         try {
+             if (Thread.currentThread().isVirtual()) {
+-                return delegated.join();
++                return supplier.get();
+             }
+ 
+             final CompletableFuture<T> resumed = new CompletableFuture<>();
+             Thread.ofVirtual().name("loom-compat-continuation").start(() -> {
+                 try {
+-                    resumed.complete(delegated.join());
++                    resumed.complete(supplier.get());
+                 } catch (final Throwable throwable) {
+                     resumed.completeExceptionally(throwable);
+                 }
+@@ -50,4 +67,4 @@ public final class CompatibilityContinuationBridge {
+             diagnostics.recordContinuationResume(profile, operation, System.nanoTime() - started);
+         }
+     }
+-}
+\ No newline at end of file
++}
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
-index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc77ea3af0 100644
+index 7572fd79fa6a17061f6832eda61ae770bdc98022..e7498fd873bfa16fc84d3e1f8cda85d272c11d96 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnostics.java
-@@ -20,7 +20,10 @@ public final class CompatibilityDiagnostics {
+@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Locale;
+ import java.util.Map;
++import java.util.Set;
+ import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.ConcurrentMap;
+ import java.util.concurrent.atomic.LongAdder;
+@@ -14,13 +15,17 @@ import org.slf4j.Logger;
+ 
+ public final class CompatibilityDiagnostics {
+ 
++    private static final int MAX_STRICT_FALLBACK_LOG_KEYS = 1024;
+     public record EventSummary(
+         String event,
+         long transactions,
          long committed,
          long aborted,
          long totalNanos,
@@ -972,7 +1294,7 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
      ) {
      }
  
-@@ -29,12 +32,21 @@ public final class CompatibilityDiagnostics {
+@@ -29,12 +34,21 @@ public final class CompatibilityDiagnostics {
          List<EventSummary> hotEvents,
          long transactions,
          long monitorMutations,
@@ -995,7 +1317,7 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
      private static final Logger LOGGER = LogUtils.getLogger();
      private static final CompatibilityDiagnostics GLOBAL = new CompatibilityDiagnostics();
  
-@@ -43,9 +55,15 @@ public final class CompatibilityDiagnostics {
+@@ -43,9 +57,16 @@ public final class CompatibilityDiagnostics {
  
      private final LongAdder transactions = new LongAdder();
      private final LongAdder monitorMutations = new LongAdder();
@@ -1008,10 +1330,11 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
 +    private final LongAdder ownerRpcWaitNanos = new LongAdder();
 +    private final LongAdder barrierWaitNanos = new LongAdder();
 +    private final ConcurrentMap<String, BarrierCounter> barriers = new ConcurrentHashMap<>();
++    private final Set<String> strictFallbackLogKeys = ConcurrentHashMap.newKeySet();
  
      public static CompatibilityDiagnostics global() {
          return GLOBAL;
-@@ -65,6 +83,28 @@ public final class CompatibilityDiagnostics {
+@@ -65,6 +86,28 @@ public final class CompatibilityDiagnostics {
              counter.committed.increment();
          } else if (transaction.state() == CompatibilityTransaction.State.ABORTED) {
              counter.aborted.increment();
@@ -1026,7 +1349,7 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
 +            this.mutationTransactions.increment();
 +        }
 +
-+        if (transaction.state() == CompatibilityTransaction.State.ABORTED) {
++        if (transaction.state() == CompatibilityTransaction.State.ABORTED && !isExpectedCancellation(transaction)) {
 +            this.logStructured(
 +                "transaction_aborted",
 +                Map.of(
@@ -1040,10 +1363,14 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
          }
  
          final List<CompatibilityTransaction.MonitorMutation> monitorChanges = transaction.monitorMutations();
-@@ -84,6 +124,13 @@ public final class CompatibilityDiagnostics {
+@@ -84,9 +127,24 @@ public final class CompatibilityDiagnostics {
          }
      }
  
++    private static boolean isExpectedCancellation(final CompatibilityTransaction transaction) {
++        return transaction.pendingWriteCount() == 0 && "event cancelled".equals(transaction.abortReason());
++    }
++
 +    public void recordSnapshotDelivery(final PluginCompatibilityProfile profile, final String eventName) {
 +        this.snapshotDeliveries.increment();
 +        final EventCounter counter = this.events.computeIfAbsent(eventName, ignored -> new EventCounter());
@@ -1054,7 +1381,14 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
      public void recordStrictFallback(final PluginCompatibilityProfile profile, final String reason) {
          this.strictFallbacks.increment();
          profile.noteStrictFallback(reason);
-@@ -97,6 +144,99 @@ public final class CompatibilityDiagnostics {
++        final String logKey = profile.pluginName() + '\u0000' + reason;
++        if (this.strictFallbackLogKeys.size() >= MAX_STRICT_FALLBACK_LOG_KEYS || !this.strictFallbackLogKeys.add(logKey)) {
++            return;
++        }
+         this.logStructured(
+             "strict_fallback",
+             Map.of(
+@@ -97,6 +155,99 @@ public final class CompatibilityDiagnostics {
          );
      }
  
@@ -1154,7 +1488,28 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
      public void recordRefusal(final PluginCompatibilityProfile profile, final String reason) {
          this.refusals.increment();
          profile.noteRefusal(reason);
-@@ -142,19 +282,34 @@ public final class CompatibilityDiagnostics {
+@@ -110,6 +261,20 @@ public final class CompatibilityDiagnostics {
+         );
+     }
+ 
++    // Records a refusal for one dispatch without changing the plugin's persistent classification. Apartment
++    // contention can clear before the next event, so record it separately from profile.noteRefusal.
++    public void recordTransientRefusal(final PluginCompatibilityProfile profile, final String reason) {
++        this.refusals.increment();
++        this.logStructured(
++            "transient_refusal",
++            Map.of(
++                "plugin", profile.pluginName(),
++                "reason", reason,
++                "mode", profile.mode().name()
++            )
++        );
++    }
++
+     public void recordAsyncViolation(final String reason) {
+         this.asyncViolations.increment();
+         final org.bukkit.plugin.Plugin current = CompatibilityRuntimeContext.currentPlugin();
+@@ -142,19 +307,34 @@ public final class CompatibilityDiagnostics {
                  value.committed.longValue(),
                  value.aborted.longValue(),
                  value.totalNanos.longValue(),
@@ -1191,7 +1546,7 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
          );
      }
  
-@@ -165,9 +320,14 @@ public final class CompatibilityDiagnostics {
+@@ -165,9 +345,14 @@ public final class CompatibilityDiagnostics {
          lines.add("Compatibility Kernel:");
          lines.add("  transactions=" + snapshot.transactions()
              + ", monitorMutations=" + snapshot.monitorMutations()
@@ -1207,7 +1562,7 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
  
          lines.add("  Plugins:");
          int pluginCount = 0;
-@@ -187,6 +347,8 @@ public final class CompatibilityDiagnostics {
+@@ -187,6 +372,8 @@ public final class CompatibilityDiagnostics {
                  + " ordered=" + plugin.orderedTransactions()
                  + " monitor=" + plugin.monitorMutationAttempts()
                  + " async=" + plugin.asyncBukkitViolations()
@@ -1216,7 +1571,7 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
                  + " hotEvents=" + hotEvents);
          }
  
-@@ -201,9 +363,19 @@ public final class CompatibilityDiagnostics {
+@@ -201,9 +388,19 @@ public final class CompatibilityDiagnostics {
                  + " commit=" + event.committed()
                  + " abort=" + event.aborted()
                  + " monitor=" + event.monitorMutations()
@@ -1236,7 +1591,7 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
          return lines;
      }
  
-@@ -212,9 +384,14 @@ public final class CompatibilityDiagnostics {
+@@ -212,9 +409,14 @@ public final class CompatibilityDiagnostics {
          final Map<String, Object> root = new LinkedHashMap<>();
          root.put("transactions", snapshot.transactions());
          root.put("monitorMutations", snapshot.monitorMutations());
@@ -1251,7 +1606,7 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
  
          final List<Map<String, Object>> plugins = new ArrayList<>();
          for (final PluginCompatibilityProfile.Snapshot plugin : snapshot.plugins()) {
-@@ -227,8 +404,10 @@ public final class CompatibilityDiagnostics {
+@@ -227,8 +429,10 @@ public final class CompatibilityDiagnostics {
              pluginJson.put("orderedTransactions", plugin.orderedTransactions());
              pluginJson.put("monitorMutationAttempts", plugin.monitorMutationAttempts());
              pluginJson.put("asyncBukkitViolations", plugin.asyncBukkitViolations());
@@ -1262,7 +1617,7 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
              plugins.add(pluginJson);
          }
          root.put("plugins", plugins);
-@@ -241,11 +420,24 @@ public final class CompatibilityDiagnostics {
+@@ -241,11 +445,24 @@ public final class CompatibilityDiagnostics {
              eventJson.put("committed", event.committed());
              eventJson.put("aborted", event.aborted());
              eventJson.put("monitorMutations", event.monitorMutations());
@@ -1287,7 +1642,7 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
          return toJson(root);
      }
  
-@@ -315,5 +507,13 @@ public final class CompatibilityDiagnostics {
+@@ -315,5 +532,13 @@ public final class CompatibilityDiagnostics {
          private final LongAdder aborted = new LongAdder();
          private final LongAdder totalNanos = new LongAdder();
          private final LongAdder monitorMutations = new LongAdder();
@@ -1304,7 +1659,7 @@ index 7572fd79fa6a17061f6832eda61ae770bdc98022..1244fe4c71adf3b6c70d9483b98e8cdc
 \ No newline at end of file
 +}
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
-index b5c04022749001fb25b7386a38477f842fa3c744..ba2c63b1a1d786273d7611c91ace772b0b1c7aaa 100644
+index b5c04022749001fb25b7386a38477f842fa3c744..0cdd808cba06096625a7dbd8252dac049712487f 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernel.java
 @@ -11,10 +11,39 @@ public final class CompatibilityKernel {
@@ -1430,7 +1785,7 @@ index b5c04022749001fb25b7386a38477f842fa3c744..ba2c63b1a1d786273d7611c91ace772b
 +
 +        final InvocationPolicy policy = this.policyFor(profile);
 +        final ExecutionLane lane = laneFor(policy, routingDecision);
-+        return new InvocationPlan(policy, lane, path, routingDecision.reason());
++        return new InvocationPlan(policy, lane, path, "default path: " + routingDecision.reason());
 +    }
 +
 +    public static String pathFor(final CompatibilityTransaction transaction, final RegisteredListener listener) {
@@ -1473,15 +1828,15 @@ index b5c04022749001fb25b7386a38477f842fa3c744..ba2c63b1a1d786273d7611c91ace772b
 +    }
 +}
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
-index d74cfaccb784b744998cfc583fa995f272fcc19d..a2088af44fc4cd5b24377c8a80ebc8afd8c55ba9 100644
+index d74cfaccb784b744998cfc583fa995f272fcc19d..8734c7b3be4c85fc5237396960764990b1de67e0 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityRuntimeContext.java
 @@ -2,35 +2,121 @@ package io.papermc.paper.plugin.manager.compat;
  
  import java.util.ArrayDeque;
  import java.util.Deque;
++import java.util.HashMap;
 +import java.util.Map;
-+import java.util.concurrent.ConcurrentHashMap;
 +import java.util.concurrent.atomic.AtomicLong;
  import org.bukkit.plugin.Plugin;
  import org.jspecify.annotations.Nullable;
@@ -1522,7 +1877,7 @@ index d74cfaccb784b744998cfc583fa995f272fcc19d..a2088af44fc4cd5b24377c8a80ebc8af
 +            strictFallback,
 +            path == null ? "<unknown-path>" : path,
 +            NEXT_SCOPE_ID.getAndIncrement(),
-+            new ConcurrentHashMap<>()
++            new HashMap<>()
 +        ));
 +        return new Scope();
 +    }
@@ -1546,7 +1901,7 @@ index d74cfaccb784b744998cfc583fa995f272fcc19d..a2088af44fc4cd5b24377c8a80ebc8af
 +            strictFallback,
 +            path == null ? "<unknown-path>" : path,
 +            NEXT_SCOPE_ID.getAndIncrement(),
-+            new ConcurrentHashMap<>()
++            new HashMap<>()
 +        ));
          return new Scope();
      }
@@ -2035,8 +2390,57 @@ index 0000000000000000000000000000000000000000..cea50b424187f9a6003cfc798a5e16a3
 +        }
 +    }
 +}
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridge.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridge.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..50dd4e1c08d432d6a244fbfe5e29b297192b28e7
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridge.java
+@@ -0,0 +1,43 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import java.util.Objects;
++import java.util.concurrent.CompletableFuture;
++import org.bukkit.plugin.Plugin;
++
++public final class CompatibilitySyncBridge {
++
++    private CompatibilitySyncBridge() {
++    }
++
++    public static boolean isEnabledForCurrentContext() {
++        return CompatibilityRuntimeContext.currentPlugin() != null;
++    }
++
++    public static <T> T awaitFuture(
++        final CompletableFuture<T> future,
++        final String operation,
++        final String lane
++    ) {
++        Objects.requireNonNull(future, "future");
++        Objects.requireNonNull(operation, "operation");
++        Objects.requireNonNull(lane, "lane");
++
++        final Plugin plugin = CompatibilityRuntimeContext.currentPlugin();
++        if (plugin == null) {
++            throw new IllegalStateException("Compatibility sync bridge requires plugin runtime context");
++        }
++
++        final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
++        final PluginCompatibilityProfile profile = diagnostics.profileFor(plugin);
++        final long started = System.nanoTime();
++        try {
++            return CompatibilityContinuationBridge.callOffOwner(profile, diagnostics, operation, future::join);
++        } catch (final RuntimeException | Error throwable) {
++            throw throwable;
++        } catch (final Throwable throwable) {
++            throw new RuntimeException(throwable);
++        } finally {
++            diagnostics.recordBarrierWait(profile, lane, operation, System.nanoTime() - started);
++        }
++    }
++}
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransaction.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransaction.java
-index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..99cc1893429571e8d50cfaea297b11c0f6feee41 100644
+index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..203912d98f76937fc7f5f26688a1ade7c4d274ad 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransaction.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransaction.java
 @@ -6,12 +6,16 @@ import java.lang.reflect.Modifier;
@@ -2056,7 +2460,7 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..99cc1893429571e8d50cfaea297b11c0
  
  public final class CompatibilityTransaction {
  
-@@ -46,9 +50,18 @@ public final class CompatibilityTransaction {
+@@ -46,9 +50,19 @@ public final class CompatibilityTransaction {
      ) {
      }
  
@@ -2069,22 +2473,25 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..99cc1893429571e8d50cfaea297b11c0
 +    }
 +
      private static final AtomicLong NEXT_ID = new AtomicLong(1L);
++    private static final ListenerSnapshot NON_MONITOR_SNAPSHOT = new ListenerSnapshot(0, false);
  
      private final long id;
 +    private final long parentTransactionId;
      private final long startedNanos;
      private final Event event;
      private final EventSemanticIndex.EventSemantics semantics;
-@@ -57,12 +70,16 @@ public final class CompatibilityTransaction {
+@@ -57,12 +71,16 @@ public final class CompatibilityTransaction {
  
      private volatile State state = State.OPEN;
      private volatile long finishedNanos;
 +    private volatile @Nullable String abortReason;
  
-     private final List<MonitorMutation> monitorMutations = new ArrayList<>();
-     private final List<ListenerPass> listenerPasses = new ArrayList<>();
-+    private final List<PendingWrite> pendingWrites = new ArrayList<>();
-+    private final Map<Object, Object> overlay = new LinkedHashMap<>();
+-    private final List<MonitorMutation> monitorMutations = new ArrayList<>();
+-    private final List<ListenerPass> listenerPasses = new ArrayList<>();
++    private @Nullable List<MonitorMutation> monitorMutations;
++    private @Nullable List<ListenerPass> listenerPasses;
++    private @Nullable List<PendingWrite> pendingWrites;
++    private @Nullable Map<Object, Object> overlay;
  
      public CompatibilityTransaction(final Event event, final EventSemanticIndex.EventSemantics semantics) {
          this.id = NEXT_ID.getAndIncrement();
@@ -2092,7 +2499,7 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..99cc1893429571e8d50cfaea297b11c0
          this.startedNanos = System.nanoTime();
          this.event = Objects.requireNonNull(event, "event");
          this.semantics = Objects.requireNonNull(semantics, "semantics");
-@@ -78,6 +95,10 @@ public final class CompatibilityTransaction {
+@@ -78,6 +96,10 @@ public final class CompatibilityTransaction {
          return this.event;
      }
  
@@ -2103,7 +2510,7 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..99cc1893429571e8d50cfaea297b11c0
      public EventSemanticIndex.EventSemantics semantics() {
          return this.semantics;
      }
-@@ -94,6 +115,10 @@ public final class CompatibilityTransaction {
+@@ -94,12 +116,19 @@ public final class CompatibilityTransaction {
          return this.state;
      }
  
@@ -2114,7 +2521,44 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..99cc1893429571e8d50cfaea297b11c0
      public long durationNanos() {
          final long end = this.finishedNanos == 0L ? System.nanoTime() : this.finishedNanos;
          return Math.max(0L, end - this.startedNanos);
-@@ -136,10 +161,26 @@ public final class CompatibilityTransaction {
+     }
+ 
+-    public ListenerSnapshot beforeListener() {
++    public ListenerSnapshot beforeListener(final EventSemanticIndex.Lane lane) {
++        if (lane != EventSemanticIndex.Lane.MONITOR) {
++            return NON_MONITOR_SNAPSHOT;
++        }
+         return new ListenerSnapshot(eventDigest(this.event), this.cancellable && ((Cancellable)this.event).isCancelled());
+     }
+ 
+@@ -109,8 +138,14 @@ public final class CompatibilityTransaction {
+         final ListenerSnapshot before,
+         final long durationNanos
+     ) {
++        if (lane != EventSemanticIndex.Lane.MONITOR) {
++            return;
++        }
+         final boolean cancelledAfter = this.cancellable && ((Cancellable)this.event).isCancelled();
+         final int afterDigest = eventDigest(this.event);
++        if (this.listenerPasses == null) {
++            this.listenerPasses = new ArrayList<>();
++        }
+         this.listenerPasses.add(new ListenerPass(
+             listener.getPlugin().getPluginMeta().getName(),
+             lane,
+@@ -119,7 +154,10 @@ public final class CompatibilityTransaction {
+             cancelledAfter
+         ));
+ 
+-        if (lane == EventSemanticIndex.Lane.MONITOR && (afterDigest != before.digest() || cancelledAfter != before.cancelled())) {
++        if (afterDigest != before.digest() || cancelledAfter != before.cancelled()) {
++            if (this.monitorMutations == null) {
++                this.monitorMutations = new ArrayList<>();
++            }
+             this.monitorMutations.add(new MonitorMutation(
+                 listener.getPlugin().getPluginMeta().getName(),
+                 this.event.getEventName(),
+@@ -136,19 +174,77 @@ public final class CompatibilityTransaction {
              return;
          }
          if (this.cancellable && ((Cancellable)this.event).isCancelled()) {
@@ -2123,14 +2567,14 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..99cc1893429571e8d50cfaea297b11c0
 -            this.state = State.COMMITTED;
 +            this.abort("event cancelled");
 +            return;
-         }
++        }
 +        this.commit();
 +    }
 +
 +    public void commit() {
 +        if (this.state != State.OPEN) {
 +            return;
-+        }
+         }
 +        this.state = State.COMMITTED;
 +        this.finishedNanos = System.nanoTime();
 +    }
@@ -2144,10 +2588,16 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..99cc1893429571e8d50cfaea297b11c0
          this.finishedNanos = System.nanoTime();
      }
  
-@@ -151,6 +192,44 @@ public final class CompatibilityTransaction {
-         return List.copyOf(this.listenerPasses);
+     public List<MonitorMutation> monitorMutations() {
+-        return List.copyOf(this.monitorMutations);
++        return this.monitorMutations == null ? List.of() : List.copyOf(this.monitorMutations);
      }
  
+     public List<ListenerPass> listenerPasses() {
+-        return List.copyOf(this.listenerPasses);
++        return this.listenerPasses == null ? List.of() : List.copyOf(this.listenerPasses);
++    }
++
 +    public void overlayWrite(
 +        final Object key,
 +        final Object value,
@@ -2157,39 +2607,41 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..99cc1893429571e8d50cfaea297b11c0
 +        Objects.requireNonNull(key, "key");
 +        Objects.requireNonNull(ownerDomain, "ownerDomain");
 +        Objects.requireNonNull(operation, "operation");
++        if (this.overlay == null) {
++            this.overlay = new LinkedHashMap<>();
++            this.pendingWrites = new ArrayList<>();
++        }
 +        this.overlay.put(key, value);
 +        this.pendingWrites.add(new PendingWrite(ownerDomain, operation, key, value));
 +    }
 +
 +    @SuppressWarnings("unchecked")
 +    public <T> @Nullable T overlayRead(final Object key) {
-+        return (T)this.overlay.get(key);
++        return this.overlay == null ? null : (T)this.overlay.get(key);
 +    }
 +
 +    @SuppressWarnings("unchecked")
 +    public <T> T overlayReadOrCompute(final Object key, final Supplier<T> liveRead) {
-+        if (this.overlay.containsKey(key)) {
++        if (this.overlay != null && this.overlay.containsKey(key)) {
 +            return (T)this.overlay.get(key);
 +        }
 +        return liveRead.get();
 +    }
 +
 +    public boolean hasOverlay(final Object key) {
-+        return this.overlay.containsKey(key);
++        return this.overlay != null && this.overlay.containsKey(key);
 +    }
 +
 +    public int pendingWriteCount() {
-+        return this.pendingWrites.size();
++        return this.pendingWrites == null ? 0 : this.pendingWrites.size();
 +    }
 +
 +    public List<PendingWrite> pendingWrites() {
-+        return List.copyOf(this.pendingWrites);
-+    }
-+
++        return this.pendingWrites == null ? List.of() : List.copyOf(this.pendingWrites);
+     }
+ 
      private static int eventDigest(final Event event) {
-         int hash = 1;
-         for (Class<?> current = event.getClass(); current != null && Event.class.isAssignableFrom(current); current = current.getSuperclass()) {
-@@ -212,4 +291,4 @@ public final class CompatibilityTransaction {
+@@ -212,4 +308,4 @@ public final class CompatibilityTransaction {
          }
          return hash;
      }
@@ -2197,28 +2649,57 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..99cc1893429571e8d50cfaea297b11c0
 \ No newline at end of file
 +}
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/EventSemanticIndex.java b/src/main/java/io/papermc/paper/plugin/manager/compat/EventSemanticIndex.java
-index 879a3b3c6c6266ab23288b4adaeb5eef2a80803b..2017f86f7206cdde736ee1a3c3988f03725643b4 100644
+index 879a3b3c6c6266ab23288b4adaeb5eef2a80803b..021625f2d6af9ca62fedbb97cd1695b6f353634e 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/EventSemanticIndex.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/EventSemanticIndex.java
-@@ -35,6 +35,7 @@ public final class EventSemanticIndex {
+@@ -1,6 +1,5 @@
+ package io.papermc.paper.plugin.manager.compat;
+ 
+-import java.util.ArrayList;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.concurrent.ConcurrentHashMap;
+@@ -35,7 +34,7 @@ public final class EventSemanticIndex {
          boolean cancellable,
          boolean orderedDecision,
          boolean monitorListeners,
-+        boolean observerOnly,
-         List<ListenerSemantic> listeners
+-        List<ListenerSemantic> listeners
++        boolean observerOnly
      ) {
      }
-@@ -77,7 +78,8 @@ public final class EventSemanticIndex {
  
+@@ -57,27 +56,17 @@ public final class EventSemanticIndex {
+     }
+ 
+     public EventSemantics resolve(final Event event, final RegisteredListener[] listeners) {
+-        final Class<? extends Event> eventClass = event.getClass();
+         final boolean cancellable = event instanceof Cancellable;
+ 
+-        final List<ListenerSemantic> resolved = new ArrayList<>(listeners.length);
+         boolean hasMonitor = false;
+         for (final RegisteredListener listener : listeners) {
+-            final ListenerSemantic semantic = new ListenerSemantic(
+-                listener.getPlugin().getPluginMeta().getName(),
+-                listener.getPriority(),
+-                listener.isIgnoringCancelled(),
+-                lane(listener.getPriority())
+-            );
+-            resolved.add(semantic);
+-            hasMonitor |= semantic.lane() == Lane.MONITOR;
++            hasMonitor |= lane(listener.getPriority()) == Lane.MONITOR;
+         }
+ 
+-        this.listenerIndex.put(eventClass, new CopyOnWriteArrayList<>(resolved));
+-
          // All Bukkit dispatches are ordered, but cancellable events are decision-critical.
          final boolean orderedDecision = cancellable || listeners.length > 1;
 -        return new EventSemantics(event.getEventName(), cancellable, orderedDecision, hasMonitor, resolved);
 +        final boolean observerOnly = !cancellable && !hasMonitor;
-+        return new EventSemantics(event.getEventName(), cancellable, orderedDecision, hasMonitor, observerOnly, resolved);
++        return new EventSemantics(event.getEventName(), cancellable, orderedDecision, hasMonitor, observerOnly);
      }
  
      public List<ListenerSemantic> snapshot(final Class<? extends Event> eventClass) {
-@@ -95,4 +97,4 @@ public final class EventSemanticIndex {
+@@ -95,4 +84,4 @@ public final class EventSemanticIndex {
              case MONITOR -> Lane.MONITOR;
          };
      }
@@ -2226,7 +2707,7 @@ index 879a3b3c6c6266ab23288b4adaeb5eef2a80803b..2017f86f7206cdde736ee1a3c3988f03
 \ No newline at end of file
 +}
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
-index 783a46529621a59437ceaf56f1a3ef6346f0e90b..f2a68f0b6baccaf9745c1a15878f41c2e259fd7c 100644
+index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c8636f2c9 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
 @@ -6,7 +6,9 @@ import java.util.ArrayList;
@@ -2318,7 +2799,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..f2a68f0b6baccaf9745c1a15878f41c2
      }
  
      public Plugin plugin() {
-@@ -105,16 +141,30 @@ public final class PluginCompatibilityProfile {
+@@ -105,16 +141,29 @@ public final class PluginCompatibilityProfile {
          return this.mode;
      }
  
@@ -2328,7 +2809,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..f2a68f0b6baccaf9745c1a15878f41c2
 +
      public void noteOrderedTransaction() {
          this.orderedTransactions.increment();
-         this.escalate(Mode.LEGACY_ORDERED, EscalationReason.ORDERED_EVENT_LANE, "ordered event transaction");
+-        this.escalate(Mode.LEGACY_ORDERED, EscalationReason.ORDERED_EVENT_LANE, "ordered event transaction");
      }
  
      public void noteUnsafeInternalAccess(final String detail) {
@@ -2349,7 +2830,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..f2a68f0b6baccaf9745c1a15878f41c2
          this.monitorMutationAttempts.increment();
          this.escalate(Mode.LEGACY_ORDERED, EscalationReason.MONITOR_MUTATION, detail);
          if (this.monitorMutationAttempts.longValue() >= 3L) {
-@@ -123,6 +173,7 @@ public final class PluginCompatibilityProfile {
+@@ -123,6 +172,7 @@ public final class PluginCompatibilityProfile {
      }
  
      public void noteAsyncBukkitAccess(final String detail) {
@@ -2357,7 +2838,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..f2a68f0b6baccaf9745c1a15878f41c2
          this.asyncBukkitViolations.increment();
          this.escalate(Mode.LEGACY_INTERNAL, EscalationReason.ASYNC_BUKKIT_ACCESS, detail);
          if (this.asyncBukkitViolations.longValue() >= 2L) {
-@@ -131,6 +182,7 @@ public final class PluginCompatibilityProfile {
+@@ -131,6 +181,7 @@ public final class PluginCompatibilityProfile {
      }
  
      public void noteOwnerDomainWaitViolation(final String detail) {
@@ -2365,7 +2846,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..f2a68f0b6baccaf9745c1a15878f41c2
          this.ownerDomainWaitViolations.increment();
          this.escalate(Mode.LEGACY_STRICT, EscalationReason.OWNER_BLOCKING_WAIT, detail);
      }
-@@ -149,15 +201,29 @@ public final class PluginCompatibilityProfile {
+@@ -149,15 +200,29 @@ public final class PluginCompatibilityProfile {
          this.escalate(Mode.REFUSED, EscalationReason.REFUSAL, detail);
      }
  
@@ -2395,7 +2876,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..f2a68f0b6baccaf9745c1a15878f41c2
      public void noteBarrierTimeNanos(final long nanos) {
          this.barrierTimeNanos.add(Math.max(0L, nanos));
      }
-@@ -174,16 +240,37 @@ public final class PluginCompatibilityProfile {
+@@ -174,16 +239,37 @@ public final class PluginCompatibilityProfile {
              this.ownerRpcWaitNanos.longValue(),
              this.barrierTimeNanos.longValue(),
              this.orderedTransactions.longValue(),
@@ -2433,6 +2914,19 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..f2a68f0b6baccaf9745c1a15878f41c2
      private List<EventCost> hotEvents(final int limit) {
          final List<EventCost> eventCosts = new ArrayList<>(this.callbackNanosByEvent.size());
          for (final Map.Entry<String, LongAdder> entry : this.callbackNanosByEvent.entrySet()) {
+@@ -199,9 +285,10 @@ public final class PluginCompatibilityProfile {
+     private void escalate(final Mode requiredMode, final EscalationReason reason, final String detail) {
+         final Mode from = this.mode;
+         final Mode to = from.atLeast(requiredMode) ? from : requiredMode;
+-        if (to != from) {
+-            this.mode = to;
++        if (to == from) {
++            return;
+         }
++        this.mode = to;
+         final Escalation escalation = new Escalation(System.currentTimeMillis(), reason, from, to, detail);
+         synchronized (this.escalationLock) {
+             this.escalations.addLast(escalation);
 @@ -209,11 +296,50 @@ public final class PluginCompatibilityProfile {
                  this.escalations.removeFirst();
              }
@@ -2560,8 +3054,109 @@ index 17b6275956c09e827201a3eb9bf6ee1521334bd2..43a047d0d4acbdfee4f6582e4dda8cbd
          this.pluginManager.paperPluginManager = this.paperPluginManager;
           // Paper end
  
+diff --git a/src/main/java/org/bukkit/craftbukkit/scheduler/CraftAsyncTask.java b/src/main/java/org/bukkit/craftbukkit/scheduler/CraftAsyncTask.java
+index e4e2e42d0ca25df7fe9f2dd4275610e45fcb2c84..9b8926144d33ae264b0f43e763509ab137b4e219 100644
+--- a/src/main/java/org/bukkit/craftbukkit/scheduler/CraftAsyncTask.java
++++ b/src/main/java/org/bukkit/craftbukkit/scheduler/CraftAsyncTask.java
+@@ -1,9 +1,15 @@
+ package org.bukkit.craftbukkit.scheduler;
+ 
++import io.papermc.paper.plugin.manager.compat.CompatibilityDiagnostics;
++import io.papermc.paper.plugin.manager.compat.CompatibilityRuntimeContext;
+ import java.util.Iterator;
+ import java.util.LinkedList;
+ import java.util.Map;
++import java.util.concurrent.CompletableFuture;
+ import java.util.logging.Level;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.server.threading.runtime.ThreadedRegionsBlockingBarrier;
+ import org.bukkit.plugin.Plugin;
+ import org.bukkit.scheduler.BukkitWorker;
+ 
+@@ -54,16 +60,18 @@ class CraftAsyncTask extends CraftTask {
+         }
+         Throwable thrown = null;
+         try {
+-            super.run();
+-        } catch (final Throwable t) {
+-            thrown = t;
+-            this.getOwner().getLogger().log(
+-                    Level.WARNING,
+-                    String.format(
+-                        "Plugin %s generated an exception while executing task %s",
+-                        this.getOwner().getDescription().getFullName(),
+-                        this.getTaskId()),
+-                    thrown);
++            this.runTaskWithContext(false, "scheduler:async-task");
++        } catch (final Throwable initialFailure) {
++            if (!this.tryCompatibilitySyncReroute(initialFailure)) {
++                thrown = initialFailure;
++                this.getOwner().getLogger().log(
++                        Level.WARNING,
++                        String.format(
++                            "Plugin %s generated an exception while executing task %s",
++                            this.getOwner().getDescription().getFullName(),
++                            this.getTaskId()),
++                        thrown);
++            }
+         } finally {
+             // Cleanup is important for any async task, otherwise ghost tasks are everywhere
+             synchronized (this.workers) {
+@@ -98,6 +106,51 @@ class CraftAsyncTask extends CraftTask {
+         } finally { thread.setName(nameBefore); } // Paper - name threads according to running plugin
+     }
+ 
++    private void runTaskWithContext(final boolean strictFallback, final String path) {
++        final long transactionId = CompatibilityRuntimeContext.syntheticTransactionId();
++        try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(this.getOwner(), transactionId, strictFallback, path)) {
++            super.run();
++        }
++    }
++
++    private boolean tryCompatibilitySyncReroute(final Throwable initialFailure) {
++        if (!isCompatibilityAsyncViolation(initialFailure)) {
++            return false;
++        }
++
++        final MinecraftServer server = MinecraftServer.getServer();
++        if (server == null || server.hasStopped()) {
++            return false;
++        }
++
++        final CompatibilityDiagnostics diagnostics = CompatibilityDiagnostics.global();
++        diagnostics.recordStrictFallback(
++            diagnostics.profileFor(this.getOwner()),
++            "async scheduler reroute after " + initialFailure.getMessage()
++        );
++
++        final CompletableFuture<Void> rerouted = OwnerDomainExecutor.submit(
++            OwnerDomainExecutor.global(server, "compat-async-task-reroute"),
++            () -> this.runTaskWithContext(true, "scheduler:async-reroute")
++        );
++
++        try {
++            ThreadedRegionsBlockingBarrier.awaitNonOwnerFuture(rerouted, "compatibility async scheduler reroute");
++            return true;
++        } catch (final RuntimeException | Error rerouteFailure) {
++            initialFailure.addSuppressed(rerouteFailure);
++            return false;
++        }
++    }
++
++    private static boolean isCompatibilityAsyncViolation(final Throwable throwable) {
++        if (!(throwable instanceof IllegalStateException illegalStateException)) {
++            return false;
++        }
++        final String message = illegalStateException.getMessage();
++        return message != null && message.startsWith("Asynchronous ");
++    }
++
+     LinkedList<BukkitWorker> getWorkers() {
+         return this.workers;
+     }
 diff --git a/src/main/java/org/spigotmc/AsyncCatcher.java b/src/main/java/org/spigotmc/AsyncCatcher.java
-index 832fe50a45be55712e2ee92cd54ec927ac421a85..cd05cc077c61fea77d344710b37c9a533700fe72 100644
+index 832fe50a45be55712e2ee92cd54ec927ac421a85..00e829286d7d36d6130ad1a5ea4c1992a79f13c9 100644
 --- a/src/main/java/org/spigotmc/AsyncCatcher.java
 +++ b/src/main/java/org/spigotmc/AsyncCatcher.java
 @@ -1,11 +1,19 @@
@@ -2584,13 +3179,65 @@ index 832fe50a45be55712e2ee92cd54ec927ac421a85..cd05cc077c61fea77d344710b37c9a53
              MinecraftServer.LOGGER.error("Thread {} failed main thread check: {}", Thread.currentThread().getName(), reason, new Throwable()); // Paper
              throw new IllegalStateException("Asynchronous " + reason + "!");
          }
-@@ -13,5 +21,81 @@ public class AsyncCatcher {
+@@ -13,5 +21,140 @@ public class AsyncCatcher {
  
      public static void catchOp(final String reason, final Object... context) {
          catchOp(reason);
 +        if (context == null || context.length == 0 || isOwnerForContext(context)) {
 +            return;
 +        }
++        failOwnerMismatch(reason, context);
++    }
++
++    public static void catchOp(final String reason, final Entity entity) {
++        catchOp(reason);
++        if (isGlobalOwner() || OwnerDomainExecutor.isEntityOwner(entity) || isRegionOwnerForEntity(entity)) {
++            return;
++        }
++        failOwnerMismatch(reason, entity);
++    }
++
++    // Loom - a tick thread that owns the region an entity currently occupies may operate on that entity.
++    // Players carry a PLAYER owner domain distinct from the region they stand in, so during a (possibly
++    // parallel) world tick the region owner must still be accepted for entity/tracker work on entities in
++    // it. Under serial ticking the full-level lease already covers the chunk, so this changes nothing.
++    private static boolean isRegionOwnerForEntity(final Entity entity) {
++        if (!(entity.level() instanceof final ServerLevel serverLevel)) {
++            return false;
++        }
++        final BlockPos pos = entity.blockPosition();
++        return OwnerDomainExecutor.isRegionOwner(serverLevel, pos.getX() >> 4, pos.getZ() >> 4);
++    }
++
++    public static void catchOp(final String reason, final Level level) {
++        catchOp(reason);
++        final ServerLevel serverLevel = asServerLevel(level);
++        if (isGlobalOwner() || serverLevel != null && OwnerDomainExecutor.isCurrentRegionOwnerForLevel(serverLevel)) {
++            return;
++        }
++        failOwnerMismatch(reason, level);
++    }
++
++    public static void catchOp(final String reason, final Level level, final BlockPos pos) {
++        catchOp(reason);
++        final ServerLevel serverLevel = asServerLevel(level);
++        if (isGlobalOwner()
++            || serverLevel != null && OwnerDomainExecutor.isRegionOwner(serverLevel, pos.getX() >> 4, pos.getZ() >> 4)) {
++            return;
++        }
++        failOwnerMismatch(reason, level, pos);
++    }
++
++    public static void catchOp(final String reason, final Level level, final int chunkX, final int chunkZ) {
++        catchOp(reason);
++        final ServerLevel serverLevel = asServerLevel(level);
++        if (isGlobalOwner() || serverLevel != null && OwnerDomainExecutor.isRegionOwner(serverLevel, chunkX, chunkZ)) {
++            return;
++        }
++        failOwnerMismatch(reason, level, chunkX, chunkZ);
++    }
++
++    private static void failOwnerMismatch(final String reason, final Object... context) {
 +        CompatibilityDiagnostics.global().recordAsyncViolation("owner-mismatch: " + reason);
 +        final String message = "Owner-domain violation for " + reason + ", context=" + describeContext(context);
 +        MinecraftServer.LOGGER.error(message, new Throwable());
@@ -2598,13 +3245,12 @@ index 832fe50a45be55712e2ee92cd54ec927ac421a85..cd05cc077c61fea77d344710b37c9a53
 +    }
 +
 +    private static boolean isOwnerForContext(final Object... context) {
-+        final MinecraftServer server = MinecraftServer.getServer();
-+        if (server != null && OwnerDomainExecutor.isGlobalOwner(server)) {
++        if (isGlobalOwner()) {
 +            return true;
 +        }
 +
 +        for (final Object entry : context) {
-+            if (entry instanceof Entity entity && OwnerDomainExecutor.isOwner(OwnerDomainExecutor.entity(entity, "async-catcher-entity"))) {
++            if (entry instanceof Entity entity && OwnerDomainExecutor.isEntityOwner(entity)) {
 +                return true;
 +            }
 +        }
@@ -2637,17 +3283,25 @@ index 832fe50a45be55712e2ee92cd54ec927ac421a85..cd05cc077c61fea77d344710b37c9a53
 +            return false;
 +        }
 +        if (chunkPos != null) {
-+            return OwnerDomainExecutor.isOwner(OwnerDomainExecutor.region(level, chunkPos.x(), chunkPos.z(), "async-catcher-chunk-pos"));
++            return OwnerDomainExecutor.isRegionOwner(level, chunkPos.x(), chunkPos.z());
 +        }
 +        if (blockPos != null) {
-+            return OwnerDomainExecutor.isOwner(OwnerDomainExecutor.region(level, blockPos.getX() >> 4, blockPos.getZ() >> 4, "async-catcher-block-pos"));
++            return OwnerDomainExecutor.isRegionOwner(level, blockPos.getX() >> 4, blockPos.getZ() >> 4);
 +        }
 +        if (chunkX != null && chunkZ != null) {
-+            return OwnerDomainExecutor.isOwner(OwnerDomainExecutor.region(level, chunkX, chunkZ, "async-catcher-chunk-coordinates"));
++            return OwnerDomainExecutor.isRegionOwner(level, chunkX, chunkZ);
 +        }
 +
-+        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.currentOwner();
-+        return owner != null && owner.domain() == OwnerDomainExecutor.Domain.REGION && owner.level() == level;
++        return OwnerDomainExecutor.isCurrentRegionOwnerForLevel(level);
++    }
++
++    private static boolean isGlobalOwner() {
++        final MinecraftServer server = MinecraftServer.getServer();
++        return server != null && OwnerDomainExecutor.isGlobalOwner(server);
++    }
++
++    private static ServerLevel asServerLevel(final Level level) {
++        return level instanceof ServerLevel serverLevel ? serverLevel : null;
 +    }
 +
 +    private static String describeContext(final Object... context) {
@@ -2667,17 +3321,34 @@ index 832fe50a45be55712e2ee92cd54ec927ac421a85..cd05cc077c61fea77d344710b37c9a53
      }
  }
 diff --git a/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java b/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
-index 3e89574757a44e506c5ce8c856806768d87f527f..7c05be6a5450ce4a56dc8ffd117e0ac78cb0b14e 100644
+index 3e89574757a44e506c5ce8c856806768d87f527f..e51d177a4e5fcb14543c6e60fb5b80c3338ff097 100644
 --- a/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
 +++ b/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
-@@ -1,5 +1,6 @@
+@@ -1,11 +1,14 @@
  package org.spigotmc;
  
 +import io.papermc.paper.plugin.manager.compat.CompatibilityDiagnostics;
  import net.kyori.adventure.text.Component;
  import net.kyori.adventure.text.JoinConfiguration;
  import net.kyori.adventure.text.TextComponent;
-@@ -27,8 +28,8 @@ public class LoomTicksPerSecondCommand extends Command {
+ import net.kyori.adventure.text.format.NamedTextColor;
+ import net.kyori.adventure.text.format.TextColor;
++import net.minecraft.network.PacketProcessor;
+ import net.minecraft.server.threading.TickRegions;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
+ import org.bukkit.Bukkit;
+ import org.bukkit.command.Command;
+ import org.bukkit.command.CommandSender;
+@@ -20,6 +23,8 @@ public class LoomTicksPerSecondCommand extends Command {
+     private static final TextColor SOFT = TextColor.fromHexString("#c3ccd8");
+     private static final TextColor SUBTLE = TextColor.fromHexString("#94a3b8");
+     private volatile TickRegions.RuntimeDiagnostics lastThreadedSnapshot;
++    private volatile PacketProcessor.TickStartDrainDiagnostics lastPacketDrainSnapshot;
++    private volatile OwnerDomainExecutor.Diagnostics lastOwnerDomainSnapshot;
+     private volatile long lastThreadedSnapshotNanos = -1L;
+     private static final ThreadLocal<DecimalFormat> ONE_DECIMAL_PLACES = ThreadLocal.withInitial(() -> {
+         return new DecimalFormat("########0.0");
+@@ -27,8 +32,8 @@ public class LoomTicksPerSecondCommand extends Command {
  
      public LoomTicksPerSecondCommand(final String name) {
          super(name);
@@ -2688,7 +3359,7 @@ index 3e89574757a44e506c5ce8c856806768d87f527f..7c05be6a5450ce4a56dc8ffd117e0ac7
          this.setPermission("bukkit.command.tps");
      }
  
-@@ -38,6 +39,16 @@ public class LoomTicksPerSecondCommand extends Command {
+@@ -38,6 +43,16 @@ public class LoomTicksPerSecondCommand extends Command {
              return true;
          }
  
@@ -2705,7 +3376,7 @@ index 3e89574757a44e506c5ce8c856806768d87f527f..7c05be6a5450ce4a56dc8ffd117e0ac7
          final double[] tps = Bukkit.getTPS();
          final Component[] tpsAvg = new Component[tps.length];
          for (int i = 0; i < tps.length; ++i) {
-@@ -54,6 +65,19 @@ public class LoomTicksPerSecondCommand extends Command {
+@@ -54,9 +69,26 @@ public class LoomTicksPerSecondCommand extends Command {
          return true;
      }
  
@@ -2725,7 +3396,109 @@ index 3e89574757a44e506c5ce8c856806768d87f527f..7c05be6a5450ce4a56dc8ffd117e0ac7
      private void sendThreadedRuntimeSummary(final CommandSender sender) {
          final TickRegions.RuntimeDiagnostics snapshot = TickRegions.snapshotDiagnostics();
          final TickRegions.RuntimeDiagnostics previous = this.lastThreadedSnapshot;
-@@ -229,4 +253,4 @@ public class LoomTicksPerSecondCommand extends Command {
++        final PacketProcessor.TickStartDrainDiagnostics packetSnapshot = PacketProcessor.tickStartDrainDiagnostics();
++        final PacketProcessor.TickStartDrainDiagnostics previousPacketSnapshot = this.lastPacketDrainSnapshot;
++        final OwnerDomainExecutor.Diagnostics ownerSnapshot = OwnerDomainExecutor.snapshotDiagnostics();
++        final OwnerDomainExecutor.Diagnostics previousOwnerSnapshot = this.lastOwnerDomainSnapshot;
+         final long now = System.nanoTime();
+ 
+         long queuedScheduledTasks = 0L;
+@@ -85,6 +117,13 @@ public class LoomTicksPerSecondCommand extends Command {
+         final double mailboxRate;
+         final double schedulerRate;
+         final double simulationOpsRate;
++        final double packetRate;
++        final double packetDrainMillisRate;
++        final double mailboxDrainMillisRate;
++        final double schedulerDrainMillisRate;
++        final double ownerInlineRate;
++        final double ownerHandoffRate;
++        final long packetBudgetDeferralsDelta;
+         if (previous != null && previousNanos > 0L && now > previousNanos) {
+             elapsedSeconds = (double)(now - previousNanos) / 1_000_000_000.0D;
+             if (elapsedSeconds > 0.0D) {
+@@ -92,11 +131,25 @@ public class LoomTicksPerSecondCommand extends Command {
+                 mailboxRate = this.perSecond(snapshot.mailboxMessagesDelivered(), previous.mailboxMessagesDelivered(), elapsedSeconds);
+                 simulationOpsRate = this.perSecond(snapshot.simulationBatchOperations(), previous.simulationBatchOperations(), elapsedSeconds);
+                 regionCreateRate = this.perSecond(snapshot.regionRuntime().createdRegions(), previous.regionRuntime().createdRegions(), elapsedSeconds);
++                packetRate = previousPacketSnapshot == null ? 0.0D : this.perSecond(packetSnapshot.packets(), previousPacketSnapshot.packets(), elapsedSeconds);
++                packetDrainMillisRate = previousPacketSnapshot == null ? 0.0D : this.nanosPerSecondAsMillis(packetSnapshot.nanos(), previousPacketSnapshot.nanos(), elapsedSeconds);
++                mailboxDrainMillisRate = this.nanosPerSecondAsMillis(snapshot.mailboxDrainNanos(), previous.mailboxDrainNanos(), elapsedSeconds);
++                schedulerDrainMillisRate = this.nanosPerSecondAsMillis(snapshot.schedulerDrainNanos(), previous.schedulerDrainNanos(), elapsedSeconds);
++                ownerInlineRate = previousOwnerSnapshot == null ? 0.0D : this.perSecond(ownerSnapshot.inline(), previousOwnerSnapshot.inline(), elapsedSeconds);
++                ownerHandoffRate = previousOwnerSnapshot == null ? 0.0D : this.perSecond(ownerSnapshot.handoff(), previousOwnerSnapshot.handoff(), elapsedSeconds);
++                packetBudgetDeferralsDelta = previousPacketSnapshot == null ? 0L : Math.max(0L, packetSnapshot.budgetDeferrals() - previousPacketSnapshot.budgetDeferrals());
+             } else {
+                 schedulerRate = 0.0D;
+                 mailboxRate = 0.0D;
+                 simulationOpsRate = 0.0D;
+                 regionCreateRate = 0.0D;
++                packetRate = 0.0D;
++                packetDrainMillisRate = 0.0D;
++                mailboxDrainMillisRate = 0.0D;
++                schedulerDrainMillisRate = 0.0D;
++                ownerInlineRate = 0.0D;
++                ownerHandoffRate = 0.0D;
++                packetBudgetDeferralsDelta = 0L;
+             }
+         } else {
+             elapsedSeconds = 0.0D;
+@@ -104,6 +157,13 @@ public class LoomTicksPerSecondCommand extends Command {
+             mailboxRate = 0.0D;
+             simulationOpsRate = 0.0D;
+             regionCreateRate = 0.0D;
++            packetRate = 0.0D;
++            packetDrainMillisRate = 0.0D;
++            mailboxDrainMillisRate = 0.0D;
++            schedulerDrainMillisRate = 0.0D;
++            ownerInlineRate = 0.0D;
++            ownerHandoffRate = 0.0D;
++            packetBudgetDeferralsDelta = 0L;
+         }
+ 
+         sender.sendMessage(text("Runtime overview:", SOFT));
+@@ -164,9 +224,29 @@ public class LoomTicksPerSecondCommand extends Command {
+                 .append(text(", simulation ", SOFT))
+                 .append(text(ONE_DECIMAL_PLACES.get().format(simulationOpsRate) + "/s", this.rateColor(simulationOpsRate)))
+                 .build());
++            sender.sendMessage(text()
++                .append(text("  drain ms/s packets ", SOFT))
++                .append(text(ONE_DECIMAL_PLACES.get().format(packetDrainMillisRate), this.rateColor(packetDrainMillisRate)))
++                .append(text(", mailbox ", SOFT))
++                .append(text(ONE_DECIMAL_PLACES.get().format(mailboxDrainMillisRate), this.rateColor(mailboxDrainMillisRate)))
++                .append(text(", scheduler ", SOFT))
++                .append(text(ONE_DECIMAL_PLACES.get().format(schedulerDrainMillisRate), this.rateColor(schedulerDrainMillisRate)))
++                .append(text("  |  packets ", SOFT))
++                .append(text(ONE_DECIMAL_PLACES.get().format(packetRate) + "/s", this.rateColor(packetRate)))
++                .append(text(", deferrals +", SOFT))
++                .append(text(packetBudgetDeferralsDelta, packetBudgetDeferralsDelta > 0L ? NamedTextColor.YELLOW : NamedTextColor.WHITE))
++                .build());
++            sender.sendMessage(text()
++                .append(text("  owner inline ", SOFT))
++                .append(text(ONE_DECIMAL_PLACES.get().format(ownerInlineRate) + "/s", this.rateColor(ownerInlineRate)))
++                .append(text(", handoff ", SOFT))
++                .append(text(ONE_DECIMAL_PLACES.get().format(ownerHandoffRate) + "/s", this.rateColor(ownerHandoffRate)))
++                .build());
+         }
+ 
+         this.lastThreadedSnapshot = snapshot;
++        this.lastPacketDrainSnapshot = packetSnapshot;
++        this.lastOwnerDomainSnapshot = ownerSnapshot;
+         this.lastThreadedSnapshotNanos = now;
+     }
+ 
+@@ -210,6 +290,10 @@ public class LoomTicksPerSecondCommand extends Command {
+         return Math.max(0.0D, (double)(current - previous) / elapsedSeconds);
+     }
+ 
++    private double nanosPerSecondAsMillis(final long current, final long previous, final double elapsedSeconds) {
++        return this.perSecond(current, previous, elapsedSeconds) / 1_000_000.0D;
++    }
++
+     private TextColor pressureColor(final long queueSize) {
+         if (queueSize >= 4096L) {
+             return NamedTextColor.RED;
+@@ -229,4 +313,4 @@ public class LoomTicksPerSecondCommand extends Command {
          final String amount = ONE_DECIMAL_PLACES.get().format(tps);
          return text(amount, color);
      }
@@ -2747,6 +3520,32 @@ index 025ec3f3e84a3367b4d709c8c3ecd98f6dfecab4..bcabc539a8742587e8ee43a15eb2c05c
      public static int playerSample;
      private static void playerSample() {
          SpigotConfig.playerSample = Math.max(SpigotConfig.getInt("settings.sample-count", 12), 0); // Paper - Avoid negative counts
+diff --git a/src/test/java/ca/spottedleaf/moonrise/common/util/MoonriseCommonTest.java b/src/test/java/ca/spottedleaf/moonrise/common/util/MoonriseCommonTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b8658626b3a7a5e5fa1739dbd294e50e71b3a72d
+--- /dev/null
++++ b/src/test/java/ca/spottedleaf/moonrise/common/util/MoonriseCommonTest.java
+@@ -0,0 +1,20 @@
++package ca.spottedleaf.moonrise.common.util;
++
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++
++@Normal
++class MoonriseCommonTest {
++
++    @Test
++    void loomWorkerDefaultLeavesTickThreadHeadroom() {
++        Assertions.assertEquals(1, MoonriseCommon.loomWorkerThreads(1));
++        Assertions.assertEquals(1, MoonriseCommon.loomWorkerThreads(2));
++        Assertions.assertEquals(1, MoonriseCommon.loomWorkerThreads(6));
++        Assertions.assertEquals(2, MoonriseCommon.loomWorkerThreads(8));
++        Assertions.assertEquals(3, MoonriseCommon.loomWorkerThreads(12));
++        Assertions.assertEquals(3, MoonriseCommon.loomWorkerThreads(16));
++        Assertions.assertEquals(3, MoonriseCommon.loomWorkerThreads(32));
++    }
++}
 diff --git a/src/test/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifierTest.java b/src/test/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifierTest.java
 new file mode 100644
 index 0000000000000000000000000000000000000000..eb5d5e45fab930e31bab10cf91144c06ae2e39c2
@@ -2980,13 +3779,39 @@ index 0000000000000000000000000000000000000000..ccc1b6e51b1719f8ae134960ce6f5360
 +    }
 +}
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
-index 35921cbece41b00a1261ea48437020a886653b5d..ed1d500b0398b32135926e234045cbdafccf6422 100644
+index 35921cbece41b00a1261ea48437020a886653b5d..c1b9987c7f63f6b0fde0845a8b12d00e62016c80 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
-@@ -39,6 +39,15 @@ class CompatibilityApartmentTest {
+@@ -39,6 +39,41 @@ class CompatibilityApartmentTest {
          }
      }
  
++    @Test
++    void sameThreadNestedDifferentTransactionReenters() {
++        // Loom Fix 1d regression - a thread that already holds this plugin's lease re-enters even when the
++        // nested dispatch is a DIFFERENT transaction (the WorldGuard pattern: a listener synchronously fires the
++        // plugin's own delegate event, a fresh transaction, from inside the current one). This must be REENTRANT,
++        // not BUSY, or WorldGuard's region-protection listeners on the delegate would be refused and its
++        // place/break/spawn protection silently bypassed.
++        final Plugin plugin = mockPlugin("LegacyPlugin");
++        final CompatibilityApartment apartment = new CompatibilityApartment(plugin);
++        final CompatibilityTransaction outer = transactionFor(plugin);
++        final CompatibilityTransaction nested = transactionFor(plugin);
++        Assertions.assertNotEquals(outer.id(), nested.id(), "the nested dispatch must be a distinct transaction");
++
++        try (CompatibilityApartment.Scope outerScope = apartment.enter(outer, false)) {
++            Assertions.assertEquals(CompatibilityApartment.EnterResult.ACQUIRED, outerScope.result());
++            try (CompatibilityApartment.Scope nestedScope = apartment.enter(nested, false)) {
++                Assertions.assertEquals(CompatibilityApartment.EnterResult.REENTRANT, nestedScope.result());
++                Assertions.assertTrue(nestedScope.acquired());
++            }
++            // After the nested scope closes the outer lease must still be held (depth bookkeeping).
++            try (CompatibilityApartment.Scope stillHeld = apartment.enter(outer, false)) {
++                Assertions.assertEquals(CompatibilityApartment.EnterResult.REENTRANT, stillHeld.result());
++            }
++        }
++    }
++
 +    @Test
 +    void strictFallbackExecutorRunsSerializedTasks() {
 +        final Plugin plugin = mockPlugin("LegacyPlugin");
@@ -2999,12 +3824,81 @@ index 35921cbece41b00a1261ea48437020a886653b5d..ed1d500b0398b32135926e234045cbda
      private static CompatibilityTransaction transactionFor(final Plugin plugin) {
          final DummyEvent event = new DummyEvent();
          final RegisteredListener[] listeners = new RegisteredListener[0];
-@@ -73,4 +82,4 @@ class CompatibilityApartmentTest {
+@@ -73,4 +108,4 @@ class CompatibilityApartmentTest {
              return HANDLERS;
          }
      }
 -}
 \ No newline at end of file
++}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridgeTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridgeTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..e0b49507281e6cec722207efb0b4fe67c544e67e
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityChunkBridgeTest.java
+@@ -0,0 +1,63 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.logging.Logger;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class CompatibilityChunkBridgeTest {
++
++    @Test
++    void pluginContextEnablesBridge() {
++        final Plugin plugin = mockPlugin("LegacyBridgePlugin");
++
++        try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false)) {
++            Assertions.assertTrue(CompatibilityChunkBridge.isEnabledForCurrentContext());
++        }
++    }
++
++    @Test
++    void noPluginContextDisablesBridge() {
++        Assertions.assertFalse(CompatibilityChunkBridge.isEnabledForCurrentContext());
++    }
++
++    @Test
++    void bridgeCanAwaitDelayedChunkFuture() {
++        final Plugin plugin = mockPlugin("LegacyBridgePlugin");
++        final CompletableFuture<String> delayed = CompletableFuture.supplyAsync(() -> {
++            try {
++                Thread.sleep(25L);
++            } catch (final InterruptedException ex) {
++                Thread.currentThread().interrupt();
++                throw new RuntimeException(ex);
++            }
++            return "loaded";
++        });
++
++        try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false)) {
++            final String result = CompatibilityChunkBridge.awaitChunkFuture(delayed, "test chunk wait");
++            Assertions.assertEquals("loaded", result);
++        }
++    }
++
++    private static Plugin mockPlugin(final String name) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn("com.example." + name);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
 +}
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnosticsTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityDiagnosticsTest.java
 new file mode 100644
@@ -3336,11 +4230,107 @@ index 0000000000000000000000000000000000000000..ce3b9405cee5829c593e7c15f113c6e9
 +        String second();
 +    }
 +}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b184d2638016c67c432362ae819ebab5fdd91e5a
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java
+@@ -0,0 +1,81 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.logging.Logger;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class CompatibilitySyncBridgeTest {
++
++    @Test
++    void pluginContextEnablesBridge() {
++        final Plugin plugin = mockPlugin("LegacyBridgePlugin");
++
++        try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false)) {
++            Assertions.assertTrue(CompatibilitySyncBridge.isEnabledForCurrentContext());
++        }
++    }
++
++    @Test
++    void noPluginContextDisablesBridge() {
++        Assertions.assertFalse(CompatibilitySyncBridge.isEnabledForCurrentContext());
++    }
++
++    @Test
++    void bridgeCanAwaitDelayedFuture() {
++        final Plugin plugin = mockPlugin("LegacyBridgePlugin");
++        final CompletableFuture<String> delayed = CompletableFuture.supplyAsync(() -> {
++            try {
++                Thread.sleep(25L);
++            } catch (final InterruptedException ex) {
++                Thread.currentThread().interrupt();
++                throw new RuntimeException(ex);
++            }
++            return "loaded";
++        });
++
++        try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false)) {
++            final String result = CompatibilitySyncBridge.awaitFuture(delayed, "test generic wait", "TEST_LANE");
++            Assertions.assertEquals("loaded", result);
++        }
++    }
++
++    @Test
++    void bridgeNeverAllowsOwnerDomainBlocking() {
++        final Plugin plugin = mockPlugin("LegacyBridgePlugin");
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++
++        try (
++            CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false);
++            OwnerDomainExecutor.Scope owner = OwnerDomainExecutor.enter(OwnerDomainExecutor.global(server, "test-owner"))
++        ) {
++            Assertions.assertThrows(
++                IllegalStateException.class,
++                () -> CompatibilitySyncBridge.awaitFuture(new CompletableFuture<>(), "owner domain wait", "TEST_LANE")
++            );
++        }
++    }
++
++    private static Plugin mockPlugin(final String name) {
++        final PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn(name);
++        Mockito.when(meta.getMainClass()).thenReturn("com.example." + name);
++        Mockito.when(meta.getPluginDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getVersion()).thenReturn("1.0.0");
++
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
++}
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransactionTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransactionTest.java
-index a1e3974ac242e1ed63f27c98ba5bfd686e2b0c81..9b47fc7a948e01faa780a7e25892d3bc12069275 100644
+index a1e3974ac242e1ed63f27c98ba5bfd686e2b0c81..6da37be18083d7a9620f046b31ad3a71ddc95a3e 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransactionTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransactionTest.java
-@@ -54,6 +54,23 @@ class CompatibilityTransactionTest {
+@@ -41,7 +41,7 @@ class CompatibilityTransactionTest {
+         final EventSemanticIndex.EventSemantics semantics = index.resolve(event, new RegisteredListener[] {registered});
+         final CompatibilityTransaction transaction = new CompatibilityTransaction(event, semantics);
+ 
+-        final CompatibilityTransaction.ListenerSnapshot before = transaction.beforeListener();
++        final CompatibilityTransaction.ListenerSnapshot before = transaction.beforeListener(EventSemanticIndex.Lane.MONITOR);
+         final long started = System.nanoTime();
+         registered.callEvent(event);
+         transaction.afterListener(registered, EventSemanticIndex.lane(registered.getPriority()), before, System.nanoTime() - started);
+@@ -54,6 +54,45 @@ class CompatibilityTransactionTest {
          Assertions.assertEquals("OldClaims", mutation.plugin());
      }
  
@@ -3361,21 +4351,63 @@ index a1e3974ac242e1ed63f27c98ba5bfd686e2b0c81..9b47fc7a948e01faa780a7e25892d3bc
 +        Assertions.assertEquals("cancelled", transaction.abortReason());
 +    }
 +
++    @Test
++    void nonMonitorLaneSkipsReflectiveDigest() {
++        final Plugin plugin = mockPlugin("FastPath");
++        final Listener listener = Mockito.mock(Listener.class);
++        final RegisteredListener registered = new RegisteredListener(
++            listener,
++            (ignored, event) -> {
++            },
++            EventPriority.NORMAL,
++            plugin,
++            false
++        );
++
++        final TestExplosiveHashEvent event = new TestExplosiveHashEvent();
++        final EventSemanticIndex.EventSemantics semantics = new EventSemanticIndex().resolve(event, new RegisteredListener[] {registered});
++        final CompatibilityTransaction transaction = new CompatibilityTransaction(event, semantics);
++        final CompatibilityTransaction.ListenerSnapshot before = transaction.beforeListener(EventSemanticIndex.Lane.NORMAL);
++
++        Assertions.assertDoesNotThrow(() -> transaction.afterListener(registered, EventSemanticIndex.Lane.NORMAL, before, 1L));
++        Assertions.assertTrue(transaction.listenerPasses().isEmpty());
++    }
++
      private static Plugin mockPlugin(final String name) {
          final PluginMeta meta = Mockito.mock(PluginMeta.class);
          Mockito.when(meta.getName()).thenReturn(name);
-@@ -102,4 +119,4 @@ class CompatibilityTransactionTest {
+@@ -102,4 +141,24 @@ class CompatibilityTransactionTest {
              return HANDLERS;
          }
      }
 -}
 \ No newline at end of file
++
++    private static final class TestExplosiveHashEvent extends Event {
++        private static final HandlerList HANDLERS = new HandlerList();
++
++        private final Object payload = new Object() {
++            @Override
++            public int hashCode() {
++                throw new AssertionError("non-MONITOR listener must not digest payload");
++            }
++        };
++
++        @Override
++        public HandlerList getHandlers() {
++            return HANDLERS;
++        }
++
++        public static HandlerList getHandlerList() {
++            return HANDLERS;
++        }
++    }
 +}
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
-index a8638b2b507cecac8ea0808651d2b864bf30d31e..e320bc4229ff63a1485870f233aa7e6794765e20 100644
+index a8638b2b507cecac8ea0808651d2b864bf30d31e..5d283861d99c3f54ac8d7156b65569b699116156 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
-@@ -47,6 +47,19 @@ class PluginCompatibilityProfileTest {
+@@ -47,6 +47,32 @@ class PluginCompatibilityProfileTest {
          Assertions.assertEquals(1L, profile.snapshot().refusals());
      }
  
@@ -3392,15 +4424,87 @@ index a8638b2b507cecac8ea0808651d2b864bf30d31e..e320bc4229ff63a1485870f233aa7e67
 +        Assertions.assertTrue(profile.snapshot().unsafeInternalViolations() >= 3L);
 +    }
 +
++    @Test
++    void ordinaryOrderedTransactionsDoNotEscalateProfile() {
++        final Plugin plugin = mockPlugin("LoomAware", "com.example.LoomAware", List.of(), List.of());
++        final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
++
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.NATIVE_LOOM_AWARE, profile.mode());
++
++        profile.noteOrderedTransaction();
++
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.NATIVE_LOOM_AWARE, profile.mode());
++        Assertions.assertEquals(1L, profile.snapshot().orderedTransactions());
++    }
++
      private static Plugin mockPlugin(
          final String name,
          final String mainClass,
-@@ -66,4 +79,4 @@ class PluginCompatibilityProfileTest {
+@@ -66,4 +92,4 @@ class PluginCompatibilityProfileTest {
          Mockito.when(plugin.isEnabled()).thenReturn(true);
          return plugin;
      }
 -}
 \ No newline at end of file
++}
+diff --git a/src/test/java/io/papermc/paper/util/KeepAliveTest.java b/src/test/java/io/papermc/paper/util/KeepAliveTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..99c26c98ff286572bf00855aff401e5e256ee696
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/util/KeepAliveTest.java
+@@ -0,0 +1,53 @@
++package io.papermc.paper.util;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import java.util.concurrent.TimeUnit;
++import org.junit.jupiter.api.Tag;
++import org.junit.jupiter.api.Test;
++
++@Tag("Normal")
++class KeepAliveTest {
++
++    @Test
++    void pingCalculatorHandlesConcurrentUpdates() throws Exception {
++        final KeepAlive.PingCalculator calculator = new KeepAlive.PingCalculator(TimeUnit.MINUTES.toNanos(1L));
++        final int threads = 4;
++        final int updatesPerThread = 1_000;
++        final long baseTime = System.nanoTime();
++        final CountDownLatch start = new CountDownLatch(1);
++        final ExecutorService executor = Executors.newFixedThreadPool(threads);
++        final List<Future<?>> futures = new ArrayList<>();
++
++        try {
++            for (int thread = 0; thread < threads; ++thread) {
++                final int threadId = thread;
++                futures.add(executor.submit(() -> {
++                    start.await();
++                    for (int update = 0; update < updatesPerThread; ++update) {
++                        final long tx = baseTime + (long)threadId * updatesPerThread + update;
++                        calculator.update(new KeepAlive.KeepAliveResponse(tx, tx + TimeUnit.MILLISECONDS.toNanos(1L)));
++                    }
++                    return null;
++                }));
++            }
++
++            start.countDown();
++
++            for (final Future<?> future : futures) {
++                future.get();
++            }
++        } finally {
++            executor.shutdownNow();
++        }
++
++        assertEquals(1, calculator.getAvgLatencyMS());
++        assertEquals(threads * updatesPerThread, calculator.getAllNS().size());
++    }
 +}
 diff --git a/src/test/java/org/bukkit/OwnershipRouterCompatibilityTest.java b/src/test/java/org/bukkit/OwnershipRouterCompatibilityTest.java
 new file mode 100644

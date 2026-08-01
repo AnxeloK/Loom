@@ -1,9 +1,276 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: anxelok <anxelok@localhost>
-Date: Wed, 10 Jun 2026 03:44:48 +0000
-Subject: [PATCH] Add tick section diagnostics
+Date: Tue, 9 Jun 2026 22:00:56 +0000
+Subject: [PATCH] Diagnose and control tick drains
 
+Measure chunk-loader and tick-start drain pressure, expose slow sections, and bound work that can consume a tick before world simulation begins.
 
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
+index 15c2d98a1cd6d56dabb4186cbe5e6fdc853774e6..c4fa7ec6c3f311c76c0239008b6e5908d3584d62 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
+@@ -388,6 +388,7 @@ public final class RegionizedPlayerChunkLoader {
+         if (diagnostics != null) {
+             diagnostics.tickNanos = System.nanoTime() - currTime;
+             phaseBudget.copyTo(diagnostics);
++            diagnostics.sampleChunkTickLists(this.world);
+             this.logDiagnostics(currTime, diagnostics);
+         }
+     }
+@@ -403,6 +404,7 @@ public final class RegionizedPlayerChunkLoader {
+                 "send_age_samples={} send_age_avg_ms={} send_age_max_ms={} post={} post_ms={} send_ms={} " +
+                 "budget_skips(load/gen/post/send)={}/{}/{}/{} " +
+                 "network(bp/not_writable/pending_writes/max_pending_writes/pending_bytes/max_pending_bytes)={}/{}/{}/{}/{}/{} " +
++                "chunk_lists(loaded/ticking/entity/player)={}/{}/{}/{} " +
+                 "queues(load/loading/gen/generating/send/ticking)={}/{}/{}/{}/{}/{}",
+             this.world.dimension(),
+             diagnostics.players,
+@@ -434,6 +436,10 @@ public final class RegionizedPlayerChunkLoader {
+             diagnostics.networkMaxPendingWrites,
+             diagnostics.networkPendingBytes,
+             diagnostics.networkMaxPendingBytes,
++            diagnostics.loadedChunks,
++            diagnostics.tickingChunks,
++            diagnostics.entityTickingChunks,
++            diagnostics.playerTickingChunks,
+             diagnostics.loadQueueSize,
+             diagnostics.loadingQueueSize,
+             diagnostics.genQueueSize,
+@@ -502,6 +508,10 @@ public final class RegionizedPlayerChunkLoader {
+         private long generatingQueueSize;
+         private long sendQueueSize;
+         private long tickingQueueSize;
++        private int loadedChunks;
++        private int tickingChunks;
++        private int entityTickingChunks;
++        private int playerTickingChunks;
+         private int networkPendingWrites;
+         private int networkMaxPendingWrites;
+         private int networkBackpressuredPlayers;
+@@ -529,6 +539,14 @@ public final class RegionizedPlayerChunkLoader {
+             this.tickingQueueSize += loader.tickingQueue.size();
+         }
+ 
++        private void sampleChunkTickLists(final ServerLevel world) {
++            final ChunkSystemServerLevel chunkSystemWorld = (ChunkSystemServerLevel)world;
++            this.loadedChunks = chunkSystemWorld.moonrise$getLoadedChunks().size();
++            this.tickingChunks = chunkSystemWorld.moonrise$getTickingChunks().size();
++            this.entityTickingChunks = chunkSystemWorld.moonrise$getEntityTickingChunks().size();
++            this.playerTickingChunks = ((ca.spottedleaf.moonrise.patches.chunk_tick_iteration.ChunkTickServerLevel)world).moonrise$getPlayerTickingChunks().size();
++        }
++
+         private void sampleNetwork(final boolean writable, final long pendingBytes, final int pendingWrites) {
+             if (!writable) {
+                 ++this.networkNotWritablePlayers;
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
+index e2fa3cfd9361880ff23dfb3e2935f7416e2a4647..9c31b02bc395989edaf79bb775da4877bf39d0d2 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
+@@ -65,6 +65,17 @@ import java.util.function.Consumer;
+ public final class ChunkTaskScheduler {
+ 
+     private static final Logger LOGGER = LogUtils.getClassLogger();
++    private static final int LOOM_TICK_START_CHUNK_TASK_MAX_TASKS = Math.max(
++        1,
++        Integer.getInteger("Loom.TickStartChunkTaskMaxTasks", 2)
++    );
++    private static final int LOOM_TICK_START_CHUNK_TASK_MIN_PROGRESS = Math.min(
++        LOOM_TICK_START_CHUNK_TASK_MAX_TASKS,
++        Math.max(1, Integer.getInteger("Loom.TickStartChunkTaskMinProgress", 1))
++    );
++    private static final long LOOM_TICK_START_CHUNK_TASK_BUDGET_NANOS = Long.getLong(
++        "Loom.TickStartChunkTaskBudgetNanos", 1_000_000L
++    );
+ 
+     public static final TicketType CHUNK_LOAD = ChunkSystemTicketType.create("chunk_system:chunk_load", Long::compareTo);
+     private static final AtomicLong CHUNK_LOAD_IDS = new AtomicLong();
+@@ -340,13 +351,28 @@ public final class ChunkTaskScheduler {
+ 
+     // run only tasks queued before this function was invoked
+     public void executeAllRecentlyQueuedMainThreadTasks() {
++        this.executeAllRecentlyQueuedMainThreadTasksCount();
++    }
++
++    // run only tasks queued before this function was invoked
++    public long executeAllRecentlyQueuedMainThreadTasksCount() {
+         // note: order of retrieval is important to avoid race conditions
+         final long executed = this.mainThreadExecutor.getTotalTasksExecuted();
+         final long scheduled = this.mainThreadExecutor.getTotalTasksScheduled();
+ 
+         final long left = scheduled - executed;
++        final long maxTasks = Math.min(left, LOOM_TICK_START_CHUNK_TASK_MAX_TASKS);
++        final boolean useBudget = LOOM_TICK_START_CHUNK_TASK_BUDGET_NANOS != Long.MAX_VALUE;
++        final long deadline = useBudget ? System.nanoTime() + Math.max(1L, LOOM_TICK_START_CHUNK_TASK_BUDGET_NANOS) : Long.MAX_VALUE;
+         // may execute more tasks than expected due to recursion
+-        for (long i = 0; i < left && this.mainThreadExecutor.executeTask(); ++i);
++        long ran = 0L;
++        for (long i = 0; i < maxTasks && this.mainThreadExecutor.executeTask(); ++i) {
++            ++ran;
++            if (useBudget && ran >= LOOM_TICK_START_CHUNK_TASK_MIN_PROGRESS && System.nanoTime() - deadline >= 0L) {
++                break;
++            }
++        }
++        return ran;
+     }
+ 
+     public void raisePriority(final int x, final int z, final Priority priority) {
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index b8ca941fcf03019c6ee2871ca1bf25914c34a70c..5fb98e98f87d03a472acba516b004ffd4c15c7de 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -210,6 +210,11 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         250_000L,
+         Long.getLong("Loom.PacketTickStartBudgetNanos", 2_000_000L)
+     );
++    private static final boolean LOOM_TICK_START_DRAIN_DIAGNOSTICS = Boolean.getBoolean("Loom.TickStartDrainDiagnostics");
++    private static final long LOOM_TICK_START_DRAIN_DIAGNOSTIC_INTERVAL_NANOS = Math.max(
++        1_000_000_000L,
++        Long.getLong("Loom.TickStartDrainDiagnosticIntervalNanos", 5_000_000_000L)
++    );
+     private static final long OVERLOADED_THRESHOLD_NANOS = 30L * TimeUtil.NANOSECONDS_PER_SECOND / 20L; // CraftBukkit
+     private static final int OVERLOADED_TICKS_THRESHOLD = 20;
+     private static final long OVERLOADED_WARNING_INTERVAL_NANOS = 10L * TimeUtil.NANOSECONDS_PER_SECOND;
+@@ -1233,9 +1238,97 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         private long nanos;
+     }
+ 
++    private long loomLastTickStartDrainDiagnosticNanos;
++    private long loomTickStartDrainDiagnosticTicks;
++    private long loomTickStartDrainWorlds;
++    private long loomTickStartDrainTicketUpdateNanos;
++    private long loomTickStartDrainTicketUpdateMaxNanos;
++    private long loomTickStartDrainLegacyTasks;
++    private long loomTickStartDrainLegacyTasksMax;
++    private long loomTickStartDrainLegacyTaskNanos;
++    private long loomTickStartDrainLegacyTaskMaxNanos;
++    private long loomTickStartDrainChunkTasks;
++    private long loomTickStartDrainChunkTasksMax;
++    private long loomTickStartDrainChunkTaskNanos;
++    private long loomTickStartDrainChunkTaskMaxNanos;
++
++    private static final class TickStartChunkDrain {
++        private int worlds;
++        private long ticketUpdateNanos;
++        private long legacyTasks;
++        private long legacyTaskNanos;
++        private long chunkTasks;
++        private long chunkTaskNanos;
++    }
++
++    private void recordTickStartChunkDrain(final TickStartChunkDrain drain) {
++        if (!LOOM_TICK_START_DRAIN_DIAGNOSTICS) {
++            return;
++        }
++
++        final long now = Util.getNanos();
++        if (this.loomLastTickStartDrainDiagnosticNanos == 0L) {
++            this.loomLastTickStartDrainDiagnosticNanos = now;
++        }
++
++        ++this.loomTickStartDrainDiagnosticTicks;
++        this.loomTickStartDrainWorlds += drain.worlds;
++        this.loomTickStartDrainTicketUpdateNanos += drain.ticketUpdateNanos;
++        this.loomTickStartDrainTicketUpdateMaxNanos = Math.max(this.loomTickStartDrainTicketUpdateMaxNanos, drain.ticketUpdateNanos);
++        this.loomTickStartDrainLegacyTasks += drain.legacyTasks;
++        this.loomTickStartDrainLegacyTasksMax = Math.max(this.loomTickStartDrainLegacyTasksMax, drain.legacyTasks);
++        this.loomTickStartDrainLegacyTaskNanos += drain.legacyTaskNanos;
++        this.loomTickStartDrainLegacyTaskMaxNanos = Math.max(this.loomTickStartDrainLegacyTaskMaxNanos, drain.legacyTaskNanos);
++        this.loomTickStartDrainChunkTasks += drain.chunkTasks;
++        this.loomTickStartDrainChunkTasksMax = Math.max(this.loomTickStartDrainChunkTasksMax, drain.chunkTasks);
++        this.loomTickStartDrainChunkTaskNanos += drain.chunkTaskNanos;
++        this.loomTickStartDrainChunkTaskMaxNanos = Math.max(this.loomTickStartDrainChunkTaskMaxNanos, drain.chunkTaskNanos);
++
++        if ((now - this.loomLastTickStartDrainDiagnosticNanos) < LOOM_TICK_START_DRAIN_DIAGNOSTIC_INTERVAL_NANOS) {
++            return;
++        }
++
++        final long ticks = Math.max(1L, this.loomTickStartDrainDiagnosticTicks);
++        LOGGER.info(
++            "[loom.tick-start-drain] ticks={} worlds={} ticket_ms(avg_tick/max_tick)={}/{} " +
++                "legacy_tasks(total/max_tick)={}/{} legacy_ms(avg_tick/max_tick)={}/{} " +
++                "chunk_tasks(total/max_tick)={}/{} chunk_ms(avg_tick/max_tick)={}/{}",
++            ticks,
++            this.loomTickStartDrainWorlds,
++            formatNanosAsMillis(this.loomTickStartDrainTicketUpdateNanos / ticks),
++            formatNanosAsMillis(this.loomTickStartDrainTicketUpdateMaxNanos),
++            this.loomTickStartDrainLegacyTasks,
++            this.loomTickStartDrainLegacyTasksMax,
++            formatNanosAsMillis(this.loomTickStartDrainLegacyTaskNanos / ticks),
++            formatNanosAsMillis(this.loomTickStartDrainLegacyTaskMaxNanos),
++            this.loomTickStartDrainChunkTasks,
++            this.loomTickStartDrainChunkTasksMax,
++            formatNanosAsMillis(this.loomTickStartDrainChunkTaskNanos / ticks),
++            formatNanosAsMillis(this.loomTickStartDrainChunkTaskMaxNanos)
++        );
++        this.loomLastTickStartDrainDiagnosticNanos = now;
++        this.loomTickStartDrainDiagnosticTicks = 0L;
++        this.loomTickStartDrainWorlds = 0L;
++        this.loomTickStartDrainTicketUpdateNanos = 0L;
++        this.loomTickStartDrainTicketUpdateMaxNanos = 0L;
++        this.loomTickStartDrainLegacyTasks = 0L;
++        this.loomTickStartDrainLegacyTasksMax = 0L;
++        this.loomTickStartDrainLegacyTaskNanos = 0L;
++        this.loomTickStartDrainLegacyTaskMaxNanos = 0L;
++        this.loomTickStartDrainChunkTasks = 0L;
++        this.loomTickStartDrainChunkTasksMax = 0L;
++        this.loomTickStartDrainChunkTaskNanos = 0L;
++        this.loomTickStartDrainChunkTaskMaxNanos = 0L;
++    }
++
++    private static String formatNanosAsMillis(final long nanos) {
++        return String.format(Locale.ROOT, "%.3f", (double)nanos / 1_000_000.0D);
++    }
++
+     private void runAllTasksAtTickStart() {
+         this.startMeasuringTaskExecutionTime();
+         final TickStartPacketDrain packetDrain = new TickStartPacketDrain();
++        final TickStartChunkDrain chunkDrain = LOOM_TICK_START_DRAIN_DIAGNOSTICS ? new TickStartChunkDrain() : null;
+ 
+         // note: To avoid possibly spinning forever, only execute tasks that are roughly available at the beginning
+         //       of this call. Packet processing and chunk system tasks are possibly always being queued.
+@@ -1271,11 +1364,30 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             try {
+                 // note: legacy tasks may expect a distance manager update
+                 profiler.push("moonrise:distance_manager_update");
++                final long ticketStart = chunkDrain == null ? 0L : Util.getNanos();
+                 ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)world).moonrise$getChunkTaskScheduler().chunkHolderManager.processTicketUpdates();
++                if (chunkDrain != null) {
++                    ++chunkDrain.worlds;
++                    chunkDrain.ticketUpdateNanos += Math.max(0L, Util.getNanos() - ticketStart);
++                }
+                 profiler.popPush("moonrise:legacy_chunk_tasks");
+-                world.getChunkSource().mainThreadProcessor.executeAllRecentInternalTasks();
++                if (chunkDrain == null) {
++                    world.getChunkSource().mainThreadProcessor.executeAllRecentInternalTasks();
++                } else {
++                    final long legacyStart = Util.getNanos();
++                    final int legacyTasks = world.getChunkSource().mainThreadProcessor.executeAllRecentInternalTasksCount();
++                    chunkDrain.legacyTasks += legacyTasks;
++                    chunkDrain.legacyTaskNanos += Math.max(0L, Util.getNanos() - legacyStart);
++                }
+                 profiler.popPush("moonrise:chunk_system_tasks");
+-                ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)world).moonrise$getChunkTaskScheduler().executeAllRecentlyQueuedMainThreadTasks();
++                if (chunkDrain == null) {
++                    ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)world).moonrise$getChunkTaskScheduler().executeAllRecentlyQueuedMainThreadTasks();
++                } else {
++                    final long chunkStart = Util.getNanos();
++                    final long chunkTasks = ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)world).moonrise$getChunkTaskScheduler().executeAllRecentlyQueuedMainThreadTasksCount();
++                    chunkDrain.chunkTasks += chunkTasks;
++                    chunkDrain.chunkTaskNanos += Math.max(0L, Util.getNanos() - chunkStart);
++                }
+                 profiler.pop();
+             } finally {
+                 net.minecraft.server.threading.TickRegions.popContext(tickStartContext);
+@@ -1287,6 +1399,9 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         profiler.pop(); // moonrise:run_all_chunk
+         profiler.pop(); // moonrise:run_all_tasks
+ 
++        if (chunkDrain != null) {
++            this.recordTickStartChunkDrain(chunkDrain);
++        }
+         this.recordTickStartPacketDrain(packetDrain);
+         this.finishMeasuringTaskExecutionTime();
+     }
 diff --git a/net/minecraft/server/level/LoomTickSectionDiagnostics.java b/net/minecraft/server/level/LoomTickSectionDiagnostics.java
 new file mode 100644
 index 0000000000000000000000000000000000000000..85da845af413754031e7ebfb94e2f7bd20412a22
@@ -490,3 +757,27 @@ index 697a070576fa0488787063fc1fb42d23e764a6c6..b2a915da2e09226ceef244cbf1eb6087
      }
  
      @Override
+diff --git a/net/minecraft/util/thread/BlockableEventLoop.java b/net/minecraft/util/thread/BlockableEventLoop.java
+index 5b0a515ca93eaa42ae9042d8a6cb43fd471fdb96..c65c7541dab5b9d92715fde50c17a83c7869e81a 100644
+--- a/net/minecraft/util/thread/BlockableEventLoop.java
++++ b/net/minecraft/util/thread/BlockableEventLoop.java
+@@ -40,6 +40,10 @@ public abstract class BlockableEventLoop<R extends Runnable> implements Executor
+ 
+     // Paper start
+     public final boolean executeAllRecentInternalTasks() {
++        return this.executeAllRecentInternalTasksCount() > 0;
++    }
++
++    public final int executeAllRecentInternalTasksCount() {
+         final int pending = this.pendingRunnables.size();
+ 
+         // note: due to possible recursive execution, we may execute more tasks than we want to
+@@ -56,7 +60,7 @@ public abstract class BlockableEventLoop<R extends Runnable> implements Executor
+             ++ran;
+         }
+ 
+-        return ran > 0;
++        return ran;
+     }
+ 
+     public boolean runTaskIf(final java.util.function.Predicate<? super R> predicate) {

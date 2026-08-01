@@ -1,11 +1,12 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: anxelok <anxelok@localhost>
-Date: Sat, 11 Jul 2026 11:11:30 +0000
-Subject: [PATCH] Isolate world mutation capture
+Date: Sat, 11 Jul 2026 00:17:59 +0000
+Subject: [PATCH] Confine parallel world state
 
+Move hopper, entity, transient, and captured-mutation state out of shared process fields so parallel world work remains isolated.
 
 diff --git a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
-index 4d35b23970b92b2dea28c3780b295cd2561a343d..2ba82e076f30359585a4c76a272a9634c9e053d4 100644
+index d149bf927c61b7844443cd67c9863aa529d218e4..2ba82e076f30359585a4c76a272a9634c9e053d4 100644
 --- a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
 +++ b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
 @@ -4,6 +4,7 @@ import net.minecraft.core.BlockPos;
@@ -16,17 +17,50 @@ index 4d35b23970b92b2dea28c3780b295cd2561a343d..2ba82e076f30359585a4c76a272a9634
  import net.minecraft.world.phys.AABB;
  import net.minecraft.world.phys.Vec3;
  import org.slf4j.Logger;
-@@ -122,6 +123,10 @@ public class TickThread extends Thread {
-     public boolean skipHopperPushEvents;
-     public boolean suppressBlockEntityUpdates;
+@@ -116,6 +117,22 @@ public class TickThread extends Thread {
+     // line in the hottest entity path.
+     public volatile Entity currentlyTickingEntity;
  
++    // Loom - transient hopper state is confined to the tick thread running the operation. Upstream's
++    // process-wide flags race when independent owner regions move items concurrently.
++    public boolean skipHopperPullEvents;
++    public boolean skipHopperPushEvents;
++    public boolean suppressBlockEntityUpdates;
++
 +    // Loom - the top world-mutation capture operation for this physical tick thread. Frames carry their
 +    // exact level identity and form a reentrant stack, so independent owner domains never share capture state.
 +    public LevelCaptureContext.Frame levelCaptureContext;
 +
-     // Loom - one entity RNG per physical tick thread keeps Paper's shared-per-thread memory profile without
-     // racing every parallel entity on one ThreadUnsafeRandom seed and Gaussian cache.
-     public final ThreadUnsafeRandom entityRandom = new ThreadUnsafeRandom(
++    // Loom - one entity RNG per physical tick thread keeps Paper's shared-per-thread memory profile without
++    // racing every parallel entity on one ThreadUnsafeRandom seed and Gaussian cache.
++    public final ThreadUnsafeRandom entityRandom = new ThreadUnsafeRandom(
++        net.minecraft.world.level.levelgen.RandomSupport.generateUniqueSeed()
++    );
++
+     public TickThread(final String name) {
+         this(null, name);
+     }
+diff --git a/src/main/java/io/papermc/paper/entity/activation/ActivationType.java b/src/main/java/io/papermc/paper/entity/activation/ActivationType.java
+index 39fd663c2e95feea4db424b48f095d5fff20e209..86ef887701c18fa863715cedc0606d5a2ce0de17 100644
+--- a/src/main/java/io/papermc/paper/entity/activation/ActivationType.java
++++ b/src/main/java/io/papermc/paper/entity/activation/ActivationType.java
+@@ -11,7 +11,6 @@ import net.minecraft.world.entity.monster.Ghast;
+ import net.minecraft.world.entity.monster.Phantom;
+ import net.minecraft.world.entity.npc.villager.Villager;
+ import net.minecraft.world.entity.raid.Raider;
+-import net.minecraft.world.phys.AABB;
+ 
+ public enum ActivationType {
+     WATER,
+@@ -22,8 +21,6 @@ public enum ActivationType {
+     RAIDER,
+     MISC;
+ 
+-    AABB boundingBox = new AABB(0, 0, 0, 0, 0, 0);
+-
+     /**
+      * Returns the activation type for the given entity.
+      *
 diff --git a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
 index f3f068011abd8c6585463169d50634bf42a09497..a8177556da60a7a998c1ba23869b3a62f4ac2539 100644
 --- a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
@@ -181,6 +215,187 @@ index afbf9c70f69b02e7b92a8382aa9fb9f1132b7bf8..34cefbdfd76519724a8e861c19d06d7e
      }
  
      @Override
+diff --git a/src/main/java/org/bukkit/craftbukkit/block/CraftBlockEntityState.java b/src/main/java/org/bukkit/craftbukkit/block/CraftBlockEntityState.java
+index 1ef1943c9934400e40c3c060299c98659709a5cc..f441923163e88d58dead8b4342f7da77b042081f 100644
+--- a/src/main/java/org/bukkit/craftbukkit/block/CraftBlockEntityState.java
++++ b/src/main/java/org/bukkit/craftbukkit/block/CraftBlockEntityState.java
+@@ -34,6 +34,26 @@ public abstract class CraftBlockEntityState<T extends BlockEntity> extends Craft
+     private final T snapshot;
+     public boolean snapshotDisabled; // Paper
+     public static boolean DISABLE_SNAPSHOT = false; // Paper
++    private static final ThreadLocal<Boolean> SCOPED_SNAPSHOT_DISABLED = new ThreadLocal<>(); // Loom - confine internal snapshot scopes
++
++    static @Nullable Boolean setScopedSnapshotDisabled(final boolean disabled) {
++        final Boolean previous = SCOPED_SNAPSHOT_DISABLED.get();
++        SCOPED_SNAPSHOT_DISABLED.set(disabled);
++        return previous;
++    }
++
++    static void restoreScopedSnapshotDisabled(final @Nullable Boolean previous) {
++        if (previous == null) {
++            SCOPED_SNAPSHOT_DISABLED.remove();
++        } else {
++            SCOPED_SNAPSHOT_DISABLED.set(previous);
++        }
++    }
++
++    private static boolean isSnapshotDisabled() {
++        final Boolean scoped = SCOPED_SNAPSHOT_DISABLED.get();
++        return scoped != null ? scoped : DISABLE_SNAPSHOT;
++    }
+ 
+     public CraftBlockEntityState(World world, T blockEntity) {
+         super(world, blockEntity.getBlockPos(), blockEntity.getBlockState());
+@@ -42,8 +62,9 @@ public abstract class CraftBlockEntityState<T extends BlockEntity> extends Craft
+ 
+         try { // Paper - Show blockstate location if we failed to read it
+         // Paper start
+-        this.snapshotDisabled = DISABLE_SNAPSHOT;
+-        if (DISABLE_SNAPSHOT) {
++        final boolean snapshotDisabled = isSnapshotDisabled(); // Loom - one consistent scoped read
++        this.snapshotDisabled = snapshotDisabled;
++        if (snapshotDisabled) {
+             this.snapshot = this.blockEntity;
+         } else {
+             this.snapshot = this.createSnapshot(blockEntity);
+diff --git a/src/main/java/org/bukkit/craftbukkit/block/CraftBlockStates.java b/src/main/java/org/bukkit/craftbukkit/block/CraftBlockStates.java
+index 6dcfe2cea0acf6100163ef8a097bd27cd34aa6f4..c97cfa828f46c13f4aa27e11db575c546d0a225a 100644
+--- a/src/main/java/org/bukkit/craftbukkit/block/CraftBlockStates.java
++++ b/src/main/java/org/bukkit/craftbukkit/block/CraftBlockStates.java
+@@ -197,14 +197,13 @@ public final class CraftBlockStates {
+         BlockPos pos = craftBlock.getPosition();
+         net.minecraft.world.level.block.state.BlockState state = craftBlock.getBlockState();
+         BlockEntity blockEntity = craftBlock.getLevel().getBlockEntity(pos);
+-        boolean prev = CraftBlockEntityState.DISABLE_SNAPSHOT;
+-        CraftBlockEntityState.DISABLE_SNAPSHOT = !useSnapshot;
++        final Boolean previous = CraftBlockEntityState.setScopedSnapshotDisabled(!useSnapshot);
+         try {
+             CraftBlockState blockState = CraftBlockStates.getBlockState(world, pos, state, blockEntity);
+             blockState.setWorldHandle(craftBlock.getLevel()); // Inject the block's level accessor
+             return blockState;
+         } finally {
+-            CraftBlockEntityState.DISABLE_SNAPSHOT = prev;
++            CraftBlockEntityState.restoreScopedSnapshotDisabled(previous);
+         }
+     }
+ 
+diff --git a/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java b/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
+index a5ea91906abebf44cfbfa120c535b8c391ab1acd..85657793c21bcb8bae589d47f844737934e31aee 100644
+--- a/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
++++ b/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
+@@ -932,6 +932,21 @@ public class CraftEventFactory {
+     }
+ 
+     public static BlockPos sourceBlockOverride = null; // SPIGOT-7068: Add source block override, not the most elegant way but better than passing down a BlockPos up to five methods deep.
++    private static final ThreadLocal<BlockPos> SCOPED_SOURCE_BLOCK_OVERRIDE = new ThreadLocal<>(); // Loom - confine internal source scopes
++
++    public static @Nullable BlockPos setScopedSourceBlockOverride(final BlockPos source) {
++        final BlockPos previous = SCOPED_SOURCE_BLOCK_OVERRIDE.get();
++        SCOPED_SOURCE_BLOCK_OVERRIDE.set(source);
++        return previous;
++    }
++
++    public static void restoreScopedSourceBlockOverride(final @Nullable BlockPos previous) {
++        if (previous == null) {
++            SCOPED_SOURCE_BLOCK_OVERRIDE.remove();
++        } else {
++            SCOPED_SOURCE_BLOCK_OVERRIDE.set(previous);
++        }
++    }
+ 
+     public static boolean handleBlockSpreadEvent(LevelAccessor level, BlockPos source, BlockPos target, net.minecraft.world.level.block.state.BlockState state, @net.minecraft.world.level.block.Block.UpdateFlags int flags) {
+         return handleBlockSpreadEvent(level, source, target, state, flags, false);
+@@ -947,7 +962,10 @@ public class CraftEventFactory {
+         CraftBlockState snapshot = CraftBlockStates.getBlockState(level, target);
+         snapshot.setBlock(state);
+ 
+-        BlockSpreadEvent event = new BlockSpreadEvent(snapshot.getBlock(), CraftBlock.at(level, CraftEventFactory.sourceBlockOverride != null ? CraftEventFactory.sourceBlockOverride : source), snapshot);
++        final BlockPos scopedSource = SCOPED_SOURCE_BLOCK_OVERRIDE.get();
++        final BlockPos globalSource = CraftEventFactory.sourceBlockOverride;
++        final BlockPos effectiveSource = scopedSource != null ? scopedSource : (globalSource != null ? globalSource : source);
++        BlockSpreadEvent event = new BlockSpreadEvent(snapshot.getBlock(), CraftBlock.at(level, effectiveSource), snapshot);
+         if (event.callEvent()) {
+             boolean result = snapshot.place(flags);
+             return !checkSetResult || result;
+@@ -2344,7 +2362,7 @@ public class CraftEventFactory {
+ 
+     }
+ 
+-    private static BlockLockCheckEvent LAST_BLOCK_LOCK_CHECK_EVENT = null;
++    private static final ThreadLocal<BlockLockCheckEvent> LAST_BLOCK_LOCK_CHECK_EVENT = new ThreadLocal<>();
+ 
+     public static boolean callBlockLockCheckEvent(
+         BlockEntity blockEntity,
+@@ -2352,6 +2370,7 @@ public class CraftEventFactory {
+         Component displayName,
+         net.minecraft.world.entity.player.Player p
+     ) {
++        LAST_BLOCK_LOCK_CHECK_EVENT.remove();
+         if (p instanceof net.minecraft.server.level.ServerPlayer player
+             && blockEntity != null
+             && blockEntity.getLevel() != null
+@@ -2364,7 +2383,7 @@ public class CraftEventFactory {
+             if (event.getResult() == org.bukkit.event.Event.Result.ALLOW) {
+                 return true;
+             } else if (event.getResult() == org.bukkit.event.Event.Result.DENY || !code.canUnlock(player, event.isUsingCustomKeyItemStack() ? org.bukkit.craftbukkit.inventory.CraftItemStack.asNMSCopy(event.getKeyItem()) : player.getMainHandItem())) {
+-                LAST_BLOCK_LOCK_CHECK_EVENT = event;
++                LAST_BLOCK_LOCK_CHECK_EVENT.set(event);
+                 return false;
+             }
+         }
+@@ -2372,9 +2391,9 @@ public class CraftEventFactory {
+     }
+ 
+     public static boolean sendChestLockedNotifications(Vec3 pos) {
+-        if (LAST_BLOCK_LOCK_CHECK_EVENT != null) {
+-            final io.papermc.paper.event.block.BlockLockCheckEvent event = LAST_BLOCK_LOCK_CHECK_EVENT;
+-            LAST_BLOCK_LOCK_CHECK_EVENT = null;
++        final io.papermc.paper.event.block.BlockLockCheckEvent event = LAST_BLOCK_LOCK_CHECK_EVENT.get();
++        if (event != null) {
++            LAST_BLOCK_LOCK_CHECK_EVENT.remove();
+             if (event.getLockedMessage() != null) {
+                 event.getPlayer().sendActionBar(event.getLockedMessage());
+             }
+diff --git a/src/main/java/org/spigotmc/SpigotWorldConfig.java b/src/main/java/org/spigotmc/SpigotWorldConfig.java
+index 339832e312578ee385bbf3c9d5c131435abe7d7a..645788445a1da7df09340bd066e08774d12eb609 100644
+--- a/src/main/java/org/spigotmc/SpigotWorldConfig.java
++++ b/src/main/java/org/spigotmc/SpigotWorldConfig.java
+@@ -1,6 +1,7 @@
+ package org.spigotmc;
+ 
+ import java.util.List;
++import java.util.concurrent.atomic.AtomicInteger;
+ 
+ import net.kyori.adventure.key.Key;
+ import org.bukkit.Bukkit;
+@@ -406,8 +407,26 @@ public class SpigotWorldConfig {
+         this.otherMultiplier = (float) this.getDouble("hunger.other-multiplier", 0.0);
+     }
+ 
+-    public int currentPrimedTnt = 0;
++    public final AtomicInteger currentPrimedTnt = new AtomicInteger();
+     public int maxTntTicksPerTick;
++
++    // Loom - the TNT budget is consumed concurrently by region-owned entity ticks. Saturating at the limit
++    // preserves the exact cap without continuing to write one contended cache line after the budget is gone.
++    public boolean acquirePrimedTntTick() {
++        final int limit = this.maxTntTicksPerTick;
++        if (limit <= 0) {
++            return true;
++        }
++
++        int used;
++        while ((used = this.currentPrimedTnt.get()) < limit) {
++            if (this.currentPrimedTnt.compareAndSet(used, used + 1)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
+     private void maxTntPerTick() {
+         if (SpigotConfig.version < 7) {
+             this.set("max-tnt-per-tick", 100);
 diff --git a/src/test/java/net/minecraft/world/level/LevelCaptureContextTest.java b/src/test/java/net/minecraft/world/level/LevelCaptureContextTest.java
 new file mode 100644
 index 0000000000000000000000000000000000000000..e49550b236e8c5ed6f83fd19d9717441dbcc71a4

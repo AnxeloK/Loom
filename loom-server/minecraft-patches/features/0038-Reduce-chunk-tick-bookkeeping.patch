@@ -1,9 +1,106 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: anxelok <anxelok@localhost>
-Date: Sun, 12 Jul 2026 20:33:48 +0000
-Subject: [PATCH] Cache stable chunk tick plans
+Date: Sun, 12 Jul 2026 19:29:51 +0000
+Subject: [PATCH] Reduce chunk tick bookkeeping
 
+Reuse palette buffers, cache stable tick plans, and use primitive proximity checks to reduce repeated chunk-tick setup work.
 
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+index 3e540926d9cdc773a5f4030d2c68f675fca94137..3e6b05efce804e012e281dddb48f010d169e0a16 100644
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -703,7 +703,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+     }
+ 
+     // Paper start - optimise chunk tick iteration
+-    private boolean isChunkNearPlayer(final ChunkMap chunkMap, final ChunkPos chunkPos, final LevelChunk levelChunk) {
++    private boolean isChunkNearPlayer(final LevelChunk levelChunk) {
+         final ca.spottedleaf.moonrise.patches.chunk_system.level.chunk.ChunkData chunkData = ((ca.spottedleaf.moonrise.patches.chunk_system.level.chunk.ChunkSystemLevelChunk)levelChunk).moonrise$getChunkHolder().holderData;
+         final ca.spottedleaf.moonrise.common.misc.NearbyPlayers.TrackedChunk nearbyPlayers = chunkData.nearbyPlayers;
+         if (nearbyPlayers == null) {
+@@ -729,7 +729,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+                 continue;
+             }
+             double blockRange = (double) ((event.getSpawnRadius() << 4) * (event.getSpawnRadius() << 4));
+-            if (chunkMap.playerIsCloseEnoughForSpawning(raw[i], chunkPos, blockRange)) {
++            if (this.playerIsCloseEnoughForSpawning(raw[i], levelChunk.locX, levelChunk.locZ, blockRange)) {
+                 // Paper end - PlayerNaturallySpawnCreaturesEvent
+                 return true;
+             }
+@@ -750,7 +750,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+         for (int i = 0; i < size; ++i) {
+             final LevelChunk levelChunk = raw[i];
+ 
+-            if (!this.isChunkNearPlayer((ChunkMap)(Object)this, levelChunk.getPos(), levelChunk)) {
++            if (!this.isChunkNearPlayer(levelChunk)) {
+                 continue;
+             }
+ 
+@@ -783,10 +783,23 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+     }
+ 
+     public boolean anyPlayerCloseEnoughTo(final BlockPos pos, final int maxDistance) {
+-        Vec3 target = new Vec3(pos);
++        if (maxDistance <= 0) {
++            return false;
++        }
++        final double targetX = pos.getX();
++        final double targetY = pos.getY();
++        final double targetZ = pos.getZ();
++        final double maxDistanceSquared = (double)maxDistance * (double)maxDistance;
+ 
+         for (ServerPlayer player : this.playerMap.getAllPlayers()) {
+-            if (this.playerIsCloseEnoughTo(player, target, maxDistance)) {
++            if (player.isSpectator()) {
++                continue;
++            }
++            final Vec3 playerPos = player.position();
++            final double deltaX = playerPos.x - targetX;
++            final double deltaY = playerPos.y - targetY;
++            final double deltaZ = playerPos.z - targetZ;
++            if (deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ < maxDistanceSquared) {
+                 return true;
+             }
+         }
+@@ -866,26 +879,26 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+     }
+ 
+     public boolean playerIsCloseEnoughForSpawning(final ServerPlayer player, final ChunkPos pos, final double range) { // Spigot // Paper - chunk tick iteration optimisation - public
+-        if (player.isSpectator()) {
+-            return false;
+-        }
+-
+-        double distanceToChunk = euclideanDistanceSquared(pos, player.position());
+-        return distanceToChunk < range; // Spigot
++        return this.playerIsCloseEnoughForSpawning(player, pos.x(), pos.z(), range);
+     }
+ 
+-    private boolean playerIsCloseEnoughTo(final ServerPlayer player, final Vec3 pos, final int maxDistance) {
++    private boolean playerIsCloseEnoughForSpawning(
++        final ServerPlayer player,
++        final int chunkX,
++        final int chunkZ,
++        final double range
++    ) {
+         if (player.isSpectator()) {
+             return false;
+         }
+ 
+-        double distanceToPos = player.position().distanceTo(pos);
+-        return distanceToPos < maxDistance;
++        double distanceToChunk = euclideanDistanceSquared(chunkX, chunkZ, player.position());
++        return distanceToChunk < range; // Spigot
+     }
+ 
+-    private static double euclideanDistanceSquared(final ChunkPos chunkPos, final Vec3 pos) {
+-        double xPos = SectionPos.sectionToBlockCoord(chunkPos.x(), 8);
+-        double zPos = SectionPos.sectionToBlockCoord(chunkPos.z(), 8);
++    private static double euclideanDistanceSquared(final int chunkX, final int chunkZ, final Vec3 pos) {
++        double xPos = (double)(chunkX << 4) + 8.0;
++        double zPos = (double)(chunkZ << 4) + 8.0;
+         double xd = xPos - pos.x;
+         double zd = zPos - pos.z;
+         return xd * xd + zd * zd;
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
 index a8ec8aca965346f5a8b147ed7889bc9350a5733e..dd7e1fb84788d159b7be4dc830f7662d041c2ce9 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
@@ -217,3 +314,114 @@ index a8ec8aca965346f5a8b147ed7889bc9350a5733e..dd7e1fb84788d159b7be4dc830f7662d
      }
  
      private void tickChunksSerially(final LevelChunk[] chunks, final int size, final ServerLevel world, final int randomTickSpeed) {
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 88e64c6d8ba1bf231368a212d3dd08f74461de86..2a5c024b2b40a9f78e91b7bd0c676ae36622ca4f 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1054,9 +1054,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         final net.minecraft.util.RandomSource simpleRandom = net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom);
+         final boolean doubleTickFluids = !ca.spottedleaf.moonrise.common.PlatformHooks.get().configFixMC224294();
+ 
+-        final ChunkPos cpos = chunk.getPos();
+-        final int offsetX = cpos.x() << 4;
+-        final int offsetZ = cpos.z() << 4;
++        final int offsetX = chunk.locX << 4;
++        final int offsetZ = chunk.locZ << 4;
+ 
+         for (int sectionIndex = 0, sectionsLen = sections.length; sectionIndex < sectionsLen; sectionIndex++) {
+             final int offsetY = (sectionIndex + minSection) << 4;
+@@ -1099,9 +1098,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+ 
+     public void tickChunk(final LevelChunk chunk, final int tickSpeed) {
+         final net.minecraft.util.RandomSource simpleRandom = net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom); // Loom - per-domain RNG (was this.simpleRandom; torn seed under parallel ticking)
+-        ChunkPos chunkPos = chunk.getPos();
+-        int minX = chunkPos.getMinBlockX();
+-        int minZ = chunkPos.getMinBlockZ();
++        int minX = chunk.locX << 4;
++        int minZ = chunk.locZ << 4;
+         ProfilerFiller profiler = Profiler.get();
+         profiler.push("iceandsnow");
+ 
+@@ -1122,10 +1120,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     }
+ 
+     public void tickThunder(final LevelChunk chunk) {
+-        ChunkPos chunkPos = chunk.getPos();
+         boolean raining = this.isRaining();
+-        int minX = chunkPos.getMinBlockX();
+-        int minZ = chunkPos.getMinBlockZ();
++        int minX = chunk.locX << 4;
++        int minZ = chunk.locZ << 4;
+         ProfilerFiller profiler = Profiler.get();
+         profiler.push("thunder");
+         if (!this.paperConfig().environment.disableThunder && raining && this.isThundering() && this.spigotConfig.thunderChance > 0 && this.random.nextInt(this.spigotConfig.thunderChance) == 0) { // Spigot // Paper - Option to disable thunder
+diff --git a/net/minecraft/world/level/chunk/PalettedContainer.java b/net/minecraft/world/level/chunk/PalettedContainer.java
+index 26dbb9da7a7f50ec913b1226eff9e9ce6b4f3f12..9022152c70ebc77ae43dd3de6b86587b3caaaeac 100644
+--- a/net/minecraft/world/level/chunk/PalettedContainer.java
++++ b/net/minecraft/world/level/chunk/PalettedContainer.java
+@@ -24,6 +24,10 @@ import org.jspecify.annotations.Nullable;
+ 
+ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainerRO<T> {
+     private static final int MIN_PALETTE_BITS = 0;
++    // Loom - packing a chunk section previously allocated a 4096-entry int array for every palette.
++    // Save workers consume this scratch array synchronously while holding the container lock, so one
++    // buffer per worker avoids the allocation without retaining or sharing serialized state.
++    private static final ThreadLocal<int[]> PACK_REENCODE_BUFFER = ThreadLocal.withInitial(() -> new int[4096]);
+     public volatile PalettedContainer.Data<T> data; // Paper - optimise collisions - public
+     private final Strategy<T> strategy;
+     private final T @Nullable [] presetValues; // Paper - Anti-Xray - Add preset values
+@@ -332,7 +336,8 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
+                     Palette<T> oldPalette = new HashMapPalette<>(bitsOnDisc, paletteEntries);
+                     SimpleBitStorage oldStorage = new SimpleBitStorage(bitsOnDisc, entryCount, data);
+                     Palette<T> newPalette = storedConfiguration.createPalette(strategy, paletteEntries);
+-                    int[] newContents = reencodeContents(oldStorage, oldPalette, newPalette);
++                    int[] newContents = new int[oldStorage.getSize()];
++                    reencodeContents(oldStorage, oldPalette, newPalette, newContents);
+                     palette = newPalette;
+                     storage = new SimpleBitStorage(storedConfiguration.bitsInMemory(), entryCount, newContents);
+                 }
+@@ -353,7 +358,12 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
+             Palette<T> currentPalette = this.data.palette;
+             HashMapPalette<T> newPalette = new HashMapPalette<>(currentStorage.getBits());
+             int entryCount = strategy.entryCount();
+-            int[] newContents = reencodeContents(currentStorage, currentPalette, newPalette);
++            int[] newContents = PACK_REENCODE_BUFFER.get();
++            if (newContents.length < currentStorage.getSize()) {
++                newContents = new int[currentStorage.getSize()];
++                PACK_REENCODE_BUFFER.set(newContents);
++            }
++            reencodeContents(currentStorage, currentPalette, newPalette, newContents);
+             Configuration storedConfiguration = strategy.getConfigurationForPaletteSize(newPalette.getSize());
+             int bitsOnDisc = storedConfiguration.bitsInStorage();
+             Optional<LongStream> values;
+@@ -370,14 +380,18 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
+         }
+     }
+ 
+-    private static <T> int[] reencodeContents(final BitStorage storage, final Palette<T> oldPalette, final Palette<T> newPalette) {
+-        int[] buffer = new int[storage.getSize()];
++    private static <T> void reencodeContents(
++        final BitStorage storage,
++        final Palette<T> oldPalette,
++        final Palette<T> newPalette,
++        final int[] buffer
++    ) {
+         storage.unpack(buffer);
+         PaletteResize<T> dummyResizer = PaletteResize.noResizeExpected();
+         int lastReadId = -1;
+         int lastWrittenId = -1;
+ 
+-        for (int index = 0; index < buffer.length; index++) {
++        for (int index = 0, len = storage.getSize(); index < len; index++) {
+             int id = buffer[index];
+             if (id != lastReadId) {
+                 lastReadId = id;
+@@ -386,8 +400,6 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
+ 
+             buffer[index] = lastWrittenId;
+         }
+-
+-        return buffer;
+     }
+ 
+     @Override

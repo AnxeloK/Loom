@@ -1,9 +1,9 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: anxelok <anxelok@localhost>
-Date: Sun, 12 Jul 2026 10:49:40 +0000
-Subject: [PATCH] Run saves as owner continuations
+Date: Sat, 11 Jul 2026 21:11:32 +0000
+Subject: [PATCH] Route lifecycle work through owners
 
-Capture mutable player and saved-data state inside its owner domain, then write immutable snapshots through asynchronous I/O. Save commands now complete through a finite region I/O barrier instead of blocking the lifecycle owner or waiting for unrelated future writes.
+Run shutdown and save continuations inside their lifecycle and world owners instead of bypassing owner-domain ordering.
 
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/io/ChunkSystemRegionFileStorage.java b/ca/spottedleaf/moonrise/patches/chunk_system/io/ChunkSystemRegionFileStorage.java
 index a814512fcfb85312474ae2c2c21443843bf57831..1d7cba490e4024a192503711963684c78fcd3926 100644
@@ -166,7 +166,7 @@ index 3bb9b58ee97464687e348e23b99159226415c267..997dcfda4407977c932e034eb8bf239c
              return this.inProgressTasks.get() != 0L;
          }
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 084353670c8be6a0438914d476af7abd630142e9..81f10744a0fcf32a750b07feec863c18bac0350c 100644
+index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..81f10744a0fcf32a750b07feec863c18bac0350c 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -36,6 +36,7 @@ import java.util.Map.Entry;
@@ -215,7 +215,7 @@ index 084353670c8be6a0438914d476af7abd630142e9..81f10744a0fcf32a750b07feec863c18
      // Paper start - split out global level data
      public void saveGlobalData(final boolean flush) {
          this.scoreboard.storeToSaveDataIfDirty(this.getDataStorage().computeIfAbsent(ScoreboardSaveData.TYPE));
-@@ -1018,15 +1024,130 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1018,16 +1024,131 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
  
      public boolean saveEverything(final boolean silent, final boolean flush, final boolean force) {
          try {
@@ -286,7 +286,7 @@ index 084353670c8be6a0438914d476af7abd630142e9..81f10744a0fcf32a750b07feec863c18
 +            }
 +        } catch (final Throwable throwable) {
 +            schedulingFailure = throwable;
-+        }
+         }
 +
 +        final boolean saveResult = savedAny;
 +        final Throwable initialFailure = schedulingFailure;
@@ -302,8 +302,8 @@ index 084353670c8be6a0438914d476af7abd630142e9..81f10744a0fcf32a750b07feec863c18
 +                result.completeExceptionally(failure == null ? rejected : failure);
 +            }
 +        });
-+    }
-+
+     }
+ 
 +    private void completeAsyncSave(
 +        final List<ServerLevel> levels,
 +        final boolean flush,
@@ -342,12 +342,13 @@ index 084353670c8be6a0438914d476af7abd630142e9..81f10744a0fcf32a750b07feec863c18
 +        if (remaining < 0) {
 +            this.activeSaveOperations.set(0);
 +            throw new IllegalStateException("Save operation accounting underflow");
-         }
-     }
++        }
++    }
 +    // Loom end - owner-domain save transaction
- 
++
      @Override
      public void close() {
+         this.stopServer();
 @@ -1070,7 +1191,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          }
          // CraftBukkit end
@@ -413,7 +414,24 @@ index 084353670c8be6a0438914d476af7abd630142e9..81f10744a0fcf32a750b07feec863c18
          }
          Profiler.get().pop();
          // Paper end - Incremental chunk and player saving
-@@ -3061,7 +3204,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2449,6 +2592,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         return super.scheduleExecutables() && !this.isStopped();
+     }
+ 
++    public boolean enqueueGlobalOwnerTask(final Runnable command) {
++        if (this.isStopped() || this.hasStopped()) {
++            return false;
++        }
++        // Owner handoffs must never use Executor.execute here: BlockableEventLoop executes inline after
++        // shutdown begins, which would attach a GLOBAL_CONTROL token to the submitting thread.
++        this.schedule(new TickTask(this.tickTaskTickCount.get(), command));
++        return true;
++    }
++
+     @Override
+     public void executeIfPossible(final Runnable command) {
+         if (this.isStopped()) {
+@@ -3051,7 +3204,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      }
  
      public boolean isCurrentlySaving() {
@@ -508,7 +526,7 @@ index 299991905c24a7018f8ac60d0c16e56fa43cd710..315622400592063d7dcf90bd5ed9e944
      }
  }
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index f93a12c8e49d7d4da7ea7ddc622b29b711bc07d8..23058ff83012f0d1d6c80abdac76ca71db1f0f03 100644
+index d114bf9e3e82bcb528b12e1c768c53b9b8a6de2e..23058ff83012f0d1d6c80abdac76ca71db1f0f03 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
 @@ -3,6 +3,7 @@ package net.minecraft.server.players;
@@ -559,10 +577,10 @@ index f93a12c8e49d7d4da7ea7ddc622b29b711bc07d8..23058ff83012f0d1d6c80abdac76ca71
 +    private void writePlayerSave(final CapturedPlayerSave captured) {
 +        if (captured.playerData() != null) {
 +            this.playerIo.writeSave(captured.playerData());
-         }
++        }
 +        if (captured.stats() != null && captured.statsData() != null) {
 +            captured.stats().writeSave(captured.statsData());
-+        }
+         }
 +        if (captured.advancements() != null && captured.advancementData() != null) {
 +            captured.advancements().writeSave(captured.advancementData());
 +        }
@@ -617,6 +635,73 @@ index f93a12c8e49d7d4da7ea7ddc622b29b711bc07d8..23058ff83012f0d1d6c80abdac76ca71
  
      public net.kyori.adventure.text.@Nullable Component remove(final ServerPlayer player) { // CraftBukkit - return string // Paper - return Component
          // Paper start - Fix kick event leave message not being sent
+@@ -1174,20 +1238,41 @@ public abstract class PlayerList {
+     }
+     public void saveAll(final int interval) {
+         // Paper end - Incremental chunk and player saving
+-        io.papermc.paper.util.MCUtil.ensureMain("Save Players" , () -> { // Paper - Ensure main
++        // Loom - the global player list must only be traversed by the lifecycle owner. A void API can
++        // hand off without blocking its caller; lifecycle/autosave calls already hold GLOBAL_CONTROL and
++        // retain their synchronous behavior. This replaces Paper's processQueue + Waitable round trip,
++        // which deadlocks when shutdown is initiated after the server thread has stalled.
++        if (!net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this.server)) {
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this.server, "save-all-players"),
++                () -> this.saveAllOwned(interval)
++            );
++            return;
++        }
++        this.saveAllOwned(interval);
++    }
++
++    private void saveAllOwned(final int interval) {
+         // Paper start - Incremental chunk and player saving
+-            int numSaved = 0;
+-            final long now = DomainClock.currentServerTick(this.server);
+-            for (final ServerPlayer player : this.players) {
+-            if (interval == -1 || now - player.lastSave >= interval) {
+-                this.save(player);
+-                if (interval != -1 && ++numSaved >= io.papermc.paper.configuration.GlobalConfiguration.get().playerAutoSave.maxPerTick()) {
+-                    break;
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "save-all-players");
++        int numSaved = 0;
++        final long now = DomainClock.currentServerTick(this.server);
++        for (final ServerPlayer player : this.players) {
++            boolean saved = false;
++            try (net.minecraft.server.threading.runtime.OwnerDomainExecutor.Scope ignored =
++                     net.minecraft.server.threading.runtime.OwnerDomainExecutor.enter(
++                         net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "save-player")
++                     )) {
++                if (interval == -1 || now - player.lastSave >= interval) {
++                    this.save(player);
++                    saved = true;
+                 }
+             }
++            if (saved && interval != -1 && ++numSaved >= io.papermc.paper.configuration.GlobalConfiguration.get().playerAutoSave.maxPerTick()) {
++                break;
+             }
++        }
+         // Paper end - Incremental chunk and player saving
+-        return null; }); // Paper - ensure main
+     }
+ 
+     public UserWhiteList getWhiteList() {
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index 6b7cad2ff1b2490090e18925e4380d3202350527..ffc7103102639214c60201a213df3ad042a05c85 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -396,10 +396,9 @@ public final class OwnerDomainExecutor {
+ 
+     private static void enqueueGlobal(final Owner owner, final Runnable task) {
+         final MinecraftServer server = owner.server();
+-        if (server == null || server.hasStopped()) {
++        if (server == null || !server.enqueueGlobalOwnerTask(wrap(owner, task))) {
+             throw new RejectedExecutionException("Server is unavailable for " + owner.describe());
+         }
+-        server.execute(wrap(owner, task));
+     }
+ 
+     private static void enqueueRegion(final Owner owner, final Runnable task) {
 diff --git a/net/minecraft/stats/ServerStatsCounter.java b/net/minecraft/stats/ServerStatsCounter.java
 index f5beb001b938072e78c0ead7e0ad0499784ed1cf..7c283b8503ed3fbb2114e66339448a1f393ee974 100644
 --- a/net/minecraft/stats/ServerStatsCounter.java

@@ -1,17 +1,43 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: anxelok <anxelok@localhost>
-Date: Tue, 7 Jul 2026 12:02:17 +0000
-Subject: [PATCH] Trim region bookkeeping from the lease claim path
+Date: Mon, 6 Jul 2026 15:48:40 +0000
+Subject: [PATCH] Reduce region dispatch bookkeeping
 
-Every parallel bucket claims and releases an ownership lease each
-tick, and each claim paid an exact-lease scan, an overlap set
-allocation, a containing-region scan, a region descriptor allocation
-with two timestamps, and reference-count maintenance - all feeding
-only the aggregate counters in the /loom snapshot. A claim now does
-the conflict check, which is the safety contract, and the
-registration itself; each lease counts as its own region for the
-snapshot's created and retired totals.
+Reuse covering ownership and stable region partitions so region dispatch performs less lease and bucket work on every tick.
 
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+index 0a0ee851a4889dbc4f09f5a1098c1ddef39b4cfb..3e540926d9cdc773a5f4030d2c68f675fca94137 100644
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -1420,6 +1420,13 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+             if (player.level() != ChunkMap.this.level) {
+                 return ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(player);
+             }
++            // Fast path: the serial tracker tick runs under the level's full-extent owner context (or
++            // the global owner on serial paths), which covers both endpoints by definition. This loop
++            // runs per tracked entity per viewing player per tick, so the two lease lookups and two
++            // ChunkPos allocations below are only paid on sub-region workers.
++            if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.isCurrentFullLevelOwnerOrGlobal(ChunkMap.this.level)) {
++                return true;
++            }
+             final ChunkPos entityChunk = this.entity.chunkPosition();
+             final ChunkPos playerChunk = player.chunkPosition();
+             return net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(ChunkMap.this.level, entityChunk.x(), entityChunk.z())
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index e49147a4ae0288148da1cb0a0f2378fa519739ee..a92080137a8a8d698b0e5854bee6820b40cd8b3c 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -195,6 +195,10 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+                 net.minecraft.server.threading.RegionTickStaging.newSession();
+             final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(byRegion.size());
+             for (final java.util.List<net.minecraft.world.level.chunk.LevelChunk> regionChunks : byRegion.values()) {
++                // Bounds stay the occupied bounding box (NOT snapped to the cell): full-cell bounds always
++                // touch adjacent occupied cells through the non-adjacency buffer and merge them, costing
++                // chunk-phase parallelism. The partition cache keys on the exact boxes, which are stable
++                // under steady load, so caching still hits without widening the leases.
+                 int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+                 for (int j = 0, n = regionChunks.size(); j < n; ++j) {
+                     final net.minecraft.world.level.ChunkPos p = regionChunks.get(j).getPos();
 diff --git a/net/minecraft/server/threading/RegionRuntime.java b/net/minecraft/server/threading/RegionRuntime.java
 index 50fa9abae92ac9275c3041913dda16f8e6371b96..fdcbc63f30326f981703a36edec7c06e639f7193 100644
 --- a/net/minecraft/server/threading/RegionRuntime.java
@@ -231,3 +257,118 @@ index 50fa9abae92ac9275c3041913dda16f8e6371b96..fdcbc63f30326f981703a36edec7c06e
                      this.createdRegions,
                      this.splitEvents,
                      this.mergeEvents,
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index 14b4a882e88470bb9ef10695091aef78017b9d7e..1d3095b897c1cd80be812baa2ec0e0866bc42d09 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -721,7 +721,7 @@ public class TickRegions {
+     ) {
+         final boolean containsMultiChunkTasks = containsMultiChunkRegionTasks(tasks);
+         final List<RegionBoundBucket> buckets = containsMultiChunkTasks
+-            ? bucketRegionBoundTasksByOverlap(world, tasks)
++            ? bucketRegionBoundTasksCached(world, tasks, stageName)
+             : bucketRegionBoundTasksByDispatchChunk(world, tasks);
+ 
+         if (PARALLEL_SIMULATION_ENABLED && buckets.size() > 1) {
+@@ -830,6 +830,76 @@ public class TickRegions {
+         return buckets;
+     }
+ 
++    // Loom - bucket-partition cache. The overlap merge below is a pure function of the task rectangle
++    // set (plus the non-adjacency buffer and region shift, both fixed at runtime), and under steady load
++    // the occupied region cells - and therefore the rectangles - repeat tick after tick. Cache the
++    // task->bucket assignment keyed on the EXACT sorted rectangle list (full comparison, never a hash:
++    // a false hit would let overlapping buckets dispatch concurrently). One entry per (world, phase);
++    // only that world's owner thread touches its entry during a dispatch.
++    private static final class BucketPartition {
++        final int[] bounds;      // sorted (minX,minZ,maxX,maxZ) per task
++        final int[] assignment;  // task index -> bucket ordinal
++        final int bucketCount;
++
++        BucketPartition(final int[] bounds, final int[] assignment, final int bucketCount) {
++            this.bounds = bounds;
++            this.assignment = assignment;
++            this.bucketCount = bucketCount;
++        }
++    }
++
++    private static final java.util.concurrent.ConcurrentHashMap<String, BucketPartition> BUCKET_PARTITIONS =
++        new java.util.concurrent.ConcurrentHashMap<>();
++
++    private static final java.util.Comparator<RegionBoundTask> TASK_BOUNDS_ORDER = java.util.Comparator
++        .comparingInt(RegionBoundTask::minChunkX)
++        .thenComparingInt(RegionBoundTask::minChunkZ)
++        .thenComparingInt(RegionBoundTask::maxChunkX)
++        .thenComparingInt(RegionBoundTask::maxChunkZ);
++
++    private static List<RegionBoundBucket> bucketRegionBoundTasksCached(
++        final ServerLevel world,
++        final List<RegionBoundTask> tasks,
++        final String operation
++    ) {
++        // Canonical order makes the assignment reusable across ticks regardless of map iteration order.
++        tasks.sort(TASK_BOUNDS_ORDER);
++        final int len = tasks.size();
++        final int[] bounds = new int[len * 4];
++        for (int i = 0; i < len; ++i) {
++            final RegionBoundTask t = tasks.get(i);
++            bounds[i * 4] = t.minChunkX();
++            bounds[i * 4 + 1] = t.minChunkZ();
++            bounds[i * 4 + 2] = t.maxChunkX();
++            bounds[i * 4 + 3] = t.maxChunkZ();
++        }
++        final String cacheKey = world.dimension().identifier() + "|" + operation;
++        final BucketPartition cached = BUCKET_PARTITIONS.get(cacheKey);
++        if (cached != null && java.util.Arrays.equals(cached.bounds, bounds)) {
++            final List<RegionBoundBucket> buckets = new ArrayList<>(cached.bucketCount);
++            for (int b = 0; b < cached.bucketCount; ++b) {
++                buckets.add(new RegionBoundBucket(world));
++            }
++            for (int i = 0; i < len; ++i) {
++                buckets.get(cached.assignment[i]).add(tasks.get(i));
++            }
++            return buckets;
++        }
++        final List<RegionBoundBucket> buckets = bucketRegionBoundTasksByOverlap(world, tasks);
++        final int[] assignment = new int[len];
++        final java.util.IdentityHashMap<RegionBoundTask, Integer> byTask = new java.util.IdentityHashMap<>(len * 2);
++        for (int b = 0, blen = buckets.size(); b < blen; ++b) {
++            for (final RegionBoundTask t : buckets.get(b).tasks) {
++                byTask.put(t, b);
++            }
++        }
++        for (int i = 0; i < len; ++i) {
++            assignment[i] = byTask.get(tasks.get(i));
++        }
++        BUCKET_PARTITIONS.put(cacheKey, new BucketPartition(bounds, assignment, buckets.size()));
++        return buckets;
++    }
++
+     private static List<RegionBoundBucket> bucketRegionBoundTasksByOverlap(
+         final ServerLevel world,
+         final List<RegionBoundTask> tasks
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index 58eab7e0724f7d88b647310131422a44f6edc77a..91ed7762292545c6bf838561d6263bef8b679a7e 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -214,6 +214,20 @@ public final class OwnerDomainExecutor {
+         return owner != null && owner.domain() == Domain.REGION && owner.level() == level;
+     }
+ 
++    // Allocation-free fast predicate for hot loops: true when the current context trivially covers any
++    // chunk of the level - the global owner, or the level's full-extent region owner (the world tick
++    // thread). Sub-region workers fall through to the caller's precise checks.
++    public static boolean isCurrentFullLevelOwnerOrGlobal(final ServerLevel level) {
++        final Owner owner = currentOwner();
++        if (owner == null) {
++            return false;
++        }
++        if (owner.domain() == Domain.GLOBAL_CONTROL) {
++            return true;
++        }
++        return isFullLevelRegion(owner, level);
++    }
++
+     public static boolean isEntityOwner(final Entity entity) {
+         Objects.requireNonNull(entity, "entity");
+         if (entity instanceof ServerPlayer player) {
