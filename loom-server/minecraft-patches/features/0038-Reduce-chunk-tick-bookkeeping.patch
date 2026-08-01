@@ -102,7 +102,7 @@ index 3e540926d9cdc773a5f4030d2c68f675fca94137..3e6b05efce804e012e281dddb48f010d
          double zd = zPos - pos.z;
          return xd * xd + zd * zd;
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
-index a8ec8aca965346f5a8b147ed7889bc9350a5733e..dd7e1fb84788d159b7be4dc830f7662d041c2ce9 100644
+index a8ec8aca965346f5a8b147ed7889bc9350a5733e..09b78e80d63e2bfd16a49244bd34eea223d5f04c 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
 @@ -8,6 +8,7 @@ import it.unimi.dsi.fastutil.objects.ObjectArrayList;
@@ -122,7 +122,7 @@ index a8ec8aca965346f5a8b147ed7889bc9350a5733e..dd7e1fb84788d159b7be4dc830f7662d
      private void iterateTickingChunksFaster() {
          final ServerLevel world = this.level;
          final int randomTickSpeed = world.getGameRules().get(GameRules.RANDOM_TICK_SPEED);
-@@ -174,77 +177,130 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+@@ -174,82 +177,141 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
          final int size = entityTickingChunks.size();
  
          java.util.Objects.checkFromToIndex(0, size, raw.length);
@@ -282,8 +282,11 @@ index a8ec8aca965346f5a8b147ed7889bc9350a5733e..dd7e1fb84788d159b7be4dc830f7662d
 +            }
 +            net.minecraft.server.threading.RegionTickStaging.begin(session);
 +            try {
++                // Loom - the owner and profiler remain fixed for the whole region batch.
++                final net.minecraft.util.RandomSource random = this.world.loom$chunkTickRandomSource();
++                final ProfilerFiller profiler = Profiler.get();
 +                for (int i = 0, len = chunks.length; i < len; ++i) {
-+                    this.world.tickChunk(chunks[i], this.randomTickSpeed);
++                    this.world.loom$tickChunk(chunks[i], this.randomTickSpeed, random, profiler);
                  }
 -            }));
 +            } finally {
@@ -314,12 +317,32 @@ index a8ec8aca965346f5a8b147ed7889bc9350a5733e..dd7e1fb84788d159b7be4dc830f7662d
      }
  
      private void tickChunksSerially(final LevelChunk[] chunks, final int size, final ServerLevel world, final int randomTickSpeed) {
++        // Loom - the serial owner and profiler remain fixed for this batch.
++        final net.minecraft.util.RandomSource random = world.loom$chunkTickRandomSource();
++        final ProfilerFiller profiler = Profiler.get();
+         for (int i = 0; i < size; ++i) {
+-            world.tickChunk(chunks[i], randomTickSpeed);
++            world.loom$tickChunk(chunks[i], randomTickSpeed, random, profiler);
+             // call mid-tick tasks for chunk system
+             if ((i & 7) == 0) {
+                 ((ca.spottedleaf.moonrise.patches.chunk_system.server.ChunkSystemMinecraftServer)this.level.getServer()).moonrise$executeMidTickTasks();
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 88e64c6d8ba1bf231368a212d3dd08f74461de86..2a5c024b2b40a9f78e91b7bd0c676ae36622ca4f 100644
+index 88e64c6d8ba1bf231368a212d3dd08f74461de86..4125ac725f607ee283d67935e521d9d6615fcf04 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -1054,9 +1054,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
-         final net.minecraft.util.RandomSource simpleRandom = net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom);
+@@ -1044,19 +1044,13 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     // Paper start - optimise random ticking
+     private final ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom simpleRandom = new ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom(net.minecraft.world.level.levelgen.RandomSupport.generateUniqueSeed());
+ 
+-    private void optimiseRandomTick(final LevelChunk chunk, final int tickSpeed) {
++    private void optimiseRandomTick(final LevelChunk chunk, final int tickSpeed, final net.minecraft.util.RandomSource simpleRandom) {
+         final LevelChunkSection[] sections = chunk.getSections();
+         final int minSection = ca.spottedleaf.moonrise.common.util.WorldUtil.getMinSection((ServerLevel)(Object)this);
+-        // Loom - route the random-tick RNG through the per-domain random so each parallel region
+-        // gets its own deterministic stream instead of sharing one thread-unsafe instance (torn
+-        // seed). Falls back to this.simpleRandom when not in a sub-region context, so the serial
+-        // path is unchanged.
+-        final net.minecraft.util.RandomSource simpleRandom = net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom);
          final boolean doubleTickFluids = !ca.spottedleaf.moonrise.common.PlatformHooks.get().configFixMC224294();
  
 -        final ChunkPos cpos = chunk.getPos();
@@ -330,20 +353,47 @@ index 88e64c6d8ba1bf231368a212d3dd08f74461de86..2a5c024b2b40a9f78e91b7bd0c676ae3
  
          for (int sectionIndex = 0, sectionsLen = sections.length; sectionIndex < sectionsLen; sectionIndex++) {
              final int offsetY = (sectionIndex + minSection) << 4;
-@@ -1099,9 +1098,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1098,11 +1092,24 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     // Paper end - optimise random ticking
  
      public void tickChunk(final LevelChunk chunk, final int tickSpeed) {
-         final net.minecraft.util.RandomSource simpleRandom = net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom); // Loom - per-domain RNG (was this.simpleRandom; torn seed under parallel ticking)
+-        final net.minecraft.util.RandomSource simpleRandom = net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom); // Loom - per-domain RNG (was this.simpleRandom; torn seed under parallel ticking)
 -        ChunkPos chunkPos = chunk.getPos();
 -        int minX = chunkPos.getMinBlockX();
 -        int minZ = chunkPos.getMinBlockZ();
+-        ProfilerFiller profiler = Profiler.get();
++        this.loom$tickChunk(chunk, tickSpeed, this.loom$chunkTickRandomSource(), Profiler.get());
++    }
++
++    // Loom start - resolve thread-local chunk tick context once per owner-domain batch
++    final net.minecraft.util.RandomSource loom$chunkTickRandomSource() {
++        // Each parallel region gets its own deterministic stream instead of sharing the thread-unsafe
++        // fallback. Full-level serial owners retain Paper's original simpleRandom stream.
++        return net.minecraft.server.threading.runtime.DomainRandom.forRuntimeLevel((ServerLevel)(Object)this, this.simpleRandom);
++    }
++
++    final void loom$tickChunk(
++        final LevelChunk chunk,
++        final int tickSpeed,
++        final net.minecraft.util.RandomSource simpleRandom,
++        final ProfilerFiller profiler
++    ) {
 +        int minX = chunk.locX << 4;
 +        int minZ = chunk.locZ << 4;
-         ProfilerFiller profiler = Profiler.get();
          profiler.push("iceandsnow");
  
-@@ -1122,10 +1120,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         if (!this.paperConfig().environment.disableIceAndSnow) { // Paper - Option to disable ice and snow
+@@ -1115,17 +1122,17 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+ 
+         profiler.popPush("tickBlocks");
+         if (tickSpeed > 0) {
+-            this.optimiseRandomTick(chunk, tickSpeed); // Paper - optimise random ticking
++            this.optimiseRandomTick(chunk, tickSpeed, simpleRandom); // Paper - optimise random ticking
+         }
+ 
+         profiler.pop();
      }
++    // Loom end - resolve thread-local chunk tick context once per owner-domain batch
  
      public void tickThunder(final LevelChunk chunk) {
 -        ChunkPos chunkPos = chunk.getPos();
