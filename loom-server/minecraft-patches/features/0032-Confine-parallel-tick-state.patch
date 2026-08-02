@@ -239,7 +239,7 @@ index 802c4c91e0f076cc1c4a043f294887e6321b53a6..d8a64e4c2ab81ccd5feaa53d6bf97682
          }
          net.minecraft.server.threading.TickRegions.tickWorldsInParallel(parallelLevels, level -> {
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 357cdd17e6ca0a672941f765d5ed1a0b8a1c40fe..38e6430e6fc62727e96110457aa695203df3428c 100644
+index 021e33657fc6e02e1321c6d78d138a11384e34b3..7086fdca5c6f6ea27c0a638bdab84e1dfff6cfe5 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
 @@ -173,31 +173,114 @@ public abstract class Entity

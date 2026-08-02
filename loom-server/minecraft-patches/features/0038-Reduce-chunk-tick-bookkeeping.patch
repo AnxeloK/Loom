@@ -327,7 +327,7 @@ index a8ec8aca965346f5a8b147ed7889bc9350a5733e..09b78e80d63e2bfd16a49244bd34eea2
              if ((i & 7) == 0) {
                  ((ca.spottedleaf.moonrise.patches.chunk_system.server.ChunkSystemMinecraftServer)this.level.getServer()).moonrise$executeMidTickTasks();
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 88e64c6d8ba1bf231368a212d3dd08f74461de86..4125ac725f607ee283d67935e521d9d6615fcf04 100644
+index 7d926bb271766cf00b9991e7b798989a4cd0ad72..ad53de932963acbcda3267bd18879034ae90ccc3 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -1044,19 +1044,13 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet

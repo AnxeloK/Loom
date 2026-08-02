@@ -5,10 +5,10 @@ Subject: [PATCH] Bound entity push queries
 
 
 diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
-index c9aa469f2b8c9d232c13adc6effeefe1ac1b58e1..a2ae441cce2333c7ad127b1722a33ee2541c5ad4 100644
+index 92315ba997c66f86661fa58ed0887d2d95541b0b..1c345419dd047357a9d0015150ae7fdd7b2a4706 100644
 --- a/net/minecraft/world/entity/LivingEntity.java
 +++ b/net/minecraft/world/entity/LivingEntity.java
-@@ -3902,34 +3902,54 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+@@ -3905,34 +3905,54 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
              return;
          }
  

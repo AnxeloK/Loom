@@ -6,10 +6,10 @@ Subject: [PATCH] Reduce entity and block traversal overhead
 Reuse traversal state and remove transient predicates from entity and block hot paths without changing collision or push behavior.
 
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 6d6cbffcc088b23aedd37fb7aa3a856a4591c4c3..b63602ab4b60bb04f234bbe1a99b1c09893fa64e 100644
+index e0b846154b87c7bbfeed836ad1fc45d75a1c7ecd..f5c8d12d3652212e998dacf8ffb6c81222922dfb 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -1919,8 +1919,7 @@ public abstract class Entity
+@@ -1923,8 +1923,7 @@ public abstract class Entity
          boolean movedFar = from.distanceToSqr(to) > Mth.square(0.9999900000002526);
          boolean debugEntityBlockIntersections = this.level instanceof ServerLevel serverLevel
              && serverLevel.getServer().debugSubscribers().hasAnySubscriberFor(DebugSubscriptions.ENTITY_BLOCK_INTERSECTIONS);
@@ -19,7 +19,7 @@ index 6d6cbffcc088b23aedd37fb7aa3a856a4591c4c3..b63602ab4b60bb04f234bbe1a99b1c09
              from,
              to,
              deflatedBoundingBoxAtTarget,
-@@ -1933,7 +1932,6 @@ public abstract class Entity
+@@ -1937,7 +1936,6 @@ public abstract class Entity
                      return false;
                  }
  
@@ -27,7 +27,7 @@ index 6d6cbffcc088b23aedd37fb7aa3a856a4591c4c3..b63602ab4b60bb04f234bbe1a99b1c09
                  BlockState state = this.level().getBlockState(blockIntersection);
                  if (state.isAir()) {
                      if (debugEntityBlockIntersections) {
-@@ -1979,7 +1977,6 @@ public abstract class Entity
+@@ -1983,7 +1981,6 @@ public abstract class Entity
                  }
              }
          );
@@ -147,7 +147,7 @@ index fc7cfc75e3e5c274f01498e4afd8693236b4e394..6347a656f631838841eaaef685c5a931
          }
  
 diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
-index e23720de0df7759b1be384a4d118962ae6e23483..c9aa469f2b8c9d232c13adc6effeefe1ac1b58e1 100644
+index f3345a5846b0dd6442de3d52a5b21cb978b1a8e0..92315ba997c66f86661fa58ed0887d2d95541b0b 100644
 --- a/net/minecraft/world/entity/LivingEntity.java
 +++ b/net/minecraft/world/entity/LivingEntity.java
 @@ -1328,6 +1328,9 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin

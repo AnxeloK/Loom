@@ -5,7 +5,7 @@ Subject: [PATCH] Route result-bearing entity ticks
 
 
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 6c6b3efd1547d998a33fba067e01a873200ef1fb..b1ed577dff4d60e95ee24b202dd37b150733c890 100644
+index d8078e95c18a8efa59ebfba70e8ca3ecb479be46..00695adb4abeb8e80652b7ecfdaca69c5150ddf1 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -1483,13 +1483,25 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
@@ -50,7 +50,7 @@ index 6c6b3efd1547d998a33fba067e01a873200ef1fb..b1ed577dff4d60e95ee24b202dd37b15
              for (int i = 0, n = ownerTick.size(); i < n; ++i) {
                  this.tickOneEntity(ownerTick.get(i));
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index 256bf100bbb340aeb383145cea1e5ab9d2994e17..a459e6d5d2c5c1ba89d3e160cdc6d051d14a277c 100644
+index 25bfa5319d4089bff778d3856df4acea15c40212..6796ef6ec20b5b707ca369aa3a55eaecd86e4043 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
 @@ -716,6 +716,15 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
@@ -70,10 +70,10 @@ index 256bf100bbb340aeb383145cea1e5ab9d2994e17..a459e6d5d2c5c1ba89d3e160cdc6d051
      public void tick() {
          // CraftBukkit start
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 38e6430e6fc62727e96110457aa695203df3428c..6d6cbffcc088b23aedd37fb7aa3a856a4591c4c3 100644
+index 7086fdca5c6f6ea27c0a638bdab84e1dfff6cfe5..e0b846154b87c7bbfeed836ad1fc45d75a1c7ecd 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -5362,6 +5362,12 @@ public abstract class Entity
+@@ -5382,6 +5382,12 @@ public abstract class Entity
          return false;
      }
  

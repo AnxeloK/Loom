@@ -5,7 +5,7 @@ Subject: [PATCH] Reduce per-tick owner-domain and runtime overhead
 
 
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index b2a915da2e09226ceef244cbf1eb60870794a129..56b83717ea5e26d70ef16b5c446407f3d0a6ccfa 100644
+index 43250d1bfa34892045a475d8cc5664d35405186d..f17c6922a73b86a1af9fb8d8ca0bfb484f643ae0 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -548,7 +548,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet

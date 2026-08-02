@@ -215,7 +215,7 @@ index 2528158d9b6aaeb2fb35f6a77ad130cc354104a7..e49147a4ae0288148da1cb0a0f2378fa
      // Paper end - chunk tick iteration optimisations
  
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 56b83717ea5e26d70ef16b5c446407f3d0a6ccfa..c363b46cb2dc01d1f0975fe6c30af89a6b18e1af 100644
+index f17c6922a73b86a1af9fb8d8ca0bfb484f643ae0..f39673692009c5047310048d952b4b7fd76fa0f3 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -930,40 +930,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
@@ -400,7 +400,7 @@ index 56b83717ea5e26d70ef16b5c446407f3d0a6ccfa..c363b46cb2dc01d1f0975fe6c30af89a
      public void tickNonPassenger(final Entity entity) {
          // Paper start - log detailed entity tick information
          ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(entity, "Cannot tick an entity off-main");
-@@ -1690,6 +1772,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1698,6 +1780,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
      @Override
      public boolean addFreshEntity(final Entity entity, final org.bukkit.event.entity.CreatureSpawnEvent.@Nullable SpawnReason reason) {
@@ -412,7 +412,7 @@ index 56b83717ea5e26d70ef16b5c446407f3d0a6ccfa..c363b46cb2dc01d1f0975fe6c30af89a
          return this.addEntity(entity, reason);
          // CraftBukkit end
      }
-@@ -2349,18 +2436,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2357,18 +2444,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
          for (ServerLevel otherLevel : this.getServer().getAllLevels()) {
              if (otherLevel != this) {

@@ -57,11 +57,77 @@ index bcedec73102ab35d0c84646c9a82a02384f7da6c..41c5b0d8915d81d1b51de769252a7d83
      }
      // Paper end - rewrite chunk system
  
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 697a070576fa0488787063fc1fb42d23e764a6c6..451cec7cd6285eb4ec677bbb8049e32a73a76473 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -472,7 +472,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         for (int cx = minChunkX; cx <= maxChunkX; ++cx) {
+             for (int cz = minChunkZ; cz <= maxChunkZ; ++cz) {
+                 ca.spottedleaf.moonrise.common.PlatformHooks.get().scheduleChunkLoad(
+-                    this, cx, cz, net.minecraft.world.level.chunk.status.ChunkStatus.FULL, true, priority, consumer
++                    this, cx, cz, chunkStatus, true, priority, consumer
+                 );
+             }
+         }
+@@ -1439,10 +1439,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             // Paper end - log detailed entity tick information
+         entity.setOldPosAndRot();
+         ProfilerFiller profiler = Profiler.get();
+-        entity.tickCount++;
+-        entity.totalEntityAge++; // Paper - age-like counter for all entities
+         profiler.push(entity.typeHolder()::getRegisteredName);
+         profiler.incrementCounter("tickNonPassenger");
++        if (entity.processPendingPortalDestination()) {
++            profiler.pop();
++            return;
++        }
++        entity.tickCount++;
++        entity.totalEntityAge++; // Paper - age-like counter for all entities
+         final boolean isActive = io.papermc.paper.entity.activation.ActivationRange.checkIfActive(entity); // Paper - EAR 2
+         if (isActive) { // Paper - EAR 2
+         entity.tick();
+@@ -1467,11 +1471,15 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             entity.stopRiding();
+         } else if (entity instanceof Player || this.entityTickList.contains(entity)) {
+             entity.setOldPosAndRot();
+-            entity.tickCount++;
+-            entity.totalEntityAge++; // Paper - age-like counter for all entities
+             ProfilerFiller profiler = Profiler.get();
+             profiler.push(entity.typeHolder()::getRegisteredName);
+             profiler.incrementCounter("tickPassenger");
++            if (entity.processPendingPortalDestination()) {
++                profiler.pop();
++                return;
++            }
++            entity.tickCount++;
++            entity.totalEntityAge++; // Paper - age-like counter for all entities
+             // Paper start - EAR 2
+             if (isActive) {
+             entity.rideTick();
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index c3eacd2e085437557de1dbdef0abc23ba7d180bd..256bf100bbb340aeb383145cea1e5ab9d2994e17 100644
+index c3eacd2e085437557de1dbdef0abc23ba7d180bd..25bfa5319d4089bff778d3856df4acea15c40212 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
-@@ -918,16 +918,22 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -800,13 +800,16 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+ 
+     public void doTick() {
+         try {
++            if (this.processPendingPortalDestination()) {
++                return;
++            }
+             if (this.valid && this.waitForCurrentChunkIfUnloaded()) {
+                 return;
+             }
+             if (this.valid && (!this.isSpectator() || !this.touchingUnloadedChunk())) { // Paper - don't tick dead players that are not in the world currently (pending respawn)
+                 final ServerLevel tickStartLevel = this.level();
+                 super.tick();
+-                if (this.level() != tickStartLevel) {
++                if (this.level() != tickStartLevel || this.isAwaitingPortalDestination()) {
+                     return;
+                 }
+                 if (!this.containerMenu.stillValid(this)) {
+@@ -918,16 +921,22 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
              return false;
          }
  
@@ -86,7 +152,7 @@ index c3eacd2e085437557de1dbdef0abc23ba7d180bd..256bf100bbb340aeb383145cea1e5ab9
          return true;
      }
  
-@@ -1764,24 +1770,35 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1764,24 +1773,35 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
          final int targetMinChunkZ = targetChunkZ - ownerRadius;
          final int targetMaxChunkX = targetChunkX + ownerRadius;
          final int targetMaxChunkZ = targetChunkZ + ownerRadius;
@@ -121,12 +187,12 @@ index c3eacd2e085437557de1dbdef0abc23ba7d180bd..256bf100bbb340aeb383145cea1e5ab9
 +                currentContext = net.minecraft.server.threading.TickRegions.pushRegionContext(
 +                    level, currentMinChunkX, currentMinChunkZ, currentMaxChunkX, currentMaxChunkZ
 +                );
++            }
++            if (!net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, targetMinChunkX, targetMinChunkZ, targetMaxChunkX, targetMaxChunkZ)) {
++                targetContext = net.minecraft.server.threading.TickRegions.pushRegionContext(level, targetMinChunkX, targetMinChunkZ, targetMaxChunkX, targetMaxChunkZ);
              }
 -            if (currentContext != null) {
 -                net.minecraft.server.threading.TickRegions.popContext(currentContext);
-+            if (!net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, targetMinChunkX, targetMinChunkZ, targetMaxChunkX, targetMaxChunkZ)) {
-+                targetContext = net.minecraft.server.threading.TickRegions.pushRegionContext(level, targetMinChunkX, targetMinChunkZ, targetMaxChunkX, targetMaxChunkZ);
-+            }
 +            try {
 +                action.run();
 +            } finally {
@@ -139,11 +205,46 @@ index c3eacd2e085437557de1dbdef0abc23ba7d180bd..256bf100bbb340aeb383145cea1e5ab9
              }
          }
      }
+@@ -3311,7 +3331,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+ 
+     @Override
+     public boolean isImmobile() {
+-        return super.isImmobile() || (this.connection != null && this.connection.isDisconnected()); // Paper - Fix duplication bugs
++        return super.isImmobile() || this.isAwaitingPortalDestination() || (this.connection != null && this.connection.isDisconnected()); // Paper - Fix duplication bugs
+     }
+ 
+     public void reset() {
 diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-index 7f5dc445c930a36afaad97782b856f74e4803606..c7cb62fefffb38b272b14bb7cea527df1e961bac 100644
+index 7f5dc445c930a36afaad97782b856f74e4803606..2bb82cbf939f22928819db773c2047e8747dc154 100644
 --- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-@@ -1946,16 +1946,22 @@ public class ServerGamePacketListenerImpl
+@@ -1907,6 +1907,14 @@ public class ServerGamePacketListenerImpl
+     }
+ 
+     public void internalTeleport(PositionMoveRotation destination, Set<Relative> relatives) {
++        this.internalTeleport(destination, relatives, true);
++    }
++
++    public void synchronizePendingPortalPosition(final Vec3 position, final float yRot, final float xRot) {
++        this.internalTeleport(new PositionMoveRotation(position, Vec3.ZERO, yRot, xRot), Collections.emptySet(), false);
++    }
++
++    private void internalTeleport(PositionMoveRotation destination, Set<Relative> relatives, final boolean loadTargetChunks) {
+         org.spigotmc.AsyncCatcher.catchOp("teleport", this.player); // Paper
+         // Paper start - Prevent teleporting dead entities
+         if (this.player.isRemoved()) {
+@@ -1929,7 +1937,9 @@ public class ServerGamePacketListenerImpl
+             this.awaitingTeleport = 0;
+         }
+ 
+-        this.loadTeleportTargetAsync(destination, relatives);
++        if (loadTargetChunks) {
++            this.loadTeleportTargetAsync(destination, relatives);
++        }
+         this.player.teleportSetPosition(destination, relatives);
+         this.awaitingPositionFromClient = this.player.position();
+         // CraftBukkit start - update last location
+@@ -1946,16 +1956,22 @@ public class ServerGamePacketListenerImpl
          final PositionMoveRotation absoluteDestination = PositionMoveRotation.calculateAbsolute(PositionMoveRotation.of(this.player), destination, relatives);
          final Vec3 position = absoluteDestination.position();
          final ServerLevel level = this.player.level();
@@ -168,7 +269,7 @@ index 7f5dc445c930a36afaad97782b856f74e4803606..c7cb62fefffb38b272b14bb7cea527df
      }
  
      private boolean waitForPlayerChunkIfUnloaded(final ServerLevel level) {
-@@ -1964,19 +1970,25 @@ public class ServerGamePacketListenerImpl
+@@ -1964,19 +1980,25 @@ public class ServerGamePacketListenerImpl
              return false;
          }
  
@@ -266,7 +367,7 @@ index 321afd76dddce2fc980cfa2c874fd22bbd37e384..d114bf9e3e82bcb528b12e1c768c53b9
      }
  
 diff --git a/net/minecraft/server/threading/runtime/OwnershipRouter.java b/net/minecraft/server/threading/runtime/OwnershipRouter.java
-index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a403eb6f5 100644
+index 699ed1f7ee89c5646617368a1c41803bc1533cc5..c88d88dc51c0b35ccb1d831b694f2fd06ccc8861 100644
 --- a/net/minecraft/server/threading/runtime/OwnershipRouter.java
 +++ b/net/minecraft/server/threading/runtime/OwnershipRouter.java
 @@ -1,10 +1,21 @@
@@ -291,7 +392,7 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a
  
  public final class OwnershipRouter {
  
-@@ -46,4 +57,307 @@ public final class OwnershipRouter {
+@@ -46,4 +57,360 @@ public final class OwnershipRouter {
      public static void dispatchToPlayer(final ServerPlayer player, final String operation, final Runnable task) {
          OwnerDomainExecutor.execute(OwnerDomainExecutor.player(player, operation), task);
      }
@@ -334,7 +435,24 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a
 +        final String operation,
 +        final Consumer<List<ChunkAccess>> onReady
 +    ) {
++        return runWhenChunksReady(
++            level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, ChunkStatus.FULL, priority, operation, onReady
++        );
++    }
++
++    public static CompletableFuture<Void> runWhenChunksReady(
++        final ServerLevel level,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final ChunkStatus chunkStatus,
++        final Priority priority,
++        final String operation,
++        final Consumer<List<ChunkAccess>> onReady
++    ) {
 +        Objects.requireNonNull(level, "level");
++        Objects.requireNonNull(chunkStatus, "chunkStatus");
 +        Objects.requireNonNull(priority, "priority");
 +        Objects.requireNonNull(operation, "operation");
 +        Objects.requireNonNull(onReady, "onReady");
@@ -344,9 +462,40 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a
 +
 +        final CompletableFuture<Void> future = new CompletableFuture<>();
 +        loadAndDispatch(
-+            future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, priority, operation, onReady
++            future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, priority, operation, onReady
 +        );
 +        return future;
++    }
++
++    public static <T> CompletableFuture<T> supplyWhenChunksReady(
++        final ServerLevel level,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final ChunkStatus chunkStatus,
++        final Priority priority,
++        final String operation,
++        final Supplier<T> supplier
++    ) {
++        Objects.requireNonNull(supplier, "supplier");
++        final CompletableFuture<T> result = new CompletableFuture<>();
++        runWhenChunksReady(
++            level,
++            minChunkX,
++            minChunkZ,
++            maxChunkX,
++            maxChunkZ,
++            chunkStatus,
++            priority,
++            operation,
++            chunks -> result.complete(supplier.get())
++        ).whenComplete((ignored, throwable) -> {
++            if (throwable != null) {
++                result.completeExceptionally(throwable);
++            }
++        });
++        return result;
 +    }
 +
 +    private static void loadAndDispatch(
@@ -356,6 +505,7 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a
 +        final int minChunkZ,
 +        final int maxChunkX,
 +        final int maxChunkZ,
++        final ChunkStatus chunkStatus,
 +        final Priority priority,
 +        final String operation,
 +        final Consumer<List<ChunkAccess>> onReady
@@ -364,12 +514,12 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a
 +            return;
 +        }
 +
-+        level.loadChunks(minChunkX, minChunkZ, maxChunkX, maxChunkZ, priority, chunks -> {
++        level.moonrise$loadChunksAsync(minChunkX, maxChunkX, minChunkZ, maxChunkZ, chunkStatus, priority, chunks -> {
 +            if (future.isDone()) {
 +                return;
 +            }
 +            if (OwnerDomainExecutor.isRegionOwner(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)
-+                && areChunksReady(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++                && areChunksReady(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus)) {
 +                try {
 +                    validateLoadedChunks(minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunks);
 +                    completeChunkReadyCallback(future, chunks, onReady);
@@ -382,7 +532,7 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a
 +            final ChunkReadyLease lease;
 +            try {
 +                lease = ChunkReadyLease.acquire(
-+                    level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunks
++                    level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, chunks
 +                );
 +            } catch (final Throwable throwable) {
 +                future.completeExceptionally(throwable);
@@ -390,7 +540,7 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a
 +            }
 +
 +            dispatchReadyCallback(
-+                future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation, chunks, onReady, lease
++                future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, operation, chunks, onReady, lease
 +            );
 +        });
 +    }
@@ -402,6 +552,7 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a
 +        final int minChunkZ,
 +        final int maxChunkX,
 +        final int maxChunkZ,
++        final ChunkStatus chunkStatus,
 +        final String operation,
 +        final List<ChunkAccess> chunks,
 +        final Consumer<List<ChunkAccess>> onReady,
@@ -420,9 +571,9 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a
 +                        lease.close();
 +                        return;
 +                    }
-+                    if (!areChunksReady(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++                    if (!areChunksReady(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus)) {
 +                        retryReadyCallback(
-+                            future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation, chunks, onReady, lease
++                            future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, operation, chunks, onReady, lease
 +                        );
 +                        return;
 +                    }
@@ -445,6 +596,7 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a
 +        final int minChunkZ,
 +        final int maxChunkX,
 +        final int maxChunkZ,
++        final ChunkStatus chunkStatus,
 +        final String operation,
 +        final List<ChunkAccess> chunks,
 +        final Consumer<List<ChunkAccess>> onReady,
@@ -460,7 +612,7 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a
 +            OwnerDomainExecutor.execute(
 +                OwnerDomainExecutor.asyncIo(level.getServer(), operation + "-chunk-ready-retry"),
 +                () -> dispatchReadyCallback(
-+                    future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation, chunks, onReady, lease
++                    future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, operation, chunks, onReady, lease
 +                )
 +            );
 +        } catch (final Throwable throwable) {
@@ -474,11 +626,12 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a
 +        final int minChunkX,
 +        final int minChunkZ,
 +        final int maxChunkX,
-+        final int maxChunkZ
++        final int maxChunkZ,
++        final ChunkStatus chunkStatus
 +    ) {
 +        for (int chunkX = minChunkX; chunkX <= maxChunkX; ++chunkX) {
 +            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; ++chunkZ) {
-+                if (level.getChunkSource().getChunkAtIfLoadedImmediately(chunkX, chunkZ) == null) {
++                if (level.moonrise$getSpecificChunkIfLoaded(chunkX, chunkZ, chunkStatus) == null) {
 +                    return false;
 +                }
 +            }
@@ -559,12 +712,13 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a
 +            final int minChunkZ,
 +            final int maxChunkX,
 +            final int maxChunkZ,
++            final ChunkStatus chunkStatus,
 +            final List<ChunkAccess> chunks
 +        ) {
 +            validateLoadedChunks(minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunks);
 +
 +            final ChunkHolderManager chunkHolderManager = level.moonrise$getChunkTaskScheduler().chunkHolderManager;
-+            final int ticketLevel = ChunkTaskScheduler.getTicketLevel(ChunkStatus.FULL);
++            final int ticketLevel = ChunkTaskScheduler.getTicketLevel(chunkStatus);
 +            final Long identifier = ChunkTaskScheduler.getNextChunkLoadId();
 +            int retained = 0;
 +            try {
@@ -599,42 +753,196 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..eeb190a0bcd4baa0e48eb27fd1ba726a
 +        }
 +    }
  }
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index 357cdd17e6ca0a672941f765d5ed1a0b8a1c40fe..021e33657fc6e02e1321c6d78d138a11384e34b3 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -889,6 +889,10 @@ public abstract class Entity
+         }
+ 
+         if (this instanceof ServerPlayer) this.handlePortal(); // CraftBukkit - Moved up to postTick
++        if (this.isAwaitingPortalDestination()) {
++            profiler.pop();
++            return;
++        }
+         if (this.canSpawnSprintParticle()) {
+             this.spawnSprintParticle();
+         }
+@@ -3583,14 +3587,29 @@ public abstract class Entity
+             this.setPortalCooldown();
+         } else {
+             if (this.portalProcess == null || !this.portalProcess.isSamePortal(portal)) {
+-                this.portalProcess = new PortalProcessor(portal, pos.immutable());
++                this.portalProcess = new PortalProcessor(portal, pos.immutable(), this);
+             } else if (!this.portalProcess.isInsidePortalThisTick()) {
+                 this.portalProcess.updateEntryPosition(pos.immutable());
+                 this.portalProcess.setAsInsidePortalThisTick(true);
++                this.portalProcess.captureSourceState(this);
+             }
+         }
+     }
+ 
++    public final boolean isAwaitingPortalDestination() {
++        return this.portalProcess != null && this.portalProcess.isPortalDestinationPending();
++    }
++
++    public final boolean processPendingPortalDestination() {
++        final PortalProcessor pendingPortal = this.portalProcess;
++        if (pendingPortal == null || !pendingPortal.isPortalDestinationPending()) {
++            return false;
++        }
++        pendingPortal.holdSourceState(this);
++        this.handlePortal();
++        return true;
++    }
++
+     protected void handlePortal() {
+         if (this.level() instanceof ServerLevel level) {
+             this.processPortalCooldown();
+@@ -4079,6 +4098,7 @@ public abstract class Entity
+ 
+     public final boolean isInvulnerableToBase(final DamageSource source) {
+         return this.isRemoved()
++            || this.isAwaitingPortalDestination()
+             || this.invulnerable && !source.is(DamageTypeTags.BYPASSES_INVULNERABILITY) && !source.isCreativePlayer()
+             || source.is(DamageTypeTags.IS_FIRE) && this.fireImmune()
+             || source.is(DamageTypeTags.IS_FALL) && this.is(EntityTypeTags.FALL_DAMAGE_IMMUNE);
+diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
+index e23720de0df7759b1be384a4d118962ae6e23483..f3345a5846b0dd6442de3d52a5b21cb978b1a8e0 100644
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -3400,6 +3400,9 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         if (this instanceof ServerPlayer && this.level() != tickStartLevel) {
+             return;
+         }
++        if (this.isAwaitingPortalDestination()) {
++            return;
++        }
+         this.updatingUsingItem();
+         this.updateSwimAmount();
+         if (!this.level().isClientSide()) {
 diff --git a/net/minecraft/world/entity/PortalProcessor.java b/net/minecraft/world/entity/PortalProcessor.java
-index 5538a93f1ae5af424432e78d652fcf451b5946b3..a8081eee40c792a49fa300b33be0371db9b509b8 100644
+index 5538a93f1ae5af424432e78d652fcf451b5946b3..e697cd58f93e4799ceec0843fe8fe589ee00e093 100644
 --- a/net/minecraft/world/entity/PortalProcessor.java
 +++ b/net/minecraft/world/entity/PortalProcessor.java
-@@ -5,6 +5,7 @@ import java.util.concurrent.CompletableFuture;
+@@ -5,8 +5,11 @@ import java.util.concurrent.CompletableFuture;
  import java.util.concurrent.CompletionException;
  import net.minecraft.core.BlockPos;
  import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
 +import net.minecraft.server.threading.runtime.OwnershipRouter;
  import net.minecraft.world.level.block.Portal;
  import net.minecraft.world.level.portal.TeleportTransition;
++import net.minecraft.world.phys.Vec3;
  import org.jspecify.annotations.Nullable;
-@@ -48,7 +49,8 @@ public class PortalProcessor {
+ import org.slf4j.Logger;
+ 
+@@ -18,11 +21,17 @@ public class PortalProcessor {
+     private boolean insidePortalThisTick;
+     private @Nullable CompletableFuture<@Nullable TeleportTransition> pendingDestination;
+     private boolean destinationPending;
++    private Vec3 sourcePosition;
++    private Vec3 sourceDeltaMovement;
++    private double sourceFallDistance;
++    private int sourceFireTicks;
++    private long sourcePositionSyncGameTime = Long.MIN_VALUE;
+ 
+-    public PortalProcessor(final Portal portal, final BlockPos portalEntryPosition) {
++    public PortalProcessor(final Portal portal, final BlockPos portalEntryPosition, final Entity entity) {
+         this.portal = portal;
+         this.entryPosition = portalEntryPosition;
+         this.insidePortalThisTick = true;
++        this.captureSourceState(entity);
+     }
+ 
+     public boolean processPortalTeleportation(final ServerLevel serverLevel, final Entity entity, final boolean allowedToTeleport) {
+@@ -48,22 +57,43 @@ public class PortalProcessor {
  
              CompletableFuture<@Nullable TeleportTransition> destination = this.pendingDestination;
              this.pendingDestination = null;
 -            return completePortalDestination(destination);
 +            final TeleportTransition transition = completePortalDestination(destination);
-+            return transition == null ? null : this.ensureDestinationChunksReady(entity, transition);
++            if (transition == null) {
++                this.restoreSourceState(entity);
++                return null;
++            }
++
++            final TeleportTransition readyTransition = this.ensureDestinationChunksReady(entity, transition);
++            if (readyTransition != null) {
++                this.restoreSourceState(entity);
++            }
++            return readyTransition;
          }
  
          CompletableFuture<@Nullable TeleportTransition> destination = this.portal.getPortalDestinationAsync(serverLevel, entity, this.entryPosition);
-@@ -58,7 +60,8 @@ public class PortalProcessor {
+         if (!destination.isDone()) {
+             this.pendingDestination = destination;
+             this.destinationPending = true;
++            this.beginPendingDestination(entity);
++            return null;
++        }
++
++        final TeleportTransition transition = completePortalDestination(destination);
++        if (transition == null) {
++            this.restoreSourceState(entity);
              return null;
          }
  
 -        return completePortalDestination(destination);
-+        final TeleportTransition transition = completePortalDestination(destination);
-+        return transition == null ? null : this.ensureDestinationChunksReady(entity, transition);
++        final TeleportTransition readyTransition = this.ensureDestinationChunksReady(entity, transition);
++        if (readyTransition != null) {
++            this.restoreSourceState(entity);
++        }
++        return readyTransition;
      }
  
      private static @Nullable TeleportTransition completePortalDestination(final CompletableFuture<@Nullable TeleportTransition> destination) {
-@@ -75,6 +78,42 @@ public class PortalProcessor {
+         try {
+-            return destination.join();
++            return destination.getNow(null);
+         } catch (CompletionException exception) {
+             Throwable cause = exception.getCause() == null ? exception : exception.getCause();
+             LOGGER.error("Failed to prepare portal destination", cause);
+@@ -75,6 +105,79 @@ public class PortalProcessor {
          return this.destinationPending;
      }
  
++    public void captureSourceState(final Entity entity) {
++        if (this.pendingDestination != null || this.destinationPending) {
++            return;
++        }
++        this.sourcePosition = entity.position();
++        this.sourceDeltaMovement = entity.getDeltaMovement();
++        this.sourceFallDistance = entity.fallDistance;
++        this.sourceFireTicks = entity.getRemainingFireTicks();
++        this.sourcePositionSyncGameTime = Long.MIN_VALUE;
++    }
++
++    public void holdSourceState(final Entity entity) {
++        entity.absSnapTo(this.sourcePosition.x(), this.sourcePosition.y(), this.sourcePosition.z(), entity.getYRot(), entity.getXRot());
++        entity.setDeltaMovement(Vec3.ZERO);
++        entity.fallDistance = this.sourceFallDistance;
++        entity.setRemainingFireTicks(this.sourceFireTicks);
++        if (entity instanceof ServerPlayer player) {
++            final long gameTime = player.level().getGameTime();
++            if (this.sourcePositionSyncGameTime != gameTime) {
++                player.connection.synchronizePendingPortalPosition(this.sourcePosition, player.getYRot(), player.getXRot());
++                this.sourcePositionSyncGameTime = gameTime;
++            }
++        }
++    }
++
++    private void beginPendingDestination(final Entity entity) {
++        this.holdSourceState(entity);
++    }
++
++    private void restoreSourceState(final Entity entity) {
++        entity.absSnapTo(this.sourcePosition.x(), this.sourcePosition.y(), this.sourcePosition.z(), entity.getYRot(), entity.getXRot());
++        entity.setDeltaMovement(this.sourceDeltaMovement);
++        entity.fallDistance = this.sourceFallDistance;
++        entity.setRemainingFireTicks(this.sourceFireTicks);
++    }
++
 +    private @Nullable TeleportTransition ensureDestinationChunksReady(final Entity entity, final TeleportTransition transition) {
 +        final ServerLevel destinationLevel = transition.newLevel();
 +        final net.minecraft.world.phys.Vec3 destinationPos = transition.position();
@@ -668,12 +976,26 @@ index 5538a93f1ae5af424432e78d652fcf451b5946b3..a8081eee40c792a49fa300b33be0371d
 +
 +        this.pendingDestination = destination;
 +        this.destinationPending = true;
++        this.beginPendingDestination(entity);
 +        return null;
 +    }
 +
      public Portal.Transition getPortalLocalTransition() {
          return this.portal.getLocalTransition();
      }
+diff --git a/net/minecraft/world/entity/player/Player.java b/net/minecraft/world/entity/player/Player.java
+index b7e07ce82d001b27816d8ebc030cd2194a022984..6c2521c124254a94ffe7fae0aa7f8e87f1e71268 100644
+--- a/net/minecraft/world/entity/player/Player.java
++++ b/net/minecraft/world/entity/player/Player.java
+@@ -279,7 +279,7 @@ public abstract class Player extends Avatar implements ContainerUser {
+ 
+         this.updateIsUnderwater();
+         super.tick();
+-        if (this instanceof ServerPlayer && this.level() != tickStartLevel) {
++        if (this instanceof ServerPlayer && (this.level() != tickStartLevel || this.isAwaitingPortalDestination())) {
+             return;
+         }
+         int maxPositionOffset = 29999999;
 diff --git a/net/minecraft/world/level/block/EndPortalBlock.java b/net/minecraft/world/level/block/EndPortalBlock.java
 index 27e1443322c79d94a0669d617052ba7f20d2cdfe..ba47f21de3dbb698342b29c63d47642f2041afe9 100644
 --- a/net/minecraft/world/level/block/EndPortalBlock.java
@@ -702,29 +1024,207 @@ index 27e1443322c79d94a0669d617052ba7f20d2cdfe..ba47f21de3dbb698342b29c63d47642f
      }
  
 diff --git a/net/minecraft/world/level/block/NetherPortalBlock.java b/net/minecraft/world/level/block/NetherPortalBlock.java
-index ff7926d06a96069e7dabd1b147393ae91b5a3528..52f265007155d6def7762763deaab0f677797986 100644
+index ff7926d06a96069e7dabd1b147393ae91b5a3528..79bd1a02e47aed8dff8e3325c48db28bd2924bc1 100644
 --- a/net/minecraft/world/level/block/NetherPortalBlock.java
 +++ b/net/minecraft/world/level/block/NetherPortalBlock.java
-@@ -220,14 +220,20 @@ public class NetherPortalBlock extends Block implements Portal {
+@@ -10,7 +10,7 @@ import net.minecraft.core.Direction;
+ import net.minecraft.core.particles.ParticleTypes;
+ import net.minecraft.resources.ResourceKey;
+ import net.minecraft.server.level.ServerLevel;
+-import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.server.threading.runtime.OwnershipRouter;
+ import net.minecraft.sounds.SoundEvents;
+ import net.minecraft.sounds.SoundSource;
+ import net.minecraft.util.BlockUtil;
+@@ -35,6 +35,7 @@ import net.minecraft.world.level.block.state.StateDefinition;
+ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+ import net.minecraft.world.level.block.state.properties.EnumProperty;
+ import net.minecraft.world.level.border.WorldBorder;
++import net.minecraft.world.level.chunk.status.ChunkStatus;
+ import net.minecraft.world.level.dimension.DimensionType;
+ import net.minecraft.world.level.gamerules.GameRules;
+ import net.minecraft.world.level.portal.PortalForcer;
+@@ -187,7 +188,7 @@ public class NetherPortalBlock extends Block implements Portal {
+         newWorldBorder = newLevel.getWorldBorder();
+         approximateExitPos = newWorldBorder.clampToBounds(result.to().getX(), result.to().getY(), result.to().getZ());
+         SourcePortalInfo sourcePortal = getSourcePortalInfo(entity, portalEntryPos);
+-        return this.getExitPortalAsync(newLevel, entity, approximateExitPos, toNether, newWorldBorder, result, sourcePortal);
++        return this.getExitPortalAsync(newLevel, entity, approximateExitPos, newWorldBorder, result, sourcePortal);
+         // CraftBukkit end
+     }
+ 
+@@ -195,83 +196,118 @@ public class NetherPortalBlock extends Block implements Portal {
+         final ServerLevel newLevel,
+         final Entity entity,
+         final BlockPos approximateExitPos,
+-        final boolean toNether,
+         final WorldBorder worldBorder,
+         final org.bukkit.craftbukkit.event.PortalEventResult result,
+         final SourcePortalInfo sourcePortal
+     ) {
+-        final int exitChunkX = approximateExitPos.getX() >> 4;
+-        final int exitChunkZ = approximateExitPos.getZ() >> 4;
+-        final int radiusBlocks = Math.max(result.searchRadius(), result.createRadius());
+-        final int ownerRadius = ((radiusBlocks + 15) >> 4) + PortalForcer.TICKET_RADIUS + 1;
+-        final int minChunkX = exitChunkX - ownerRadius;
+-        final int minChunkZ = exitChunkZ - ownerRadius;
+-        final int maxChunkX = exitChunkX + ownerRadius;
+-        final int maxChunkZ = exitChunkZ + ownerRadius;
+-        final CompletableFuture<@Nullable TeleportTransition> destination = new CompletableFuture<>();
+-        final Runnable computeDestination = () -> OwnerDomainExecutor.supply(
+-            OwnerDomainExecutor.region(newLevel, minChunkX, minChunkZ, maxChunkX, maxChunkZ, "nether-portal-destination"),
+-            () -> this.getExitPortal(newLevel, entity, approximateExitPos, toNether, worldBorder, result, sourcePortal)
+-        ).whenComplete((transition, throwable) -> {
+-            if (throwable != null) {
+-                destination.completeExceptionally(throwable);
+-            } else {
+-                destination.complete(transition);
++        return this.findExitPortalAsync(newLevel, approximateExitPos, worldBorder, result.searchRadius()).thenCompose(exitPortalPos -> {
++            if (exitPortalPos.isPresent()) {
++                return this.prepareExistingExitPortalAsync(newLevel, entity, exitPortalPos.get(), sourcePortal);
++            }
++            if (!result.canCreatePortal()) {
++                return CompletableFuture.completedFuture(null);
              }
++            return this.createExitPortalAsync(newLevel, entity, approximateExitPos, result.createRadius(), sourcePortal);
          });
++    }
  
 -        newLevel.loadChunks(
-+        net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
++    private CompletableFuture<Optional<BlockPos>> findExitPortalAsync(
++        final ServerLevel newLevel,
++        final BlockPos approximateExitPos,
++        final WorldBorder worldBorder,
++        final int searchRadius
++    ) {
++        final int minChunkX = (approximateExitPos.getX() - searchRadius) >> 4;
++        final int minChunkZ = (approximateExitPos.getZ() - searchRadius) >> 4;
++        final int maxChunkX = (approximateExitPos.getX() + searchRadius) >> 4;
++        final int maxChunkZ = (approximateExitPos.getZ() + searchRadius) >> 4;
++        return OwnershipRouter.supplyWhenChunksReady(
 +            newLevel,
              minChunkX,
              minChunkZ,
              maxChunkX,
              maxChunkZ,
++            ChunkStatus.EMPTY,
              ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
-+            "nether-portal-chunks-ready",
-             chunks -> computeDestination.run()
--        );
-+        ).whenComplete((ignored, throwable) -> {
-+            if (throwable != null) {
-+                destination.completeExceptionally(throwable);
-+            }
-+        });
-         return destination;
+-            chunks -> computeDestination.run()
++            "nether-portal-search",
++            () -> newLevel.getPortalForcer().findClosestPortalPosition(approximateExitPos, worldBorder, searchRadius)
+         );
+-        return destination;
      }
  
+-    private @Nullable TeleportTransition getExitPortal(
++    private CompletableFuture<@Nullable TeleportTransition> prepareExistingExitPortalAsync(
+         final ServerLevel newLevel,
+         final Entity entity,
+-        final BlockPos approximateExitPos,
+-        final boolean toNether,
+-        final WorldBorder worldBorder
+-        , org.bukkit.craftbukkit.event.PortalEventResult result // CraftBukkit
+-        , final SourcePortalInfo sourcePortal
++        final BlockPos exitPortalPos,
++        final SourcePortalInfo sourcePortal
+     ) {
+-        Optional<BlockPos> exitPortalPos = newLevel.getPortalForcer().findClosestPortalPosition(approximateExitPos, worldBorder, result.searchRadius()); // CraftBukkit
+-        BlockUtil.FoundRectangle exitPortal;
+-        TeleportTransition.PostTeleportTransition post;
+-        if (exitPortalPos.isPresent()) {
+-            BlockPos pos = exitPortalPos.get();
+-            BlockState portalState = newLevel.getBlockState(pos);
+-            exitPortal = BlockUtil.getLargestRectangleAround(
+-                pos,
+-                portalState.getValue(BlockStateProperties.HORIZONTAL_AXIS),
+-                21,
+-                Direction.Axis.Y,
+-                21,
+-                blockPos -> newLevel.getBlockState(blockPos) == portalState
+-            );
+-            post = TeleportTransition.PLAY_PORTAL_SOUND.then(e -> e.placePortalTicket(pos));
+-        } else if (result.canCreatePortal()) { // CraftBukkit
+-            Optional<BlockUtil.FoundRectangle> createdExit = newLevel.getPortalForcer().createPortal(approximateExitPos, sourcePortal.axis(), entity, result.createRadius()); // CraftBukkit
+-            if (createdExit.isEmpty()) {
+-                // LOGGER.error("Unable to create a portal, likely target out of worldborder"); // CraftBukkit
+-                return null;
++        final int exitChunkX = exitPortalPos.getX() >> 4;
++        final int exitChunkZ = exitPortalPos.getZ() >> 4;
++        return OwnershipRouter.supplyWhenChunksReady(
++            newLevel,
++            exitChunkX - PortalForcer.TICKET_RADIUS,
++            exitChunkZ - PortalForcer.TICKET_RADIUS,
++            exitChunkX + PortalForcer.TICKET_RADIUS,
++            exitChunkZ + PortalForcer.TICKET_RADIUS,
++            ChunkStatus.FULL,
++            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "nether-portal-exit",
++            () -> {
++                final BlockState portalState = newLevel.getBlockState(exitPortalPos);
++                final BlockUtil.FoundRectangle exitPortal = BlockUtil.getLargestRectangleAround(
++                    exitPortalPos,
++                    portalState.getValue(BlockStateProperties.HORIZONTAL_AXIS),
++                    21,
++                    Direction.Axis.Y,
++                    21,
++                    blockPos -> newLevel.getBlockState(blockPos) == portalState
++                );
++                final TeleportTransition.PostTeleportTransition post = TeleportTransition.PLAY_PORTAL_SOUND.then(
++                    teleportedEntity -> teleportedEntity.placePortalTicket(exitPortalPos)
++                );
++                return createDimensionTransition(newLevel, exitPortal, sourcePortal.axis(), sourcePortal.offset(), entity, post);
+             }
++        );
++    }
+ 
+-            exitPortal = createdExit.get();
+-            post = TeleportTransition.PLAY_PORTAL_SOUND.then(TeleportTransition.PLACE_PORTAL_TICKET);
+-        }
+-        // CraftBukkit start
+-        else {
+-            return null;
+-        }
+-        // CraftBukkit end
++    private CompletableFuture<@Nullable TeleportTransition> createExitPortalAsync(
++        final ServerLevel newLevel,
++        final Entity entity,
++        final BlockPos approximateExitPos,
++        final int createRadius,
++        final SourcePortalInfo sourcePortal
++    ) {
++        final int creationPadding = 3;
++        final int minChunkX = (approximateExitPos.getX() - createRadius - creationPadding) >> 4;
++        final int minChunkZ = (approximateExitPos.getZ() - createRadius - creationPadding) >> 4;
++        final int maxChunkX = (approximateExitPos.getX() + createRadius + creationPadding) >> 4;
++        final int maxChunkZ = (approximateExitPos.getZ() + createRadius + creationPadding) >> 4;
++        return OwnershipRouter.supplyWhenChunksReady(
++            newLevel,
++            minChunkX,
++            minChunkZ,
++            maxChunkX,
++            maxChunkZ,
++            ChunkStatus.FULL,
++            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++            "nether-portal-create",
++            () -> {
++                final Optional<BlockUtil.FoundRectangle> createdExit = newLevel.getPortalForcer().createPortal(
++                    approximateExitPos, sourcePortal.axis(), entity, createRadius
++                ); // CraftBukkit
++                if (createdExit.isEmpty()) {
++                    return null;
++                }
+ 
+-        return createDimensionTransition(newLevel, exitPortal, sourcePortal.axis(), sourcePortal.offset(), entity, post);
++                return createDimensionTransition(
++                    newLevel,
++                    createdExit.get(),
++                    sourcePortal.axis(),
++                    sourcePortal.offset(),
++                    entity,
++                    TeleportTransition.PLAY_PORTAL_SOUND.then(TeleportTransition.PLACE_PORTAL_TICKET)
++                );
++            }
++        );
+     }
+ 
+     private static SourcePortalInfo getSourcePortalInfo(

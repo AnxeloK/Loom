@@ -140,7 +140,7 @@ index d8a64e4c2ab81ccd5feaa53d6bf97682df77d88e..97fb4dee3f3f89798c9c536f2b0eaf3d
              } catch (Throwable throwable) {
                  CrashReport report = CrashReport.forThrowable(throwable, "Exception ticking world");
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index b1ed577dff4d60e95ee24b202dd37b150733c890..88e64c6d8ba1bf231368a212d3dd08f74461de86 100644
+index 00695adb4abeb8e80652b7ecfdaca69c5150ddf1..7d926bb271766cf00b9991e7b798989a4cd0ad72 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -941,7 +941,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
@@ -152,7 +152,7 @@ index b1ed577dff4d60e95ee24b202dd37b150733c890..88e64c6d8ba1bf231368a212d3dd08f7
          }
  
          loomSectionStart = loomDiagnostics == null ? 0L : System.nanoTime();
-@@ -1915,8 +1915,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1923,8 +1923,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          } else {
              if (entity instanceof net.minecraft.world.entity.item.ItemEntity item && item.getItem().isEmpty()) return false; // Paper - Prevent empty items from being added
              // Paper start - capture all item additions to the world
@@ -162,7 +162,7 @@ index b1ed577dff4d60e95ee24b202dd37b150733c890..88e64c6d8ba1bf231368a212d3dd08f7
                  return true;
              }
              // Paper end - capture all item additions to the world
-@@ -2172,13 +2171,13 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2180,13 +2179,13 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              return;
          }
          // CraftBukkit end

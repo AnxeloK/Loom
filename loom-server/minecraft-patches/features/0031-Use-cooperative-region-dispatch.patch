@@ -237,7 +237,7 @@ index a92080137a8a8d698b0e5854bee6820b40cd8b3c..a8ec8aca965346f5a8b147ed7889bc93
      // Paper end - chunk tick iteration optimisations
  
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index e6d1b5822dbf33c755a1ac05a2cc0349c9a082d7..6c6b3efd1547d998a33fba067e01a873200ef1fb 100644
+index 4b88f50aff789ef4a78715426840030f245ab454..d8078e95c18a8efa59ebfba70e8ca3ecb479be46 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -29,6 +29,7 @@ import java.util.UUID;
@@ -292,7 +292,7 @@ index e6d1b5822dbf33c755a1ac05a2cc0349c9a082d7..6c6b3efd1547d998a33fba067e01a873
              }
              // Paper end - log detailed entity tick information
          entity.setOldPosAndRot();
-@@ -1652,8 +1650,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1656,8 +1654,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          }
          // Paper start - log detailed entity tick information
          } finally {
