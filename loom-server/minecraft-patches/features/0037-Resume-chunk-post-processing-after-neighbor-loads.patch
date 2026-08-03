@@ -194,7 +194,7 @@ index ffc7103102639214c60201a213df3ad042a05c85..0b4f17076ea84112c6ae5b93865f0825
              level,
              owner.chunkX(),
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
-index 72cd3eb5cd0832abccdfb15f985d1ca306bbe49e..991cdd627fedb14cbd658ef83373d4be24f18842 100644
+index 72cd3eb5cd0832abccdfb15f985d1ca306bbe49e..1fe13a08b0b4c95cf7b34c654915dae213bd68e2 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
 +++ b/net/minecraft/world/level/chunk/LevelChunk.java
 @@ -11,6 +11,7 @@ import java.util.Collections;
@@ -217,7 +217,7 @@ index 72cd3eb5cd0832abccdfb15f985d1ca306bbe49e..991cdd627fedb14cbd658ef83373d4be
      private ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder chunkAndHolder;
  
      @Override
-@@ -121,6 +125,96 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -121,6 +125,107 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
      public final void moonrise$setChunkHolder(final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder holder) {
          this.chunkAndHolder = holder;
      }
@@ -299,8 +299,19 @@ index 72cd3eb5cd0832abccdfb15f985d1ca306bbe49e..991cdd627fedb14cbd658ef83373d4be
 +    private void moonrise$resumePostProcessing(final ServerLevel level) {
 +        try {
 +            final ChunkPos pos = this.getPos();
++            final int minChunkX = pos.x() - 1;
++            final int minChunkZ = pos.z() - 1;
++            final int maxChunkX = pos.x() + 1;
++            final int maxChunkZ = pos.z() + 1;
 +            if (level.getChunkSource().getChunkAtIfLoadedImmediately(pos.x(), pos.z()) == this
-+                && !this.postProcessingDone) {
++                && !this.postProcessingDone
++                && this.moonrise$isPostProcessingHaloReady(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)
++                && net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(
++                    level, minChunkX, minChunkZ, maxChunkX, maxChunkZ
++                )
++                && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(
++                    level, minChunkX, minChunkZ, maxChunkX, maxChunkZ
++                )) {
 +                this.postProcessGeneration(level);
 +            }
 +        } finally {

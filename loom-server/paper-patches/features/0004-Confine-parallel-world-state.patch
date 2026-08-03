@@ -398,10 +398,10 @@ index 339832e312578ee385bbf3c9d5c131435abe7d7a..645788445a1da7df09340bd066e08774
              this.set("max-tnt-per-tick", 100);
 diff --git a/src/test/java/net/minecraft/world/level/LevelCaptureContextTest.java b/src/test/java/net/minecraft/world/level/LevelCaptureContextTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..e49550b236e8c5ed6f83fd19d9717441dbcc71a4
+index 0000000000000000000000000000000000000000..40c60ef1b289e385757fb02ef2afe50aff56e731
 --- /dev/null
 +++ b/src/test/java/net/minecraft/world/level/LevelCaptureContextTest.java
-@@ -0,0 +1,280 @@
+@@ -0,0 +1,282 @@
 +package net.minecraft.world.level;
 +
 +import ca.spottedleaf.moonrise.common.util.TickThread;
@@ -423,6 +423,7 @@ index 0000000000000000000000000000000000000000..e49550b236e8c5ed6f83fd19d9717441
 +import net.minecraft.world.entity.item.ItemEntity;
 +import net.minecraft.world.level.chunk.ChunkAccess;
 +import net.minecraft.world.level.chunk.LevelChunk;
++import net.minecraft.world.level.chunk.status.ChunkStatus;
 +import net.minecraft.world.level.block.entity.BlockEntity;
 +import org.bukkit.TreeType;
 +import org.bukkit.craftbukkit.block.CraftBlockState;
@@ -542,13 +543,14 @@ index 0000000000000000000000000000000000000000..e49550b236e8c5ed6f83fd19d9717441
 +        Mockito.when(state.getY()).thenReturn(position.getY());
 +        Mockito.when(state.getZ()).thenReturn(position.getZ());
 +        Mockito.doAnswer(invocation -> {
-+            loadCallback.set(invocation.getArgument(5));
++            loadCallback.set(invocation.getArgument(6));
 +            return null;
-+        }).when(level).loadChunks(
++        }).when(level).moonrise$loadChunksAsync(
 +            Mockito.anyInt(),
 +            Mockito.anyInt(),
 +            Mockito.anyInt(),
 +            Mockito.anyInt(),
++            Mockito.eq(ChunkStatus.FULL),
 +            Mockito.any(Priority.class),
 +            Mockito.any()
 +        );

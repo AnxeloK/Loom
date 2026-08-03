@@ -4506,6 +4506,81 @@ index 0000000000000000000000000000000000000000..99c26c98ff286572bf00855aff401e5e
 +        assertEquals(threads * updatesPerThread, calculator.getAllNS().size());
 +    }
 +}
+diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnershipRouterTest.java b/src/test/java/net/minecraft/server/threading/runtime/OwnershipRouterTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..0244f6c49c9c2518008571b56be76218927955ca
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/runtime/OwnershipRouterTest.java
+@@ -0,0 +1,48 @@
++package net.minecraft.server.threading.runtime;
++
++import net.minecraft.server.level.ServerChunkCache;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.world.level.chunk.ChunkAccess;
++import net.minecraft.world.level.chunk.LevelChunk;
++import net.minecraft.world.level.chunk.status.ChunkStatus;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class OwnershipRouterTest {
++
++    @Test
++    void fullChunkCallbacksWaitForPublishedFullChunk() {
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        final ServerChunkCache chunkSource = Mockito.mock(ServerChunkCache.class);
++        final ChunkAccess generatedFullChunk = Mockito.mock(ChunkAccess.class);
++        final LevelChunk publishedFullChunk = Mockito.mock(LevelChunk.class);
++        Mockito.when(level.getChunkSource()).thenReturn(chunkSource);
++        Mockito.when(level.moonrise$getSpecificChunkIfLoaded(4, 7, ChunkStatus.FULL)).thenReturn(generatedFullChunk);
++
++        Assertions.assertFalse(
++            OwnershipRouter.areChunksReady(level, 4, 7, 4, 7, ChunkStatus.FULL),
++            "Generated FULL status must not expose a chunk before its full-status transition is published"
++        );
++
++        Mockito.when(chunkSource.getChunkAtIfLoadedImmediately(4, 7)).thenReturn(publishedFullChunk);
++        Assertions.assertTrue(
++            OwnershipRouter.areChunksReady(level, 4, 7, 4, 7, ChunkStatus.FULL),
++            "Published full chunks must satisfy synchronous continuation readiness"
++        );
++    }
++
++    @Test
++    void generationStatusCallbacksKeepUsingGenerationReadiness() {
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        final ChunkAccess generatedBiomesChunk = Mockito.mock(ChunkAccess.class);
++
++        Assertions.assertFalse(OwnershipRouter.areChunksReady(level, 2, 3, 2, 3, ChunkStatus.BIOMES));
++
++        Mockito.when(level.moonrise$getSpecificChunkIfLoaded(2, 3, ChunkStatus.BIOMES)).thenReturn(generatedBiomesChunk);
++        Assertions.assertTrue(OwnershipRouter.areChunksReady(level, 2, 3, 2, 3, ChunkStatus.BIOMES));
++        Mockito.verify(level, Mockito.never()).getChunkSource();
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnershipRouterTestSuite.java b/src/test/java/net/minecraft/server/threading/runtime/OwnershipRouterTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..109c589c7c9c76d1fce3720dd99682aeb10e0b7d
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/runtime/OwnershipRouterTestSuite.java
+@@ -0,0 +1,15 @@
++package net.minecraft.server.threading.runtime;
++
++import org.junit.platform.suite.api.ConfigurationParameter;
++import org.junit.platform.suite.api.IncludeTags;
++import org.junit.platform.suite.api.SelectClasses;
++import org.junit.platform.suite.api.Suite;
++import org.junit.platform.suite.api.SuiteDisplayName;
++
++@Suite
++@SuiteDisplayName("Published chunk readiness")
++@IncludeTags("Normal")
++@SelectClasses(OwnershipRouterTest.class)
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class OwnershipRouterTestSuite {
++}
 diff --git a/src/test/java/org/bukkit/OwnershipRouterCompatibilityTest.java b/src/test/java/org/bukkit/OwnershipRouterCompatibilityTest.java
 new file mode 100644
 index 0000000000000000000000000000000000000000..d41d10dceae8c40c284bacf019d3fd0253ce1096

@@ -367,7 +367,7 @@ index 321afd76dddce2fc980cfa2c874fd22bbd37e384..d114bf9e3e82bcb528b12e1c768c53b9
      }
  
 diff --git a/net/minecraft/server/threading/runtime/OwnershipRouter.java b/net/minecraft/server/threading/runtime/OwnershipRouter.java
-index 699ed1f7ee89c5646617368a1c41803bc1533cc5..c88d88dc51c0b35ccb1d831b694f2fd06ccc8861 100644
+index 699ed1f7ee89c5646617368a1c41803bc1533cc5..f75fa8ee15efa0ee6b99c56409d5cd2efd456cf7 100644
 --- a/net/minecraft/server/threading/runtime/OwnershipRouter.java
 +++ b/net/minecraft/server/threading/runtime/OwnershipRouter.java
 @@ -1,10 +1,21 @@
@@ -392,7 +392,7 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..c88d88dc51c0b35ccb1d831b694f2fd0
  
  public final class OwnershipRouter {
  
-@@ -46,4 +57,360 @@ public final class OwnershipRouter {
+@@ -46,4 +57,366 @@ public final class OwnershipRouter {
      public static void dispatchToPlayer(final ServerPlayer player, final String operation, final Runnable task) {
          OwnerDomainExecutor.execute(OwnerDomainExecutor.player(player, operation), task);
      }
@@ -621,7 +621,7 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..c88d88dc51c0b35ccb1d831b694f2fd0
 +        }
 +    }
 +
-+    private static boolean areChunksReady(
++    static boolean areChunksReady(
 +        final ServerLevel level,
 +        final int minChunkX,
 +        final int minChunkZ,
@@ -631,7 +631,13 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..c88d88dc51c0b35ccb1d831b694f2fd0
 +    ) {
 +        for (int chunkX = minChunkX; chunkX <= maxChunkX; ++chunkX) {
 +            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; ++chunkZ) {
-+                if (level.moonrise$getSpecificChunkIfLoaded(chunkX, chunkZ, chunkStatus) == null) {
++                // A generated FULL chunk is not yet safe for normal synchronous continuations. It must first
++                // complete its full-status transition and be published through ServerChunkCache, otherwise a
++                // callback can immediately fall back to a forbidden synchronous FULL load for the same chunk.
++                final boolean ready = chunkStatus == ChunkStatus.FULL
++                    ? level.getChunkSource().getChunkAtIfLoadedImmediately(chunkX, chunkZ) != null
++                    : level.moonrise$getSpecificChunkIfLoaded(chunkX, chunkZ, chunkStatus) != null;
++                if (!ready) {
 +                    return false;
 +                }
 +            }
