@@ -5,7 +5,7 @@ Subject: [PATCH] Serialize contended compatibility callbacks
 
 
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2bdd4ec0411d2ccd99e413c14a51cf62b65aa19e 100644
+index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d0e60a97b 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 @@ -5,6 +5,7 @@ import com.destroystokyo.paper.event.server.ServerExceptionEvent;
@@ -27,9 +27,9 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2bdd4ec0411d2ccd99e413c14a51cf62
  import org.bukkit.Warning;
  import org.bukkit.event.Event;
 @@ -35,21 +34,6 @@ import org.jetbrains.annotations.NotNull;
- 
+
  class PaperEventManager {
- 
+
 -    // Loom - how long an owner-domain thread may retry a busy plugin apartment before giving up on the
 -    // dispatch. The lease holder is normally another worker finishing a listener within microseconds, so a
 -    // short bounded retry converts most contention losses into slightly delayed successful dispatches while
@@ -47,7 +47,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2bdd4ec0411d2ccd99e413c14a51cf62
 -
      private final Server server;
      private final CompatibilityKernel compatibilityKernel;
- 
+
 @@ -70,13 +54,8 @@ class PaperEventManager {
          if (!event.isAsynchronous() && net.minecraft.server.threading.RegionTickStaging.stageEvent(event)) {
              return;
@@ -67,7 +67,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2bdd4ec0411d2ccd99e413c14a51cf62
 @@ -130,14 +109,6 @@ class PaperEventManager {
                      );
                  }
- 
+
 -                if (plan.policy() == CompatibilityKernel.InvocationPolicy.REFUSE) {
 -                    this.compatibilityKernel.diagnostics().recordRefusal(
 -                        profile,
@@ -78,7 +78,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2bdd4ec0411d2ccd99e413c14a51cf62
 -
                  final CompatibilityTransaction.ListenerSnapshot beforeListener = transaction.beforeListener(lane);
                  final long callbackStart = System.nanoTime();
- 
+
 @@ -157,9 +128,6 @@ class PaperEventManager {
                              this.compatibilityKernel.diagnostics().recordStrictFallback(profile, "strict policy for " + event.getEventName());
                              this.callThroughApartment(registration, event, transaction, profile, true, plan.path());
@@ -89,7 +89,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2bdd4ec0411d2ccd99e413c14a51cf62
                      }
                  } catch (final AuthorNagException ex) {
                      if (plugin.isNaggable()) {
-@@ -207,67 +175,33 @@ class PaperEventManager {
+@@ -207,67 +175,18 @@ class PaperEventManager {
          final String path
      ) throws Throwable {
          final CompatibilityApartment apartment = this.compatibilityKernel.apartmentFor(registration.getPlugin());
@@ -151,37 +151,24 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2bdd4ec0411d2ccd99e413c14a51cf62
 -                            } catch (final Throwable throwable) {
 -                                if (throwable instanceof Exception exception) {
 -                                    throw exception;
-+                    CompatibilityContinuationBridge.completeSynchronousContract(
-+                        profile,
-+                        this.compatibilityKernel.diagnostics(),
-+                        "event-handoff:" + event.getEventName(),
-+                        () -> apartment.submitStrictFallback(() -> {
-+                            try (CompatibilityApartment.Scope handoffScope = apartment.enterSerialized(transaction, true, path)) {
-+                                try {
-+                                    this.callListener(registration, event, transaction, true, path);
-+                                } catch (final Throwable throwable) {
-+                                    if (throwable instanceof Exception exception) {
-+                                        throw exception;
-+                                    }
-+                                    throw new RuntimeException(throwable);
-                                 }
+-                                }
 -                                throw new RuntimeException(throwable);
-                             }
+-                            }
 -                        }
 -                        return null;
 -                    }).join();
 -                } catch (final CompletionException ex) {
 -                    throw unwrapCompletionException(ex);
-+                            return null;
-+                        })
-+                    );
++                    try (CompatibilityApartment.Scope handoffScope = apartment.enterSerialized(transaction, true, path)) {
++                        this.callListener(registration, event, transaction, true, path);
++                    }
                  } finally {
                      this.compatibilityKernel.diagnostics().recordOwnerRpcWait(
                          profile,
-@@ -281,43 +215,6 @@ class PaperEventManager {
+@@ -281,43 +200,6 @@ class PaperEventManager {
          }
      }
- 
+
 -    // Loom - acquire the plugin apartment, retrying briefly on an owner-domain thread instead of failing the
 -    // dispatch outright. The busy lease normally belongs to another worker that releases it within
 -    // microseconds; waiting a few milliseconds rescues the dispatch (and with it a protection plugin's
@@ -222,10 +209,10 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2bdd4ec0411d2ccd99e413c14a51cf62
      private void callListener(
          final RegisteredListener registration,
          final Event event,
-@@ -330,11 +227,6 @@ class PaperEventManager {
+@@ -330,11 +212,6 @@ class PaperEventManager {
          }
      }
- 
+
 -    private static Throwable unwrapCompletionException(final CompletionException completionException) {
 -        final Throwable cause = completionException.getCause();
 -        return cause == null ? completionException : cause;
@@ -235,42 +222,99 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2bdd4ec0411d2ccd99e413c14a51cf62
          if (!plugin.isEnabled()) {
              throw new IllegalPluginAccessException("Plugin attempted to register " + listener + " while not enabled");
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
-index 63009af5233851977b4bb84099b8de84e9e7a2e7..16ed032459615e477b1940c5199439c0b19bb3f3 100644
+index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e78943c0b3d08 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
-@@ -37,6 +37,8 @@ public final class CompatibilityApartment {
+@@ -1,12 +1,13 @@
+ package io.papermc.paper.plugin.manager.compat;
+
++import java.util.ArrayDeque;
+ import java.util.Objects;
+-import java.util.concurrent.Callable;
+ import java.util.concurrent.CompletableFuture;
+-import java.util.concurrent.ExecutorService;
+-import java.util.concurrent.Executors;
++import java.util.concurrent.CompletionException;
+ import java.util.concurrent.atomic.AtomicInteger;
+ import java.util.concurrent.atomic.AtomicReference;
++import java.util.concurrent.locks.LockSupport;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
+ import org.bukkit.plugin.Plugin;
+ import org.jspecify.annotations.Nullable;
+
+@@ -22,47 +23,46 @@ public final class CompatibilityApartment {
+     }
+
+     private static final class Lease {
+-        private final Plugin plugin;
+         private final long transactionId;
+         private final Thread ownerThread;
+-        private final AtomicInteger depth = new AtomicInteger(1);
++        private final AtomicInteger depth;
+
+-        private Lease(final Plugin plugin, final long transactionId, final Thread ownerThread) {
+-            this.plugin = plugin;
++        private Lease(final long transactionId, final Thread ownerThread, final int depth) {
+             this.transactionId = transactionId;
+             this.ownerThread = ownerThread;
++            this.depth = new AtomicInteger(depth);
+         }
+     }
+
++    private static final class LeaseRequest {
++        private final long transactionId;
++        private final Thread ownerThread;
++        private final CompletableFuture<LeaseGrant> granted = new CompletableFuture<>();
++        private int depth = 1;
++
++        private LeaseRequest(final long transactionId, final Thread ownerThread) {
++            this.transactionId = transactionId;
++            this.ownerThread = ownerThread;
++        }
++    }
++
++    private record LeaseGrant(Lease lease, EnterResult result) {
++    }
++
      private final Plugin plugin;
-     private final ExecutorService strictFallbackExecutor;
+-    private final ExecutorService strictFallbackExecutor;
      private final AtomicReference<@Nullable Lease> activeLease = new AtomicReference<>();
-+    private final AtomicInteger queuedHandoffs = new AtomicInteger();
-+    private final Object leaseSignal = new Object();
- 
++    private final AtomicInteger queuedLeaseCount = new AtomicInteger();
++    private final Object leaseQueueLock = new Object();
++    private final ArrayDeque<LeaseRequest> queuedLeases = new ArrayDeque<>();
+
      public CompatibilityApartment(final Plugin plugin) {
          this.plugin = Objects.requireNonNull(plugin, "plugin");
-@@ -65,33 +67,83 @@ public final class CompatibilityApartment {
- 
+-        this.strictFallbackExecutor = Executors.newSingleThreadExecutor(runnable -> {
+-            final Thread thread = new Thread(runnable, "Loom Compat " + this.plugin.getPluginMeta().getName());
+-            thread.setDaemon(true);
+-            return thread;
+-        });
+     }
+
+     public Plugin plugin() {
+         return this.plugin;
+     }
+
+-    public <T> CompletableFuture<T> submitStrictFallback(final Callable<T> action) {
+-        final CompletableFuture<T> future = new CompletableFuture<>();
+-        this.strictFallbackExecutor.execute(() -> {
+-            try {
+-                future.complete(action.call());
+-            } catch (final Throwable throwable) {
+-                future.completeExceptionally(throwable);
+-            }
+-        });
+-        return future;
+-    }
+-
      public Scope enter(final CompatibilityTransaction transaction, final boolean strictFallback) {
          Objects.requireNonNull(transaction, "transaction");
--        return this.enter(transaction.id(), transaction, strictFallback, "<unknown-path>");
-+        return this.enter(transaction.id(), transaction, strictFallback, "<unknown-path>", false);
+         return this.enter(transaction.id(), transaction, strictFallback, "<unknown-path>");
+@@ -81,46 +81,108 @@ public final class CompatibilityApartment {
+         return this.enter(transactionId, null, strictFallback, path);
      }
- 
-     public Scope enter(final CompatibilityTransaction transaction, final boolean strictFallback, final String path) {
-         Objects.requireNonNull(transaction, "transaction");
--        return this.enter(transaction.id(), transaction, strictFallback, path);
-+        return this.enter(transaction.id(), transaction, strictFallback, path, false);
-     }
- 
-     public Scope enter(final long transactionId, final boolean strictFallback) {
--        return this.enter(transactionId, null, strictFallback, "<unknown-path>");
-+        return this.enter(transactionId, null, strictFallback, "<unknown-path>", false);
-     }
- 
-     public Scope enter(final long transactionId, final boolean strictFallback, final String path) {
--        return this.enter(transactionId, null, strictFallback, path);
-+        return this.enter(transactionId, null, strictFallback, path, false);
-     }
- 
+
 -    private Scope enter(
 +    public Scope enterSerialized(final CompatibilityTransaction transaction, final boolean strictFallback, final String path) {
 +        Objects.requireNonNull(transaction, "transaction");
@@ -286,60 +330,89 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..16ed032459615e477b1940c5199439c0
          final @Nullable CompatibilityTransaction transaction,
          final boolean strictFallback,
          final String path
-+    ) {
-+        this.queuedHandoffs.incrementAndGet();
-+        boolean interrupted = false;
-+        Scope acquired;
-+        try {
-+            while (true) {
-+                acquired = this.enter(transactionId, transaction, strictFallback, path, true);
-+                if (acquired.acquired()) {
-+                    break;
+     ) {
+         final Thread currentThread = Thread.currentThread();
++        final String operation = "compatibility-apartment:" + this.plugin.getPluginMeta().getName() + ":" + path;
++        final LeaseGrant grant;
++        if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
++            grant = OwnerDomainExecutor.awaitCooperatively(
++                () -> this.requestLease(transactionId, currentThread),
++                operation
++            );
++        } else {
++            grant = awaitLease(this.requestLease(transactionId, currentThread), operation);
++        }
++        if (grant.lease().ownerThread != currentThread) {
++            throw new IllegalStateException("Compatibility apartment lease resumed on a different thread for " + operation);
++        }
++        return this.openScope(grant.lease(), transactionId, transaction, strictFallback, path, grant.result());
++    }
+
++    private CompletableFuture<LeaseGrant> requestLease(final long transactionId, final Thread ownerThread) {
++        while (true) {
++            final Lease observed = this.activeLease.get();
++            if (observed != null && observed.ownerThread == ownerThread) {
++                observed.depth.incrementAndGet();
++                return CompletableFuture.completedFuture(new LeaseGrant(observed, EnterResult.REENTRANT));
++            }
++            if (observed != null && !observed.ownerThread.isAlive()) {
++                this.recoverAbandonedLease(observed);
++                continue;
++            }
++
++            synchronized (this.leaseQueueLock) {
++                final Lease current = this.activeLease.get();
++                if (current != observed) {
++                    continue;
++                }
++                if (current == null && this.queuedLeases.isEmpty()) {
++                    final Lease created = new Lease(transactionId, ownerThread, 1);
++                    if (this.activeLease.compareAndSet(null, created)) {
++                        return CompletableFuture.completedFuture(new LeaseGrant(created, EnterResult.ACQUIRED));
++                    }
++                    continue;
 +                }
 +
-+                synchronized (this.leaseSignal) {
-+                    acquired = this.enter(transactionId, transaction, strictFallback, path, true);
-+                    if (acquired.acquired()) {
-+                        break;
-+                    }
-+                    try {
-+                        this.leaseSignal.wait();
-+                    } catch (final InterruptedException ignored) {
-+                        interrupted = true;
++                for (final LeaseRequest queued : this.queuedLeases) {
++                    if (queued.ownerThread == ownerThread) {
++                        ++queued.depth;
++                        return queued.granted.thenApply(grant -> new LeaseGrant(grant.lease(), EnterResult.REENTRANT));
 +                    }
 +                }
++
++                final LeaseRequest request = new LeaseRequest(transactionId, ownerThread);
++                this.queuedLeases.addLast(request);
++                this.queuedLeaseCount.incrementAndGet();
++                return request.granted;
 +            }
-+        } finally {
-+            this.queuedHandoffs.decrementAndGet();
 +        }
-+        if (interrupted) {
-+            Thread.currentThread().interrupt();
-+        }
-+        return acquired;
 +    }
 +
 +    private Scope enter(
 +        final long transactionId,
 +        final @Nullable CompatibilityTransaction transaction,
 +        final boolean strictFallback,
-+        final String path,
-+        final boolean queuedHandoff
-     ) {
-         final Thread currentThread = Thread.currentThread();
- 
++        final String path
++    ) {
++        final Thread currentThread = Thread.currentThread();
          while (true) {
              final Lease current = this.activeLease.get();
              if (current == null) {
-+                if (!queuedHandoff && this.queuedHandoffs.get() > 0) {
+-                final Lease created = new Lease(this.plugin, transactionId, currentThread);
++                if (this.queuedLeaseCount.get() != 0) {
 +                    return new Scope(EnterResult.BUSY, this, null, null, null);
 +                }
-                 final Lease created = new Lease(this.plugin, transactionId, currentThread);
++                final Lease created = new Lease(transactionId, currentThread, 1);
                  if (this.activeLease.compareAndSet(null, created)) {
-                     final CompatibilityRuntimeContext.Scope context = transaction == null
-@@ -102,19 +154,8 @@ public final class CompatibilityApartment {
+-                    final CompatibilityRuntimeContext.Scope context = transaction == null
+-                        ? CompatibilityRuntimeContext.enter(this.plugin, transactionId, strictFallback, path)
+-                        : CompatibilityRuntimeContext.enter(this.plugin, transaction, strictFallback, path);
+-                    return new Scope(EnterResult.ACQUIRED, this, created, context, null);
++                    return this.openScope(created, transactionId, transaction, strictFallback, path, EnterResult.ACQUIRED);
+                 }
                  continue;
              }
- 
+
 -            // Loom Fix 1d - re-enter on SAME-THREAD ownership alone, regardless of transactionId. This apartment
 -            // is per-plugin, so a thread that already holds this plugin's lease and re-enters is ALWAYS the
 -            // plugin's own synchronous, nested call — never a concurrent contender (a single thread cannot race
@@ -357,35 +430,117 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..16ed032459615e477b1940c5199439c0
 +            // ownership is reentrant regardless of transaction id; cross-thread callers remain serialized.
              if (current.ownerThread == currentThread) {
                  current.depth.incrementAndGet();
-                 final CompatibilityRuntimeContext.Scope context = transaction == null
-@@ -123,6 +164,11 @@ public final class CompatibilityApartment {
-                 return new Scope(EnterResult.REENTRANT, this, current, context, null);
-             }
- 
-+            if (!current.ownerThread.isAlive() && this.activeLease.compareAndSet(current, null)) {
-+                this.signalLeaseChange();
-+                continue;
+-                final CompatibilityRuntimeContext.Scope context = transaction == null
+-                    ? CompatibilityRuntimeContext.enter(this.plugin, transactionId, strictFallback, path)
+-                    : CompatibilityRuntimeContext.enter(this.plugin, transaction, strictFallback, path);
+-                return new Scope(EnterResult.REENTRANT, this, current, context, null);
++                return this.openScope(current, transactionId, transaction, strictFallback, path, EnterResult.REENTRANT);
 +            }
 +
++            if (!current.ownerThread.isAlive()) {
++                this.recoverAbandonedLease(current);
++                continue;
+             }
+
              return new Scope(
-                 EnterResult.BUSY,
-                 this,
-@@ -138,7 +184,15 @@ public final class CompatibilityApartment {
+@@ -138,7 +200,97 @@ public final class CompatibilityApartment {
          if (depth > 0) {
              return;
          }
 -        this.activeLease.compareAndSet(lease, null);
-+        if (this.activeLease.compareAndSet(lease, null)) {
-+            this.signalLeaseChange();
++        if (depth < 0 || !this.activeLease.compareAndSet(lease, null)) {
++            throw new IllegalStateException("Compatibility apartment lease released out of order for " + this.plugin.getPluginMeta().getName());
++        }
++        this.promoteQueuedLease();
++    }
++
++    private void recoverAbandonedLease(final Lease lease) {
++        if (!lease.ownerThread.isAlive() && this.activeLease.compareAndSet(lease, null)) {
++            this.promoteQueuedLease();
 +        }
 +    }
 +
-+    private void signalLeaseChange() {
-+        synchronized (this.leaseSignal) {
-+            this.leaseSignal.notifyAll();
++    private void promoteQueuedLease() {
++        if (this.queuedLeaseCount.get() == 0 || this.activeLease.get() != null) {
++            return;
++        }
++
++        LeaseRequest next = null;
++        Lease granted = null;
++        ArrayDeque<LeaseRequest> abandoned = null;
++        synchronized (this.leaseQueueLock) {
++            if (this.activeLease.get() != null) {
++                return;
++            }
++            while ((next = this.queuedLeases.pollFirst()) != null) {
++                this.queuedLeaseCount.decrementAndGet();
++                if (next.ownerThread.isAlive()) {
++                    granted = new Lease(next.transactionId, next.ownerThread, next.depth);
++                    if (!this.activeLease.compareAndSet(null, granted)) {
++                        this.queuedLeases.addFirst(next);
++                        this.queuedLeaseCount.incrementAndGet();
++                        next = null;
++                        granted = null;
++                    }
++                    break;
++                }
++                if (abandoned == null) {
++                    abandoned = new ArrayDeque<>();
++                }
++                abandoned.addLast(next);
++            }
++        }
++
++        if (abandoned != null) {
++            for (final LeaseRequest request : abandoned) {
++                request.granted.completeExceptionally(new IllegalStateException(
++                    "Compatibility apartment waiter terminated before acquiring " + this.plugin.getPluginMeta().getName()
++                ));
++            }
++        }
++        if (next != null) {
++            next.granted.complete(new LeaseGrant(granted, EnterResult.ACQUIRED));
++        }
++    }
++
++    int queuedLeaseCount() {
++        return this.queuedLeaseCount.get();
++    }
++
++    private Scope openScope(
++        final Lease lease,
++        final long transactionId,
++        final @Nullable CompatibilityTransaction transaction,
++        final boolean strictFallback,
++        final String path,
++        final EnterResult result
++    ) {
++        final CompatibilityRuntimeContext.Scope context = transaction == null
++            ? CompatibilityRuntimeContext.enter(this.plugin, transactionId, strictFallback, path)
++            : CompatibilityRuntimeContext.enter(this.plugin, transaction, strictFallback, path);
++        return new Scope(result, this, lease, context, null);
++    }
++
++    private static <T> T awaitLease(final CompletableFuture<T> future, final String operation) {
++        final Thread waitingThread = Thread.currentThread();
++        future.whenComplete((result, throwable) -> LockSupport.unpark(waitingThread));
++        boolean interrupted = false;
++        while (!future.isDone()) {
++            LockSupport.park(operation);
++            if (Thread.interrupted()) {
++                interrupted = true;
++            }
++        }
++        if (interrupted) {
++            waitingThread.interrupt();
++        }
++        try {
++            return future.getNow(null);
++        } catch (final CompletionException completionException) {
++            throw completionException;
 +        }
      }
- 
+
      public record Scope(
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityContinuationBridge.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityContinuationBridge.java
 index 6c099d631ef9b1e6c80024b1a2759b6412f10824..24b4315ad79f4ba174f238e5ca5875ad27c73047 100644
@@ -394,7 +549,7 @@ index 6c099d631ef9b1e6c80024b1a2759b6412f10824..24b4315ad79f4ba174f238e5ca5875ad
 @@ -16,6 +16,29 @@ public final class CompatibilityContinuationBridge {
      private CompatibilityContinuationBridge() {
      }
- 
+
 +    public static <T> T completeSynchronousContract(
 +        final PluginCompatibilityProfile profile,
 +        final CompatibilityDiagnostics diagnostics,
@@ -448,7 +603,7 @@ index b742b626ad6d4797b13feb620ae9fc4094e39168..b32e4ca1d5bce7a6ea33d4594c491889
 @@ -249,11 +251,11 @@ public final class CompatibilityDiagnostics {
          );
      }
- 
+
 -    public void recordRefusal(final PluginCompatibilityProfile profile, final String reason) {
 -        this.refusals.increment();
 -        profile.noteRefusal(reason);
@@ -464,7 +619,7 @@ index b742b626ad6d4797b13feb620ae9fc4094e39168..b32e4ca1d5bce7a6ea33d4594c491889
 @@ -262,16 +264,13 @@ public final class CompatibilityDiagnostics {
          );
      }
- 
+
 -    // Records a refusal for one dispatch without changing the plugin's persistent classification. Apartment
 -    // contention can clear before the next event, so record it separately from profile.noteRefusal.
 -    public void recordTransientRefusal(final PluginCompatibilityProfile profile, final String reason) {
@@ -533,7 +688,7 @@ index 00bfdcb7ea46d34157d75d1f2e81e953aff4af09..57f49f3c1cc6fb321c372a8fdf621da1
 -        REFUSE
 +        STRICT_FALLBACK
      }
- 
+
      public enum ExecutionLane {
          FAST_LANE,
          TRANSACTION_LANE,
@@ -542,7 +697,7 @@ index 00bfdcb7ea46d34157d75d1f2e81e953aff4af09..57f49f3c1cc6fb321c372a8fdf621da1
 -        REFUSAL_LANE
 +        EMERGENCY_COMPATIBILITY_LANE
      }
- 
+
      public enum DispatchRoute {
 @@ -30,7 +28,7 @@ public final class CompatibilityKernel {
          ORDERED_DECISION,
@@ -551,15 +706,15 @@ index 00bfdcb7ea46d34157d75d1f2e81e953aff4af09..57f49f3c1cc6fb321c372a8fdf621da1
 -        STRICT_REFUSAL
 +        STRICT_SERIALIZED
      }
- 
+
      public record RoutingDecision(DispatchRoute route, String reason) {
 @@ -90,7 +88,7 @@ public final class CompatibilityKernel {
- 
+
          boolean hasLegacy = false;
          boolean hasInternal = false;
 -        boolean hasStrictOrRefused = false;
 +        boolean hasStrict = false;
- 
+
          for (int i = 0; i < listeners.length; ++i) {
              final RegisteredListener listener = listeners[i];
 @@ -103,15 +101,15 @@ public final class CompatibilityKernel {
@@ -574,7 +729,7 @@ index 00bfdcb7ea46d34157d75d1f2e81e953aff4af09..57f49f3c1cc6fb321c372a8fdf621da1
                  }
              }
          }
- 
+
 -        if (hasStrictOrRefused) {
 -            return new RoutingDecision(DispatchRoute.STRICT_REFUSAL, "strict/refused listener state");
 +        if (hasStrict) {
@@ -589,7 +744,7 @@ index 00bfdcb7ea46d34157d75d1f2e81e953aff4af09..57f49f3c1cc6fb321c372a8fdf621da1
 -            case REFUSED -> InvocationPolicy.REFUSE;
          };
      }
- 
+
 @@ -153,10 +150,6 @@ public final class CompatibilityKernel {
      ) {
          final String path = pathFor(transaction, listener);
@@ -613,9 +768,9 @@ index 00bfdcb7ea46d34157d75d1f2e81e953aff4af09..57f49f3c1cc6fb321c372a8fdf621da1
 -            case REFUSE -> ExecutionLane.REFUSAL_LANE;
          };
      }
- 
+
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
-index 9faf357621bc38f7b7d4f5fda095633b6627aa33..96759ed62974025f8096989778fc4fcf1d82827d 100644
+index 9faf357621bc38f7b7d4f5fda095633b6627aa33..58fc13eb4e929797769689282ef239314954bb95 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
 @@ -10,8 +10,6 @@ import java.util.Collections;
@@ -628,9 +783,9 @@ index 9faf357621bc38f7b7d4f5fda095633b6627aa33..96759ed62974025f8096989778fc4fcf
  import org.bukkit.plugin.RegisteredServiceProvider;
  import org.bukkit.plugin.ServicePriority;
 @@ -22,14 +20,6 @@ import org.jetbrains.annotations.Nullable;
- 
+
  public final class CompatibilityServicesManager implements ServicesManager {
- 
+
 -    // Loom - same budget as the event-dispatch handoff (PaperEventManager): the plugin's dedicated
 -    // strict-fallback thread waits out a busy lease instead of failing on the first try. A service call
 -    // must produce a return value, so on budget exhaustion this path still throws — but only after the
@@ -643,7 +798,7 @@ index 9faf357621bc38f7b7d4f5fda095633b6627aa33..96759ed62974025f8096989778fc4fcf
      private final CompatibilityKernel compatibilityKernel;
      private final CompatibilityServiceCallGraph callGraph = new CompatibilityServiceCallGraph();
 @@ -167,10 +157,7 @@ public final class CompatibilityServicesManager implements ServicesManager {
- 
+
              final PluginCompatibilityProfile profile = compatibilityKernel.profileFor(this.providerPlugin);
              if (graphEntry.cycleDetected()) {
 -                // A service call cycle is local to this invocation. The throw below breaks the recursion;
@@ -654,10 +809,10 @@ index 9faf357621bc38f7b7d4f5fda095633b6627aa33..96759ed62974025f8096989778fc4fcf
                  callGraph.exit();
                  throw new IllegalStateException("Compatibility service cycle detected: " + graphEntry.cyclePath());
              }
-@@ -190,41 +177,20 @@ public final class CompatibilityServicesManager implements ServicesManager {
+@@ -190,54 +177,17 @@ public final class CompatibilityServicesManager implements ServicesManager {
                          "service apartment busy " + this.service.getSimpleName() + "#" + method.getName() + " owner=" + scope.busyLease()
                      );
- 
+
 -                    if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
 -                        compatibilityKernel.diagnostics().recordOwnerDomainWaitViolation(
 -                            profile,
@@ -672,19 +827,14 @@ index 9faf357621bc38f7b7d4f5fda095633b6627aa33..96759ed62974025f8096989778fc4fcf
 +                        profile,
 +                        "service apartment busy " + this.service.getSimpleName() + "#" + method.getName()
 +                    );
- 
+
                      final long start = System.nanoTime();
                      try {
 -                        return compatibilityKernel.apartmentFor(this.providerPlugin)
 -                            .submitStrictFallback(() -> {
 -                                // Loom Fix - wait for the lease on this dedicated thread before giving up;
 -                                // see PaperEventManager's handoff for the rationale.
-+                        return CompatibilityContinuationBridge.completeSynchronousContract(
-+                            profile,
-+                            compatibilityKernel.diagnostics(),
-+                            "service-handoff:" + this.service.getSimpleName() + "#" + method.getName(),
-+                            () -> compatibilityKernel.apartmentFor(this.providerPlugin).submitStrictFallback(() -> {
-                                 final CompatibilityApartment fallbackApartment = compatibilityKernel.apartmentFor(this.providerPlugin);
+-                                final CompatibilityApartment fallbackApartment = compatibilityKernel.apartmentFor(this.providerPlugin);
 -                                CompatibilityApartment.Scope acquiredScope = fallbackApartment.enter(transactionId, true, path);
 -                                if (!acquiredScope.acquired() && HANDOFF_WAIT_NANOS > 0L) {
 -                                    final long handoffDeadline = System.nanoTime() + HANDOFF_WAIT_NANOS;
@@ -702,25 +852,30 @@ index 9faf357621bc38f7b7d4f5fda095633b6627aa33..96759ed62974025f8096989778fc4fcf
 -                                                + method.getName()
 -                                        );
 -                                    }
-+                                try (CompatibilityApartment.Scope fallbackScope = fallbackApartment.enterSerialized(transactionId, true, path)) {
-                                     try {
-                                         return invokeProvider(method, args);
-                                     } catch (final Throwable throwable) {
-@@ -235,9 +201,7 @@ public final class CompatibilityServicesManager implements ServicesManager {
-                                     }
-                                 }
-                             })
+-                                    try {
+-                                        return invokeProvider(method, args);
+-                                    } catch (final Throwable throwable) {
+-                                        if (throwable instanceof Exception exception) {
+-                                            throw exception;
+-                                        }
+-                                        throw new RuntimeException(throwable);
+-                                    }
+-                                }
+-                            })
 -                            .join();
 -                    } catch (final CompletionException completionException) {
 -                        throw unwrapCompletionException(completionException);
-+                        );
++                        final CompatibilityApartment fallbackApartment = compatibilityKernel.apartmentFor(this.providerPlugin);
++                        try (CompatibilityApartment.Scope fallbackScope = fallbackApartment.enterSerialized(transactionId, true, path)) {
++                            return invokeProvider(method, args);
++                        }
                      } finally {
                          compatibilityKernel.diagnostics().recordOwnerRpcWait(
                              profile,
-@@ -276,9 +240,5 @@ public final class CompatibilityServicesManager implements ServicesManager {
+@@ -276,9 +226,5 @@ public final class CompatibilityServicesManager implements ServicesManager {
              return StackWalkerUtil.getFirstPluginCaller();
          }
- 
+
 -        private static Throwable unwrapCompletionException(final CompletionException completionException) {
 -            final Throwable cause = completionException.getCause();
 -            return cause == null ? completionException : cause;
@@ -738,7 +893,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
 -        LEGACY_STRICT,
 -        REFUSED;
 +        LEGACY_STRICT;
- 
+
          public boolean atLeast(final Mode mode) {
              return this.ordinal() >= mode.ordinal();
 @@ -32,8 +31,7 @@ public final class PluginCompatibilityProfile {
@@ -749,7 +904,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
 -        REFUSED
 +        FORCED_SERIAL_FALLBACK
      }
- 
+
      public enum EscalationReason {
 @@ -44,8 +42,7 @@ public final class PluginCompatibilityProfile {
          OWNER_BLOCKING_WAIT,
@@ -759,7 +914,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
 -        REFUSAL
 +        STRICT_FALLBACK
      }
- 
+
      public record Escalation(
 @@ -69,7 +66,7 @@ public final class PluginCompatibilityProfile {
          long asyncBukkitViolations,
@@ -777,19 +932,19 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
 -    private final LongAdder refusals = new LongAdder();
 +    private final LongAdder serializedHandoffs = new LongAdder();
      private final LongAdder ownerDomainWaitViolations = new LongAdder();
- 
+
      private final Map<String, LongAdder> callbackNanosByEvent = new ConcurrentHashMap<>();
 @@ -195,9 +192,8 @@ public final class PluginCompatibilityProfile {
          this.escalate(Mode.LEGACY_STRICT, EscalationReason.STRICT_FALLBACK, detail);
      }
- 
+
 -    public void noteRefusal(final String detail) {
 -        this.refusals.increment();
 -        this.escalate(Mode.REFUSED, EscalationReason.REFUSAL, detail);
 +    public void noteSerializedHandoff() {
 +        this.serializedHandoffs.increment();
      }
- 
+
      public void noteForcedSerializedFallback(final String path, final String detail) {
 @@ -244,7 +240,7 @@ public final class PluginCompatibilityProfile {
              this.asyncBukkitViolations.longValue(),
@@ -817,7 +972,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
 -            this.pathStates.replaceAll((ignored, existing) -> existing == State.FORCED_SERIAL_FALLBACK ? existing : State.REFUSED);
 -        }
      }
- 
+
      private void markPathState(final String path, final State desiredState) {
          final String normalized = normalizePath(path);
          this.pathStates.compute(normalized, (ignored, existing) -> {
@@ -831,7 +986,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
              if (desiredState == State.LEGACY_DEGRADED && existing == State.LEGACY_DEGRADED) {
 @@ -323,11 +313,7 @@ public final class PluginCompatibilityProfile {
      }
- 
+
      private State defaultState() {
 -        return switch (this.mode) {
 -            case NATIVE_LOOM_AWARE -> State.NATIVE_FAST_PATH;
@@ -840,7 +995,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
 -        };
 +        return this.mode == Mode.NATIVE_LOOM_AWARE ? State.NATIVE_FAST_PATH : State.LEGACY_OBSERVED_SAFE;
      }
- 
+
      private static String normalizePath(final String path) {
 diff --git a/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java b/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
 index b9adac0a54e18f7d662e6cd63403a729145b16a4..2886d4c00ab68832eb789ef00f4b7cff6d6512fa 100644
@@ -848,7 +1003,7 @@ index b9adac0a54e18f7d662e6cd63403a729145b16a4..2886d4c00ab68832eb789ef00f4b7cff
 +++ b/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
 @@ -76,20 +76,18 @@ public class LoomTicksPerSecondCommand extends Command {
          final TickRegions.RuntimeDiagnostics snap = TickRegions.snapshotDiagnostics();
- 
+
          final CompatibilityDiagnostics.Snapshot compat = CompatibilityDiagnostics.global().snapshot();
 -        int fast = 0, degraded = 0, strict = 0, refused = 0;
 +        int fast = 0, degraded = 0, strict = 0;
@@ -862,15 +1017,15 @@ index b9adac0a54e18f7d662e6cd63403a729145b16a4..2886d4c00ab68832eb789ef00f4b7cff
          }
          final int pluginCount = compat.plugins().size();
          final double pluginHealthFrac = pluginCount > 0 ? (double) fast / (double) pluginCount : 1.0D;
- 
+
          final long asyncViolations = compat.asyncViolations();
 -        final long refusedPaths = compat.refusals();
          final long ownerViolations = snap.ownershipFailures() + snap.leaseClaimFailures() + snap.mailboxMessagesDropped();
- 
+
          final Runtime rt = Runtime.getRuntime();
 @@ -113,17 +111,16 @@ public class LoomTicksPerSecondCommand extends Command {
              .append(text(coresUsed < 0.0D ? "  n/a" : "  " + ONE_DP.get().format(coresUsed) + " / " + cores + " cores", SOFT)).build());
- 
+
          sender.sendMessage(text().append(this.label("ᴘʟᴜɢɪɴꜱ"))
 -            .append(this.bar(pluginHealthFrac, this.pluginColour(refused, strict, degraded)))
 +            .append(this.bar(pluginHealthFrac, this.pluginColour(strict, degraded)))
@@ -879,7 +1034,7 @@ index b9adac0a54e18f7d662e6cd63403a729145b16a4..2886d4c00ab68832eb789ef00f4b7cff
 -            .append(text(" · " + strict + " strict", strict > 0 ? NamedTextColor.GOLD : SUBTLE))
 -            .append(text(" · " + refused + " refused", refused > 0 ? NamedTextColor.RED : SUBTLE)).build());
 +            .append(text(" · " + strict + " strict", strict > 0 ? NamedTextColor.GOLD : SUBTLE)).build());
- 
+
 -        final long safetyTotal = asyncViolations + refusedPaths + ownerViolations;
 +        final long safetyTotal = asyncViolations + ownerViolations;
          if (safetyTotal > 0L) {
@@ -893,7 +1048,7 @@ index b9adac0a54e18f7d662e6cd63403a729145b16a4..2886d4c00ab68832eb789ef00f4b7cff
 @@ -180,10 +177,7 @@ public class LoomTicksPerSecondCommand extends Command {
          return mspt < 35.0D ? NamedTextColor.GREEN : (mspt < 50.0D ? NamedTextColor.YELLOW : NamedTextColor.RED);
      }
- 
+
 -    private TextColor pluginColour(final int refused, final int strict, final int degraded) {
 -        if (refused > 0) {
 -            return NamedTextColor.RED;
@@ -903,15 +1058,20 @@ index b9adac0a54e18f7d662e6cd63403a729145b16a4..2886d4c00ab68832eb789ef00f4b7cff
              return NamedTextColor.YELLOW;
          }
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
-index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da126c6b33693347c1f778c2e5a3cb653c13c177 100644
+index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..498549d0183f47d269377fb5ff408ae1fc5801a5 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
-@@ -2,8 +2,14 @@ package io.papermc.paper.plugin.manager.compat;
- 
+@@ -1,9 +1,19 @@
+ package io.papermc.paper.plugin.manager.compat;
+
++import ca.spottedleaf.moonrise.common.util.TickThread;
  import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.ArrayList;
++import java.util.Collections;
  import java.util.List;
 +import java.util.concurrent.CountDownLatch;
 +import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
  import java.util.concurrent.atomic.AtomicReference;
  import java.util.logging.Logger;
 +import net.minecraft.server.MinecraftServer;
@@ -921,8 +1081,8 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da126c6b33693347c1f778c2e5a3cb65
  import org.bukkit.event.Event;
  import org.bukkit.event.HandlerList;
  import org.bukkit.plugin.Plugin;
-@@ -41,11 +47,8 @@ class CompatibilityApartmentTest {
- 
+@@ -41,11 +51,8 @@ class CompatibilityApartmentTest {
+
      @Test
      void sameThreadNestedDifferentTransactionReenters() {
 -        // Loom Fix 1d regression - a thread that already holds this plugin's lease re-enters even when the
@@ -935,20 +1095,22 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da126c6b33693347c1f778c2e5a3cb65
          final Plugin plugin = mockPlugin("LegacyPlugin");
          final CompatibilityApartment apartment = new CompatibilityApartment(plugin);
          final CompatibilityTransaction outer = transactionFor(plugin);
-@@ -74,6 +77,117 @@ class CompatibilityApartmentTest {
-         Assertions.assertEquals("ok", value);
+@@ -66,12 +73,198 @@ class CompatibilityApartmentTest {
      }
- 
-+    @Test
+
+     @Test
+-    void strictFallbackExecutorRunsSerializedTasks() {
 +    void serializedEntryWaitsForLeaseAndDeliversExactlyOnce() throws Exception {
-+        final Plugin plugin = mockPlugin("LegacyPlugin");
-+        final CompatibilityApartment apartment = new CompatibilityApartment(plugin);
+         final Plugin plugin = mockPlugin("LegacyPlugin");
+         final CompatibilityApartment apartment = new CompatibilityApartment(plugin);
 +        final CompatibilityTransaction holderTransaction = transactionFor(plugin);
 +        final CompatibilityTransaction handoffTransaction = transactionFor(plugin);
 +        final CountDownLatch leaseHeld = new CountDownLatch(1);
 +        final CountDownLatch releaseLease = new CountDownLatch(1);
 +        final AtomicReference<Throwable> holderFailure = new AtomicReference<>();
-+
+
+-        final String value = apartment.submitStrictFallback(() -> "ok").join();
+-        Assertions.assertEquals("ok", value);
 +        final Thread holder = new Thread(() -> {
 +            try (CompatibilityApartment.Scope ignored = apartment.enter(holderTransaction, false)) {
 +                leaseHeld.countDown();
@@ -961,22 +1123,108 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da126c6b33693347c1f778c2e5a3cb65
 +        holder.start();
 +        Assertions.assertTrue(leaseHeld.await(5L, TimeUnit.SECONDS));
 +
-+        final java.util.concurrent.atomic.AtomicInteger deliveries = new java.util.concurrent.atomic.AtomicInteger();
-+        final java.util.concurrent.CompletableFuture<String> delivered = apartment.submitStrictFallback(() -> {
++        final AtomicInteger deliveries = new AtomicInteger();
++        final AtomicReference<Thread> deliveryThread = new AtomicReference<>();
++        final AtomicReference<Throwable> contenderFailure = new AtomicReference<>();
++        final Thread contender = new Thread(() -> {
 +            try (CompatibilityApartment.Scope scope = apartment.enterSerialized(handoffTransaction, true, "test:serialized-entry")) {
 +                Assertions.assertTrue(scope.acquired());
++                deliveryThread.set(Thread.currentThread());
 +                deliveries.incrementAndGet();
-+                return "delivered";
++            } catch (final Throwable throwable) {
++                contenderFailure.set(throwable);
 +            }
-+        });
-+        Assertions.assertFalse(delivered.isDone(), "handoff should remain queued while the lease is held");
++        }, "compat-apartment-contender");
++        contender.setDaemon(true);
++        contender.start();
++        awaitQueuedLeases(apartment, 1);
++        Assertions.assertTrue(contender.isAlive(), "handoff should remain queued while the lease is held");
 +
 +        releaseLease.countDown();
-+        Assertions.assertEquals("delivered", delivered.get(5L, TimeUnit.SECONDS));
++        contender.join(5_000L);
 +        holder.join(5_000L);
++        Assertions.assertFalse(contender.isAlive());
 +        Assertions.assertFalse(holder.isAlive());
 +        Assertions.assertNull(holderFailure.get());
++        Assertions.assertNull(contenderFailure.get());
 +        Assertions.assertEquals(1, deliveries.get());
++        Assertions.assertSame(contender, deliveryThread.get(), "the waiting caller must run its own callback");
++    }
++
++    @Test
++    void serializedEntryRecoversLeaseAbandonedByTerminatedThread() throws Exception {
++        final Plugin plugin = mockPlugin("RecoveryPlugin");
++        final CompatibilityApartment apartment = new CompatibilityApartment(plugin);
++        final CompatibilityTransaction abandonedTransaction = transactionFor(plugin);
++        final AtomicReference<CompatibilityApartment.Scope> abandonedScope = new AtomicReference<>();
++
++        final Thread abandonedOwner = new Thread(
++            () -> abandonedScope.set(apartment.enter(abandonedTransaction, false)),
++            "compat-apartment-abandoned-owner"
++        );
++        abandonedOwner.start();
++        abandonedOwner.join(5_000L);
++        Assertions.assertFalse(abandonedOwner.isAlive());
++        Assertions.assertNotNull(abandonedScope.get());
++
++        final CompatibilityTransaction recoveryTransaction = transactionFor(plugin);
++        try (CompatibilityApartment.Scope recovered = apartment.enterSerialized(recoveryTransaction, true, "test:abandoned-recovery")) {
++            Assertions.assertTrue(recovered.acquired());
++        }
++    }
++
++    @Test
++    void serializedEntriesAcquireInQueueOrderOnTheirCallingThreads() throws Exception {
++        final Plugin plugin = mockPlugin("OrderedPlugin");
++        final CompatibilityApartment apartment = new CompatibilityApartment(plugin);
++        final CompatibilityTransaction holderTransaction = transactionFor(plugin);
++        final List<Integer> order = Collections.synchronizedList(new ArrayList<>());
++        final List<Thread> callbackThreads = Collections.synchronizedList(new ArrayList<>());
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final CountDownLatch leaseHeld = new CountDownLatch(1);
++        final CountDownLatch release = new CountDownLatch(1);
++
++        final Thread holder = new Thread(() -> {
++            try (CompatibilityApartment.Scope ignored = apartment.enter(holderTransaction, false)) {
++                leaseHeld.countDown();
++                release.await();
++            } catch (final Throwable throwable) {
++                failure.compareAndSet(null, throwable);
++            }
++        }, "ordered-apartment-holder");
++        holder.setDaemon(true);
++        holder.start();
++        Assertions.assertTrue(leaseHeld.await(5L, TimeUnit.SECONDS));
++
++        final List<Thread> contenders = new ArrayList<>();
++        for (int index = 0; index < 3; ++index) {
++            final int queuedIndex = index;
++            final CompatibilityTransaction transaction = transactionFor(plugin);
++            final Thread contender = new Thread(() -> {
++                try (CompatibilityApartment.Scope ignored = apartment.enterSerialized(transaction, true, "test:ordered-" + queuedIndex)) {
++                    order.add(queuedIndex);
++                    callbackThreads.add(Thread.currentThread());
++                } catch (final Throwable throwable) {
++                    failure.compareAndSet(null, throwable);
++                }
++            }, "ordered-apartment-contender-" + index);
++            contender.setDaemon(true);
++            contenders.add(contender);
++            contender.start();
++            awaitQueuedLeases(apartment, index + 1);
++        }
++
++        release.countDown();
++        holder.join(5_000L);
++        for (final Thread contender : contenders) {
++            contender.join(5_000L);
++            Assertions.assertFalse(contender.isAlive());
++        }
++
++        Assertions.assertFalse(holder.isAlive());
++        Assertions.assertNull(failure.get());
++        Assertions.assertEquals(List.of(0, 1, 2), order);
++        Assertions.assertEquals(contenders, callbackThreads);
 +    }
 +
 +    @Test
@@ -991,7 +1239,6 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da126c6b33693347c1f778c2e5a3cb65
 +        Mockito.when(level.dimension()).thenReturn(Level.OVERWORLD);
 +        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.region(level, 2, 4, "compatibility-handoff-test");
 +        final CountDownLatch leaseHeld = new CountDownLatch(1);
-+        final CountDownLatch beginOwnerCallback = new CountDownLatch(1);
 +        final AtomicReference<Throwable> holderFailure = new AtomicReference<>();
 +        final AtomicReference<Throwable> ownerFailure = new AtomicReference<>();
 +        final AtomicReference<String> ownerResult = new AtomicReference<>();
@@ -999,7 +1246,7 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da126c6b33693347c1f778c2e5a3cb65
 +        final Thread holder = new Thread(() -> {
 +            try (CompatibilityApartment.Scope ignored = apartment.enter(holderTransaction, false)) {
 +                leaseHeld.countDown();
-+                beginOwnerCallback.await();
++                awaitQueuedLeases(apartment, 1);
 +                final String callbackResult = OwnerDomainExecutor.supply(owner, () -> {
 +                    Assertions.assertTrue(OwnerDomainExecutor.isOwner(owner));
 +                    return "owner-ready";
@@ -1013,27 +1260,18 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da126c6b33693347c1f778c2e5a3cb65
 +        holder.start();
 +        Assertions.assertTrue(leaseHeld.await(5L, TimeUnit.SECONDS));
 +
-+        final Thread ownerThread = new Thread(() -> {
++        final Thread ownerThread = new TickThread(() -> {
 +            try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enter(owner)) {
-+                final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
-+                ownerResult.set(CompatibilityContinuationBridge.completeSynchronousContract(
-+                    profile,
-+                    CompatibilityDiagnostics.global(),
-+                    "compatibility-handoff-test",
-+                    () -> {
-+                        beginOwnerCallback.countDown();
-+                        return apartment.submitStrictFallback(() -> {
-+                            try (CompatibilityApartment.Scope scope = apartment.enterSerialized(
-+                                handoffTransaction,
-+                                true,
-+                                "test:cooperative-handoff"
-+                            )) {
-+                                Assertions.assertTrue(scope.acquired());
-+                                return "listener-delivered";
-+                            }
-+                        });
-+                    }
-+                ));
++                try (CompatibilityApartment.Scope scope = apartment.enterSerialized(
++                    handoffTransaction,
++                    true,
++                    "test:cooperative-handoff"
++                )) {
++                    Assertions.assertTrue(scope.acquired());
++                    Assertions.assertTrue(OwnerDomainExecutor.isOwner(owner));
++                    Assertions.assertTrue(TickThread.isTickThread(), "serialized callback left its genuine tick thread");
++                    ownerResult.set("listener-delivered");
++                }
 +            } catch (final Throwable throwable) {
 +                ownerFailure.set(throwable);
 +            }
@@ -1050,9 +1288,15 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da126c6b33693347c1f778c2e5a3cb65
 +        Assertions.assertEquals("listener-delivered", ownerResult.get());
 +    }
 +
++    private static void awaitQueuedLeases(final CompatibilityApartment apartment, final int count) throws InterruptedException {
++        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
++        while (apartment.queuedLeaseCount() != count && System.nanoTime() < deadline) {
++            Thread.sleep(1L);
++        }
++        Assertions.assertEquals(count, apartment.queuedLeaseCount());
+     }
+
      private static CompatibilityTransaction transactionFor(final Plugin plugin) {
-         final DummyEvent event = new DummyEvent();
-         final RegisteredListener[] listeners = new RegisteredListener[0];
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityCallbackTestSuite.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityCallbackTestSuite.java
 new file mode 100644
 index 0000000000000000000000000000000000000000..2784815e33f49790d484a982a9024f9ef8bdcfd9
@@ -1087,7 +1331,7 @@ index d59b1d22bb7fd50395ce18b0d5ce05b86ec26f03..6ff31ecb58024747dc79718a5e72af6e
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
 @@ -62,18 +62,19 @@ class CompatibilityKernelRoutingTest {
      }
- 
+
      @Test
 -    void refusedProfilesUseRefusalLane() {
 +    void strictProfilesRemainOnDeliverableSerializedLane() {
@@ -1098,17 +1342,17 @@ index d59b1d22bb7fd50395ce18b0d5ce05b86ec26f03..6ff31ecb58024747dc79718a5e72af6e
          final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
 -        kernel.profileFor(plugin).noteRefusal("test refusal");
 +        kernel.profileFor(plugin).noteStrictFallback("test strict serialization");
- 
+
          final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
          final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
- 
+
 -        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.REFUSE, plan.policy());
 -        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.REFUSAL_LANE, plan.lane());
 +        Assertions.assertEquals(CompatibilityKernel.DispatchRoute.STRICT_SERIALIZED, routingDecision.route());
 +        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.EMERGENCY_COMPATIBILITY, plan.policy());
 +        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.EMERGENCY_COMPATIBILITY_LANE, plan.lane());
      }
- 
+
      private static RegisteredListener listenerFor(final Plugin plugin) {
 @@ -116,4 +117,4 @@ class CompatibilityKernelRoutingTest {
              return HANDLERS;
@@ -1128,7 +1372,7 @@ index 0521fd22f4dd6b434634f313ed54d3f3181a2815..576fe4ed712a8f5088119f3a32dfb561
 -        SHOULD_NOT_WORK
 +        SHOULD_SERIALIZE
      }
- 
+
      record MatrixEntry(String pluginName, String mainClass, List<String> dependencies, ExpectedOutcome expectedOutcome) {
 @@ -27,22 +27,22 @@ class CompatibilityPluginMatrixTest {
              new MatrixEntry("LoomNativeTools", "com.example.loom.NativeTools", List.of(), ExpectedOutcome.SHOULD_WORK),
@@ -1137,17 +1381,17 @@ index 0521fd22f4dd6b434634f313ed54d3f3181a2815..576fe4ed712a8f5088119f3a32dfb561
 -            new MatrixEntry("UnsafeNativeMutator", "com.example.native.UnsafeNativeMutator", List.of(), ExpectedOutcome.SHOULD_NOT_WORK)
 +            new MatrixEntry("UnsafeNativeMutator", "com.example.native.UnsafeNativeMutator", List.of(), ExpectedOutcome.SHOULD_SERIALIZE)
          );
- 
+
          boolean sawWork = false;
          boolean sawDegrade = false;
 -        boolean sawNotWork = false;
 +        boolean sawSerialize = false;
- 
+
          for (final MatrixEntry entry : matrix) {
              final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(
                  mockPlugin(entry.pluginName(), entry.mainClass(), entry.dependencies())
              );
- 
+
 -            if (entry.expectedOutcome() == ExpectedOutcome.SHOULD_NOT_WORK) {
 -                profile.noteRefusal("unsafe native mutation");
 -                Assertions.assertEquals(PluginCompatibilityProfile.Mode.REFUSED, profile.mode());
@@ -1158,15 +1402,15 @@ index 0521fd22f4dd6b434634f313ed54d3f3181a2815..576fe4ed712a8f5088119f3a32dfb561
 +                sawSerialize = true;
                  continue;
              }
- 
+
 @@ -62,7 +62,7 @@ class CompatibilityPluginMatrixTest {
- 
+
          Assertions.assertTrue(sawWork, "Matrix should include should-work plugin");
          Assertions.assertTrue(sawDegrade, "Matrix should include should-degrade plugin");
 -        Assertions.assertTrue(sawNotWork, "Matrix should include should-NOT-work plugin");
 +        Assertions.assertTrue(sawSerialize, "Matrix should include serialized compatibility fallback");
      }
- 
+
      private static Plugin mockPlugin(final String name, final String mainClass, final List<String> dependencies) {
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
 index 5d283861d99c3f54ac8d7156b65569b699116156..d742f1350d06e8052f63ef8bfd0956ed73cfb9bf 100644
@@ -1174,24 +1418,24 @@ index 5d283861d99c3f54ac8d7156b65569b699116156..d742f1350d06e8052f63ef8bfd0956ed
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
 @@ -36,15 +36,15 @@ class PluginCompatibilityProfileTest {
      }
- 
+
      @Test
 -    void refusalIsTerminalMode() {
 +    void serializedHandoffKeepsPluginDeliverable() {
          final Plugin plugin = mockPlugin("UnsafePlugin", "com.example.Unsafe", List.of(), List.of());
          final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
- 
+
 -        profile.noteRefusal("unsafe raw handles");
 -        profile.noteStrictFallback("should not downgrade");
 +        profile.noteSerializedHandoff();
 +        profile.noteStrictFallback("serialize unsafe access");
- 
+
 -        Assertions.assertEquals(PluginCompatibilityProfile.Mode.REFUSED, profile.mode());
 -        Assertions.assertEquals(1L, profile.snapshot().refusals());
 +        Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_STRICT, profile.mode());
 +        Assertions.assertEquals(1L, profile.snapshot().serializedHandoffs());
      }
- 
+
      @Test
 diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
 new file mode 100644
