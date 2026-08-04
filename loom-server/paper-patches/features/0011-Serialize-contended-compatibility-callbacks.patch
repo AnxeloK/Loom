@@ -1544,14 +1544,18 @@ index 5d283861d99c3f54ac8d7156b65569b699116156..d742f1350d06e8052f63ef8bfd0956ed
      @Test
 diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..bcbe709586a533470435d641a3c25ea056644d60
+index 0000000000000000000000000000000000000000..8b746a2bb14ef9a1f64b75c3d9cc1a57996f816d
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,217 @@
 +package net.minecraft.server.threading.runtime;
 +
 +import ca.spottedleaf.moonrise.common.util.TickThread;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Queue;
 +import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ConcurrentLinkedQueue;
 +import java.util.concurrent.TimeUnit;
 +import java.util.concurrent.atomic.AtomicInteger;
 +import java.util.concurrent.atomic.AtomicReference;
@@ -1640,6 +1644,79 @@ index 0000000000000000000000000000000000000000..bcbe709586a533470435d641a3c25ea0
 +    }
 +
 +    @Test
++    void cooperativeWaitPrioritizesTaskCompletingAwaitedFuture() throws InterruptedException {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final Queue<Runnable> queuedOwnerTasks = new ConcurrentLinkedQueue<>();
++        Mockito.when(server.enqueueGlobalOwnerTask(Mockito.any(Runnable.class))).thenAnswer(invocation -> {
++            queuedOwnerTasks.add(invocation.getArgument(0));
++            return true;
++        });
++        Mockito.when(server.runQueuedGlobalOwnerTask(Mockito.any())).thenAnswer(invocation -> {
++            final java.util.function.Predicate<Runnable> predicate = invocation.getArgument(0);
++            for (final Runnable candidate : queuedOwnerTasks) {
++                if (predicate.test(candidate) && queuedOwnerTasks.remove(candidate)) {
++                    candidate.run();
++                    return true;
++                }
++            }
++            return false;
++        });
++        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.global(server, "prioritized-owner-task");
++        final List<String> order = new ArrayList<>();
++        final CompletableFuture<String> unrelated = OwnerDomainExecutor.supply(owner, () -> {
++            order.add("unrelated");
++            return "unrelated";
++        });
++        final CompletableFuture<String> awaited = OwnerDomainExecutor.supply(owner, () -> {
++            Assertions.assertTrue(TickThread.isTickThread());
++            order.add("awaited");
++            return "awaited";
++        });
++
++        final AtomicReference<String> result = new AtomicReference<>();
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread ownerThread = new TickThread(() -> {
++            try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enter(owner)) {
++                result.set(OwnerDomainExecutor.awaitCooperatively(awaited, "prioritized-owner-task"));
++            } catch (final Throwable throwable) {
++                failure.set(throwable);
++            }
++        }, "prioritized-owner");
++        ownerThread.setDaemon(true);
++        ownerThread.start();
++        ownerThread.join(TimeUnit.SECONDS.toMillis(5L));
++
++        Assertions.assertFalse(ownerThread.isAlive(), "prioritized owner task did not complete");
++        Assertions.assertNull(failure.get());
++        Assertions.assertEquals("awaited", result.get());
++        Assertions.assertEquals(List.of("awaited"), order);
++        Assertions.assertFalse(unrelated.isDone());
++        Assertions.assertEquals(1, queuedOwnerTasks.size());
++    }
++
++    @Test
++    void cooperativeWaitCapsNestedWaits() throws InterruptedException {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.global(server, "nested-wait-cap");
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread ownerThread = new TickThread(() -> {
++            try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enter(owner)) {
++                OwnerDomainExecutor.awaitCooperatively(() -> nestedWait(64), "nested-wait-cap");
++            } catch (final Throwable throwable) {
++                failure.set(throwable);
++            }
++        }, "nested-wait-owner");
++        ownerThread.setDaemon(true);
++        ownerThread.start();
++        ownerThread.join(TimeUnit.SECONDS.toMillis(5L));
++
++        Assertions.assertFalse(ownerThread.isAlive(), "nested cooperative waits did not terminate");
++        final IllegalStateException exception = Assertions.assertInstanceOf(IllegalStateException.class, failure.get());
++        Assertions.assertTrue(exception.getMessage().contains("Cooperative wait nesting exceeded"));
++        Assertions.assertEquals(0, OwnerDomainExecutor.activeCooperativeWaits());
++    }
++
++    @Test
 +    void delegatedWorkCanCallBackIntoWaitingOwner() throws InterruptedException {
 +        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
 +        final ServerLevel level = Mockito.mock(ServerLevel.class);
@@ -1676,6 +1753,16 @@ index 0000000000000000000000000000000000000000..bcbe709586a533470435d641a3c25ea0
 +        Assertions.assertEquals("delivered", result.get());
 +        Assertions.assertEquals(1, callbacks.get());
 +        Assertions.assertEquals(0, OwnerDomainExecutor.activeCooperativeWaits());
++    }
++
++    private static CompletableFuture<String> nestedWait(final int remaining) {
++        if (remaining == 0) {
++            return CompletableFuture.completedFuture("done");
++        }
++        return CompletableFuture.completedFuture(OwnerDomainExecutor.awaitCooperatively(
++            () -> nestedWait(remaining - 1),
++            "nested-wait-" + remaining
++        ));
 +    }
 +}
 diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTestSuite.java b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTestSuite.java

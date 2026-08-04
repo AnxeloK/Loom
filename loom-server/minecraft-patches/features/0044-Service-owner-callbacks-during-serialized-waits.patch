@@ -147,7 +147,7 @@ index dcffa1217cebeedb90a48dda8d04ff0c59adcfbe..18fa40dd1740e50d1b361e27d764e01d
              final List<RegionBoundTask> continuations;
              synchronized (this.lock) {
 diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
-index 0b4f17076ea84112c6ae5b93865f08259f98f078..ab8deadd437c1eb839cc06a9c08bf4e7879b6e7a 100644
+index 0b4f17076ea84112c6ae5b93865f08259f98f078..d21de16dbf859cd0475852a46f60cccc9209d330 100644
 --- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 +++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 @@ -1,16 +1,19 @@
@@ -178,7 +178,7 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..ab8deadd437c1eb839cc06a9c08bf4e7
  
  public final class OwnerDomainExecutor {
  
-@@ -32,8 +36,12 @@ public final class OwnerDomainExecutor {
+@@ -32,8 +36,15 @@ public final class OwnerDomainExecutor {
          ASYNC_IO
      }
  
@@ -188,20 +188,66 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..ab8deadd437c1eb839cc06a9c08bf4e7
 +    private static final Object COOPERATIVE_WAITS_LOCK = new Object();
 +    private static final CooperativeWait[] NO_COOPERATIVE_WAITS = new CooperativeWait[0];
 +    private static volatile CooperativeWait[] cooperativeWaits = NO_COOPERATIVE_WAITS;
++    private static final int MAX_COOPERATIVE_WAIT_DEPTH = 32;
++    private static final int COOPERATIVE_WORK_SLICE = 64;
++    private static final ThreadLocal<int[]> COOPERATIVE_WAIT_DEPTH = ThreadLocal.withInitial(() -> new int[1]);
      private static final java.util.concurrent.atomic.LongAdder EXECUTE_INLINE = new java.util.concurrent.atomic.LongAdder();
      private static final java.util.concurrent.atomic.LongAdder EXECUTE_HANDOFF = new java.util.concurrent.atomic.LongAdder();
      private static final java.util.concurrent.atomic.LongAdder[] EXECUTE_INLINE_BY_DOMAIN = createDomainCounters();
-@@ -341,6 +349,9 @@ public final class OwnerDomainExecutor {
+@@ -324,14 +335,19 @@ public final class OwnerDomainExecutor {
+     }
+ 
+     public static void execute(final Owner owner, final Runnable task) {
+-        executeInternal(owner, task, null);
++        executeInternal(owner, task, null, null);
+     }
+ 
+     // Loom - onUnreachable fires when the handoff target can no longer take the task (currently only a
+     // player owner whose player has disconnected). Fire-and-forget callers pass null and keep the historic
+     // drop semantics; future-returning callers use it to fail the future instead of leaving it pending
+     // forever.
+-    private static void executeInternal(final Owner owner, final Runnable task, final @Nullable Runnable onUnreachable) {
++    private static void executeInternal(
++        final Owner owner,
++        final Runnable task,
++        final @Nullable Runnable onUnreachable,
++        final @Nullable CompletableFuture<?> completion
++    ) {
+         Objects.requireNonNull(owner, "owner");
+         Objects.requireNonNull(task, "task");
+         if (isOwner(owner)) {
+@@ -341,12 +357,15 @@ public final class OwnerDomainExecutor {
          }
  
          recordHandoff(owner);
-+        if (onUnreachable != null && dispatchToCooperativeWait(owner, task)) {
++        if (onUnreachable != null && dispatchToCooperativeWait(owner, task, completion)) {
 +            return;
 +        }
          switch (owner.domain()) {
-             case GLOBAL_CONTROL -> enqueueGlobal(owner, task);
-             case REGION -> enqueueRegion(owner, task);
-@@ -390,6 +401,68 @@ public final class OwnerDomainExecutor {
+-            case GLOBAL_CONTROL -> enqueueGlobal(owner, task);
+-            case REGION -> enqueueRegion(owner, task);
+-            case PLAYER -> enqueuePlayer(owner, task, onUnreachable);
+-            case LOGIN -> LOGIN_EXECUTOR.execute(wrap(owner, task));
+-            case ASYNC_IO -> Util.nonCriticalIoPool().execute(wrap(owner, task));
++            case GLOBAL_CONTROL -> enqueueGlobal(owner, task, completion);
++            case REGION -> enqueueRegion(owner, task, completion);
++            case PLAYER -> enqueuePlayer(owner, task, onUnreachable, completion);
++            case LOGIN -> LOGIN_EXECUTOR.execute(wrap(owner, task, completion));
++            case ASYNC_IO -> Util.nonCriticalIoPool().execute(wrap(owner, task, completion));
+         }
+     }
+ 
+@@ -382,7 +401,8 @@ public final class OwnerDomainExecutor {
+                 },
+                 () -> future.completeExceptionally(
+                     new RejectedExecutionException("Owner is no longer reachable: " + owner.describe())
+-                )
++                ),
++                future
+             );
+         } catch (final RejectedExecutionException rejected) {
+             future.completeExceptionally(rejected);
+@@ -390,6 +410,87 @@ public final class OwnerDomainExecutor {
          return future;
      }
  
@@ -233,6 +279,12 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..ab8deadd437c1eb839cc06a9c08bf4e7
 +            throw new IllegalStateException("Cooperative wait requires a synchronous owner domain: " + operation);
 +        }
 +
++        final int[] depth = COOPERATIVE_WAIT_DEPTH.get();
++        if (++depth[0] > MAX_COOPERATIVE_WAIT_DEPTH) {
++            --depth[0];
++            throw new IllegalStateException("Cooperative wait nesting exceeded " + MAX_COOPERATIVE_WAIT_DEPTH + " for " + operation);
++        }
++
 +        final CooperativeWait wait = new CooperativeWait(Thread.currentThread(), ownerContext, operation);
 +        registerCooperativeWait(wait);
 +
@@ -240,8 +292,18 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..ab8deadd437c1eb839cc06a9c08bf4e7
 +        try {
 +            final CompletableFuture<T> future = Objects.requireNonNull(futureSupplier.get(), "futureSupplier returned null future");
 +            future.whenComplete((result, throwable) -> wait.signal());
++            int workInSlice = 0;
 +            while (!future.isDone()) {
-+                if (!wait.runOne() && !wait.runQueuedOwnerTask()) {
++                if (wait.runOneCompleting(future)
++                    || wait.runQueuedOwnerTaskCompleting(future)
++                    || wait.runOne()
++                    || wait.runQueuedOwnerTask()) {
++                    if (++workInSlice == COOPERATIVE_WORK_SLICE) {
++                        workInSlice = 0;
++                        Thread.yield();
++                    }
++                } else {
++                    workInSlice = 0;
 +                    LockSupport.park(wait);
 +                    if (Thread.interrupted()) {
 +                        interrupted = true;
@@ -257,6 +319,9 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..ab8deadd437c1eb839cc06a9c08bf4e7
 +        } finally {
 +            wait.stopAccepting();
 +            unregisterCooperativeWait(wait);
++            if (--depth[0] == 0) {
++                COOPERATIVE_WAIT_DEPTH.remove();
++            }
 +            if (interrupted) {
 +                Thread.currentThread().interrupt();
 +            }
@@ -270,15 +335,20 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..ab8deadd437c1eb839cc06a9c08bf4e7
      public static Diagnostics snapshotDiagnostics() {
          final EnumMap<Domain, DomainDiagnostics> domains = new EnumMap<>(Domain.class);
          for (final Domain domain : Domain.values()) {
-@@ -404,6 +477,51 @@ public final class OwnerDomainExecutor {
+@@ -404,20 +505,77 @@ public final class OwnerDomainExecutor {
          return new Diagnostics(EXECUTE_INLINE.sum(), EXECUTE_HANDOFF.sum(), Map.copyOf(domains));
      }
  
-+    private static boolean dispatchToCooperativeWait(final Owner owner, final Runnable task) {
+-    private static void enqueueGlobal(final Owner owner, final Runnable task) {
++    private static boolean dispatchToCooperativeWait(
++        final Owner owner,
++        final Runnable task,
++        final @Nullable CompletableFuture<?> completion
++    ) {
 +        final CooperativeWait[] waits = cooperativeWaits;
 +        for (int i = waits.length - 1; i >= 0; --i) {
 +            final CooperativeWait wait = waits[i];
-+            if (wait.accepts(owner) && wait.offer(wrap(owner, task))) {
++            if (wait.accepts(owner) && wait.offer(wrap(owner, task, completion))) {
 +                return true;
 +            }
 +        }
@@ -319,24 +389,98 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..ab8deadd437c1eb839cc06a9c08bf4e7
 +        }
 +    }
 +
-     private static void enqueueGlobal(final Owner owner, final Runnable task) {
++    private static void enqueueGlobal(
++        final Owner owner,
++        final Runnable task,
++        final @Nullable CompletableFuture<?> completion
++    ) {
          final MinecraftServer server = owner.server();
-         if (server == null || !server.enqueueGlobalOwnerTask(wrap(owner, task))) {
-@@ -459,11 +577,24 @@ public final class OwnerDomainExecutor {
+-        if (server == null || !server.enqueueGlobalOwnerTask(wrap(owner, task))) {
++        if (server == null || !server.enqueueGlobalOwnerTask(wrap(owner, task, completion))) {
+             throw new RejectedExecutionException("Server is unavailable for " + owner.describe());
+         }
      }
  
-     private static Runnable wrap(final Owner owner, final Runnable task) {
+-    private static void enqueueRegion(final Owner owner, final Runnable task) {
++    private static void enqueueRegion(
++        final Owner owner,
++        final Runnable task,
++        final @Nullable CompletableFuture<?> completion
++    ) {
+         final ServerLevel level = owner.level();
+         if (level == null) {
+             throw new RejectedExecutionException("Region owner has no level: " + owner.describe());
+         }
+         if (isFullLevelRegion(owner, level)) {
+-            TickRegions.sendFullLevelContinuation(level, wrap(owner, task));
++            TickRegions.sendFullLevelContinuation(level, wrap(owner, task, completion));
+             return;
+         }
+         if (owner.minChunkX() != owner.maxChunkX() || owner.minChunkZ() != owner.maxChunkZ()) {
+@@ -427,7 +585,7 @@ public final class OwnerDomainExecutor {
+                 owner.minChunkZ(),
+                 owner.maxChunkX(),
+                 owner.maxChunkZ(),
+-                wrap(owner, task)
++                wrap(owner, task, completion)
+             );
+             return;
+         }
+@@ -436,11 +594,16 @@ public final class OwnerDomainExecutor {
+             owner.chunkX(),
+             owner.chunkZ(),
+             "owner-domain:" + owner.operation(),
+-            wrap(owner, task)
++            wrap(owner, task, completion)
+         );
+     }
+ 
+-    private static void enqueuePlayer(final Owner owner, final Runnable task, final @Nullable Runnable onUnreachable) {
++    private static void enqueuePlayer(
++        final Owner owner,
++        final Runnable task,
++        final @Nullable Runnable onUnreachable,
++        final @Nullable CompletableFuture<?> completion
++    ) {
+         final ServerPlayer player = owner.player();
+         if (player == null || player.hasDisconnected()) {
+             if (onUnreachable != null) {
+@@ -451,19 +614,42 @@ public final class OwnerDomainExecutor {
+         final Owner currentLocation = player(player, owner.operation());
+         enqueueRegion(currentLocation, () -> {
+             if (!player.hasDisconnected() && player.getUUID().equals(owner.playerId())) {
+-                wrap(currentLocation, task).run();
++                wrap(currentLocation, task, completion).run();
+             } else if (onUnreachable != null) {
+                 onUnreachable.run();
+             }
+-        });
++        }, completion);
+     }
+ 
+-    private static Runnable wrap(final Owner owner, final Runnable task) {
 -        return () -> {
-+        return new OwnerTask(owner, task);
++    private static Runnable wrap(
++        final Owner owner,
++        final Runnable task,
++        final @Nullable CompletableFuture<?> completion
++    ) {
++        return new OwnerTask(owner, task, completion);
 +    }
 +
 +    private static final class OwnerTask implements Runnable {
 +        private final Owner owner;
 +        private final Runnable task;
++        private final @Nullable CompletableFuture<?> completion;
 +
-+        private OwnerTask(final Owner owner, final Runnable task) {
++        private OwnerTask(final Owner owner, final Runnable task, final @Nullable CompletableFuture<?> completion) {
 +            this.owner = owner;
 +            this.task = task;
++            this.completion = completion;
++        }
++
++        private boolean completes(final CompletableFuture<?> future) {
++            return this.completion == future;
 +        }
 +
 +        @Override
@@ -350,7 +494,7 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..ab8deadd437c1eb839cc06a9c08bf4e7
      }
  
      private static java.util.concurrent.atomic.LongAdder[] createDomainCounters() {
-@@ -519,6 +650,84 @@ public final class OwnerDomainExecutor {
+@@ -519,6 +705,114 @@ public final class OwnerDomainExecutor {
          }
      }
  
@@ -394,25 +538,49 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..ab8deadd437c1eb839cc06a9c08bf4e7
 +            if (task == null) {
 +                return false;
 +            }
++            this.runTask(task);
++            return true;
++        }
++
++        private boolean runOneCompleting(final CompletableFuture<?> future) {
++            for (final Runnable task : this.tasks) {
++                if (task instanceof OwnerTask ownerTask
++                    && ownerTask.completes(future)
++                    && this.tasks.remove(task)) {
++                    this.runTask(task);
++                    return true;
++                }
++            }
++            return false;
++        }
++
++        private void runTask(final Runnable task) {
 +            try {
 +                task.run();
 +            } catch (final Throwable throwable) {
 +                LOGGER.error("Owner task failed during cooperative wait for {}", this.operation, throwable);
 +            }
-+            return true;
++        }
++
++        private boolean runQueuedOwnerTaskCompleting(final CompletableFuture<?> future) {
++            return this.runQueuedOwnerTask(task -> this.acceptsTaskCompleting(task, future));
 +        }
 +
 +        private boolean runQueuedOwnerTask() {
++            return this.runQueuedOwnerTask(this::acceptsTask);
++        }
++
++        private boolean runQueuedOwnerTask(final java.util.function.Predicate<Runnable> predicate) {
 +            for (OwnerContext context = this.ownerContext; context != null; context = context.previous()) {
 +                final Owner owner = context.owner();
 +                if (owner.domain() == Domain.GLOBAL_CONTROL) {
 +                    final MinecraftServer server = owner.server();
-+                    if (server != null && server.runQueuedGlobalOwnerTask(this::acceptsTask)) {
++                    if (server != null && server.runQueuedGlobalOwnerTask(predicate)) {
 +                        return true;
 +                    }
 +                } else if ((owner.domain() == Domain.REGION || owner.domain() == Domain.PLAYER)
 +                    && owner.level() != null
-+                    && TickRegions.runQueuedOwnerTask(owner.level(), this::acceptsTask)) {
++                    && TickRegions.runQueuedOwnerTask(owner.level(), predicate)) {
 +                    return true;
 +                }
 +            }
@@ -421,6 +589,12 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..ab8deadd437c1eb839cc06a9c08bf4e7
 +
 +        private boolean acceptsTask(final Runnable task) {
 +            return task instanceof OwnerTask ownerTask && this.accepts(ownerTask.owner);
++        }
++
++        private boolean acceptsTaskCompleting(final Runnable task, final CompletableFuture<?> future) {
++            return task instanceof OwnerTask ownerTask
++                && ownerTask.completes(future)
++                && this.accepts(ownerTask.owner);
 +        }
 +
 +        private synchronized void stopAccepting() {
