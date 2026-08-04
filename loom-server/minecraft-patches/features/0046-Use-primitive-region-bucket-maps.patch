@@ -6,7 +6,7 @@ Subject: [PATCH] Use primitive region bucket maps
 Avoid boxed keys and hash nodes while keeping signed bucket order and stable task order across region dispatch paths.
 
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
-index dcffa1217cebeedb90a48dda8d04ff0c59adcfbe..b7c000a6ad55e580dfad9f14be4cc299efaba294 100644
+index 18fa40dd1740e50d1b361e27d764e01dc4ff3a1f..57fbf6e2f24f92769d2d307975b76ac5b34a96fa 100644
 --- a/net/minecraft/server/threading/TickRegions.java
 +++ b/net/minecraft/server/threading/TickRegions.java
 @@ -1,6 +1,7 @@
@@ -25,7 +25,7 @@ index dcffa1217cebeedb90a48dda8d04ff0c59adcfbe..b7c000a6ad55e580dfad9f14be4cc299
  import java.util.Comparator;
  import java.util.EnumMap;
  import java.util.HashMap;
-@@ -1037,18 +1039,26 @@ public class TickRegions {
+@@ -1038,18 +1040,26 @@ public class TickRegions {
          final ServerLevel world,
          final List<RegionBoundTask> tasks
      ) {
@@ -59,7 +59,7 @@ index dcffa1217cebeedb90a48dda8d04ff0c59adcfbe..b7c000a6ad55e580dfad9f14be4cc299
          }
          return buckets;
      }
-@@ -1931,39 +1941,33 @@ public class TickRegions {
+@@ -1995,39 +2005,33 @@ public class TickRegions {
          }
  
          private List<TaskBucket> bucketTasks(final List<RegionScheduledTask> toRun) {

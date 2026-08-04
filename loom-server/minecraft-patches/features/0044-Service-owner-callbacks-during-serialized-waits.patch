@@ -4,6 +4,36 @@ Date: Thu, 30 Jul 2026 03:02:49 +0000
 Subject: [PATCH] Service owner callbacks during serialized waits
 
 
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 358f34322e05d5ec72a6b0c29b6f2fbd58479be6..940e80117e945385863cf8c82b5c64cb5d47162e 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -2610,6 +2610,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         return true;
+     }
+ 
++    public boolean runQueuedGlobalOwnerTask(final java.util.function.Predicate<Runnable> predicate) {
++        return this.runQueuedTaskMatching(task -> predicate.test(task.runnable()));
++    }
++
+     @Override
+     public void executeIfPossible(final Runnable command) {
+         if (this.isStopped()) {
+diff --git a/net/minecraft/server/TickTask.java b/net/minecraft/server/TickTask.java
+index b6ee28a357d6689e8870d47b677772520d8a842c..bc3e88158f57288a32444066758c634c42b4a1dc 100644
+--- a/net/minecraft/server/TickTask.java
++++ b/net/minecraft/server/TickTask.java
+@@ -13,6 +13,10 @@ public class TickTask implements Runnable {
+         return this.tick;
+     }
+ 
++    public Runnable runnable() {
++        return this.runnable;
++    }
++
+     @Override
+     public void run() {
+         this.runnable.run();
 diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
 index 185abbc450eb03cf285854b0decd7950a7925f27..5974592669221273ef99aa192428e7a2a7683d3f 100644
 --- a/net/minecraft/server/threading/RegionTickStaging.java
@@ -27,8 +57,97 @@ index 185abbc450eb03cf285854b0decd7950a7925f27..5974592669221273ef99aa192428e7a2
      // owner in postWorldTick(world).drainMailbox() once the parallel phase joins. It must be fire-and-forget:
      // the owner remains synchronously phase-bound and only helps owner-scoped region shards; it does not run
      // global callbacks until every world completes, so a synchronous round-trip would deadlock.
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index dcffa1217cebeedb90a48dda8d04ff0c59adcfbe..18fa40dd1740e50d1b361e27d764e01dc4ff3a1f 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger;
+ import java.util.concurrent.atomic.AtomicReference;
+ import java.util.function.Consumer;
+ import java.util.function.IntConsumer;
++import java.util.function.Predicate;
+ 
+ /**
+  * Runtime region ownership state used by thread checks.
+@@ -1421,6 +1422,12 @@ public class TickRegions {
+         stateFor(world).enqueueFullLevelContinuation(action);
+     }
+ 
++    public static boolean runQueuedOwnerTask(final ServerLevel world, final Predicate<Runnable> predicate) {
++        Objects.requireNonNull(world, "World may not be null");
++        Objects.requireNonNull(predicate, "Predicate may not be null");
++        return stateFor(world).runQueuedOwnerTask(predicate);
++    }
++
+     // Loom - tick independent worlds through the same cooperative batch as region shards. The server thread
+     // participates with its GLOBAL_CONTROL owner temporarily detached; nested world coordinators help ready
+     // region work but do not recursively enter another world tick. Failures remain deterministic by world
+@@ -1808,6 +1815,63 @@ public class TickRegions {
+             }
+         }
+ 
++        private boolean runQueuedOwnerTask(final Predicate<Runnable> predicate) {
++            Runnable continuation = null;
++            CrossRegionMessage message = null;
++            synchronized (this.lock) {
++                for (final Iterator<RegionBoundTask> iterator = this.regionContinuations.iterator(); iterator.hasNext(); ) {
++                    final RegionBoundTask candidate = iterator.next();
++                    if (predicate.test(candidate.task())) {
++                        iterator.remove();
++                        continuation = candidate.task();
++                        break;
++                    }
++                }
++                if (continuation == null) {
++                    for (final Iterator<Runnable> iterator = this.fullLevelContinuations.iterator(); iterator.hasNext(); ) {
++                        final Runnable candidate = iterator.next();
++                        if (predicate.test(candidate)) {
++                            iterator.remove();
++                            continuation = candidate;
++                            break;
++                        }
++                    }
++                }
++                if (continuation == null) {
++                    for (final Iterator<CrossRegionMessage> iterator = this.mailbox.iterator(); iterator.hasNext(); ) {
++                        final CrossRegionMessage candidate = iterator.next();
++                        if (predicate.test(candidate.action())) {
++                            iterator.remove();
++                            message = candidate;
++                            break;
++                        }
++                    }
++                }
++            }
++
++            if (continuation != null) {
++                try {
++                    continuation.run();
++                } catch (final Throwable throwable) {
++                    recordDiagnostic(
++                        DiagnosticType.MAILBOX_MESSAGE_DROPPED,
++                        this.world,
++                        Integer.MIN_VALUE,
++                        Integer.MIN_VALUE,
++                        Integer.MAX_VALUE,
++                        Integer.MAX_VALUE,
++                        "Owner continuation threw exception during cooperative wait: " + throwable
++                    );
++                }
++                return true;
++            }
++            if (message != null) {
++                this.runMailboxMessage(message);
++                return true;
++            }
++            return false;
++        }
++
+         private void drainRegionContinuations() {
+             final List<RegionBoundTask> continuations;
+             synchronized (this.lock) {
 diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
-index 0b4f17076ea84112c6ae5b93865f08259f98f078..ac545c3c705f72032539b91df12102b459254351 100644
+index 0b4f17076ea84112c6ae5b93865f08259f98f078..ab8deadd437c1eb839cc06a9c08bf4e7879b6e7a 100644
 --- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 +++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 @@ -1,16 +1,19 @@
@@ -122,7 +241,7 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..ac545c3c705f72032539b91df12102b4
 +            final CompletableFuture<T> future = Objects.requireNonNull(futureSupplier.get(), "futureSupplier returned null future");
 +            future.whenComplete((result, throwable) -> wait.signal());
 +            while (!future.isDone()) {
-+                if (!wait.runOne()) {
++                if (!wait.runOne() && !wait.runQueuedOwnerTask()) {
 +                    LockSupport.park(wait);
 +                    if (Thread.interrupted()) {
 +                        interrupted = true;
@@ -203,7 +322,35 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..ac545c3c705f72032539b91df12102b4
      private static void enqueueGlobal(final Owner owner, final Runnable task) {
          final MinecraftServer server = owner.server();
          if (server == null || !server.enqueueGlobalOwnerTask(wrap(owner, task))) {
-@@ -519,6 +637,63 @@ public final class OwnerDomainExecutor {
+@@ -459,11 +577,24 @@ public final class OwnerDomainExecutor {
+     }
+ 
+     private static Runnable wrap(final Owner owner, final Runnable task) {
+-        return () -> {
++        return new OwnerTask(owner, task);
++    }
++
++    private static final class OwnerTask implements Runnable {
++        private final Owner owner;
++        private final Runnable task;
++
++        private OwnerTask(final Owner owner, final Runnable task) {
++            this.owner = owner;
++            this.task = task;
++        }
++
++        @Override
++        public void run() {
+             try (Scope ignored = enter(owner)) {
+-                task.run();
++                this.task.run();
+             }
+-        };
++        }
+     }
+ 
+     private static java.util.concurrent.atomic.LongAdder[] createDomainCounters() {
+@@ -519,6 +650,84 @@ public final class OwnerDomainExecutor {
          }
      }
  
@@ -255,6 +402,27 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..ac545c3c705f72032539b91df12102b4
 +            return true;
 +        }
 +
++        private boolean runQueuedOwnerTask() {
++            for (OwnerContext context = this.ownerContext; context != null; context = context.previous()) {
++                final Owner owner = context.owner();
++                if (owner.domain() == Domain.GLOBAL_CONTROL) {
++                    final MinecraftServer server = owner.server();
++                    if (server != null && server.runQueuedGlobalOwnerTask(this::acceptsTask)) {
++                        return true;
++                    }
++                } else if ((owner.domain() == Domain.REGION || owner.domain() == Domain.PLAYER)
++                    && owner.level() != null
++                    && TickRegions.runQueuedOwnerTask(owner.level(), this::acceptsTask)) {
++                    return true;
++                }
++            }
++            return false;
++        }
++
++        private boolean acceptsTask(final Runnable task) {
++            return task instanceof OwnerTask ownerTask && this.accepts(ownerTask.owner);
++        }
++
 +        private synchronized void stopAccepting() {
 +            this.accepting = false;
 +        }
@@ -267,3 +435,28 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..ac545c3c705f72032539b91df12102b4
      public static final class Scope implements AutoCloseable {
          private final @Nullable OwnerContext previous;
          private final boolean requireEmptyOnClose;
+diff --git a/net/minecraft/util/thread/BlockableEventLoop.java b/net/minecraft/util/thread/BlockableEventLoop.java
+index c65c7541dab5b9d92715fde50c17a83c7869e81a..1e16a40e21a21dcca4080c231dac5fa281df1b05 100644
+--- a/net/minecraft/util/thread/BlockableEventLoop.java
++++ b/net/minecraft/util/thread/BlockableEventLoop.java
+@@ -79,6 +79,20 @@ public abstract class BlockableEventLoop<R extends Runnable> implements Executor
+ 
+         return true;
+     }
++
++    public boolean runQueuedTaskMatching(final java.util.function.Predicate<? super R> predicate) {
++        if (!this.isSameThread()) {
++            throw new IllegalStateException();
++        }
++
++        for (final R run : this.pendingRunnables) {
++            if ((predicate == null || predicate.test(run)) && this.pendingRunnables.remove(run)) {
++                this.doRunTask(run);
++                return true;
++            }
++        }
++        return false;
++    }
+     // Paper end
+ 
+     protected abstract boolean shouldRun(final R task);

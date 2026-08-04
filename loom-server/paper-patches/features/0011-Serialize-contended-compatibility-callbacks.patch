@@ -27,9 +27,9 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
  import org.bukkit.Warning;
  import org.bukkit.event.Event;
 @@ -35,21 +34,6 @@ import org.jetbrains.annotations.NotNull;
-
+ 
  class PaperEventManager {
-
+ 
 -    // Loom - how long an owner-domain thread may retry a busy plugin apartment before giving up on the
 -    // dispatch. The lease holder is normally another worker finishing a listener within microseconds, so a
 -    // short bounded retry converts most contention losses into slightly delayed successful dispatches while
@@ -47,7 +47,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
 -
      private final Server server;
      private final CompatibilityKernel compatibilityKernel;
-
+ 
 @@ -70,13 +54,8 @@ class PaperEventManager {
          if (!event.isAsynchronous() && net.minecraft.server.threading.RegionTickStaging.stageEvent(event)) {
              return;
@@ -67,7 +67,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
 @@ -130,14 +109,6 @@ class PaperEventManager {
                      );
                  }
-
+ 
 -                if (plan.policy() == CompatibilityKernel.InvocationPolicy.REFUSE) {
 -                    this.compatibilityKernel.diagnostics().recordRefusal(
 -                        profile,
@@ -78,7 +78,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
 -
                  final CompatibilityTransaction.ListenerSnapshot beforeListener = transaction.beforeListener(lane);
                  final long callbackStart = System.nanoTime();
-
+ 
 @@ -157,9 +128,6 @@ class PaperEventManager {
                              this.compatibilityKernel.diagnostics().recordStrictFallback(profile, "strict policy for " + event.getEventName());
                              this.callThroughApartment(registration, event, transaction, profile, true, plan.path());
@@ -168,7 +168,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
 @@ -281,43 +200,6 @@ class PaperEventManager {
          }
      }
-
+ 
 -    // Loom - acquire the plugin apartment, retrying briefly on an owner-domain thread instead of failing the
 -    // dispatch outright. The busy lease normally belongs to another worker that releases it within
 -    // microseconds; waiting a few milliseconds rescues the dispatch (and with it a protection plugin's
@@ -212,7 +212,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
 @@ -330,11 +212,6 @@ class PaperEventManager {
          }
      }
-
+ 
 -    private static Throwable unwrapCompletionException(final CompletionException completionException) {
 -        final Throwable cause = completionException.getCause();
 -        return cause == null ? completionException : cause;
@@ -227,7 +227,7 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
 @@ -1,12 +1,13 @@
  package io.papermc.paper.plugin.manager.compat;
-
+ 
 +import java.util.ArrayDeque;
  import java.util.Objects;
 -import java.util.concurrent.Callable;
@@ -241,17 +241,17 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
 +import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
  import org.bukkit.plugin.Plugin;
  import org.jspecify.annotations.Nullable;
-
+ 
 @@ -22,47 +23,46 @@ public final class CompatibilityApartment {
      }
-
+ 
      private static final class Lease {
 -        private final Plugin plugin;
          private final long transactionId;
          private final Thread ownerThread;
 -        private final AtomicInteger depth = new AtomicInteger(1);
 +        private final AtomicInteger depth;
-
+ 
 -        private Lease(final Plugin plugin, final long transactionId, final Thread ownerThread) {
 -            this.plugin = plugin;
 +        private Lease(final long transactionId, final Thread ownerThread, final int depth) {
@@ -260,7 +260,7 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
 +            this.depth = new AtomicInteger(depth);
          }
      }
-
+ 
 +    private static final class LeaseRequest {
 +        private final long transactionId;
 +        private final Thread ownerThread;
@@ -282,7 +282,7 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
 +    private final AtomicInteger queuedLeaseCount = new AtomicInteger();
 +    private final Object leaseQueueLock = new Object();
 +    private final ArrayDeque<LeaseRequest> queuedLeases = new ArrayDeque<>();
-
+ 
      public CompatibilityApartment(final Plugin plugin) {
          this.plugin = Objects.requireNonNull(plugin, "plugin");
 -        this.strictFallbackExecutor = Executors.newSingleThreadExecutor(runnable -> {
@@ -291,11 +291,11 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
 -            return thread;
 -        });
      }
-
+ 
      public Plugin plugin() {
          return this.plugin;
      }
-
+ 
 -    public <T> CompletableFuture<T> submitStrictFallback(final Callable<T> action) {
 -        final CompletableFuture<T> future = new CompletableFuture<>();
 -        this.strictFallbackExecutor.execute(() -> {
@@ -314,7 +314,7 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
 @@ -81,46 +81,108 @@ public final class CompatibilityApartment {
          return this.enter(transactionId, null, strictFallback, path);
      }
-
+ 
 -    private Scope enter(
 +    public Scope enterSerialized(final CompatibilityTransaction transaction, final boolean strictFallback, final String path) {
 +        Objects.requireNonNull(transaction, "transaction");
@@ -347,7 +347,7 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
 +        }
 +        return this.openScope(grant.lease(), transactionId, transaction, strictFallback, path, grant.result());
 +    }
-
+ 
 +    private CompletableFuture<LeaseGrant> requestLease(final long transactionId, final Thread ownerThread) {
 +        while (true) {
 +            final Lease observed = this.activeLease.get();
@@ -412,7 +412,7 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
                  }
                  continue;
              }
-
+ 
 -            // Loom Fix 1d - re-enter on SAME-THREAD ownership alone, regardless of transactionId. This apartment
 -            // is per-plugin, so a thread that already holds this plugin's lease and re-enters is ALWAYS the
 -            // plugin's own synchronous, nested call — never a concurrent contender (a single thread cannot race
@@ -441,7 +441,7 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
 +                this.recoverAbandonedLease(current);
 +                continue;
              }
-
+ 
              return new Scope(
 @@ -138,7 +200,97 @@ public final class CompatibilityApartment {
          if (depth > 0) {
@@ -540,7 +540,7 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
 +            throw completionException;
 +        }
      }
-
+ 
      public record Scope(
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityContinuationBridge.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityContinuationBridge.java
 index 6c099d631ef9b1e6c80024b1a2759b6412f10824..24b4315ad79f4ba174f238e5ca5875ad27c73047 100644
@@ -549,7 +549,7 @@ index 6c099d631ef9b1e6c80024b1a2759b6412f10824..24b4315ad79f4ba174f238e5ca5875ad
 @@ -16,6 +16,29 @@ public final class CompatibilityContinuationBridge {
      private CompatibilityContinuationBridge() {
      }
-
+ 
 +    public static <T> T completeSynchronousContract(
 +        final PluginCompatibilityProfile profile,
 +        final CompatibilityDiagnostics diagnostics,
@@ -603,7 +603,7 @@ index b742b626ad6d4797b13feb620ae9fc4094e39168..b32e4ca1d5bce7a6ea33d4594c491889
 @@ -249,11 +251,11 @@ public final class CompatibilityDiagnostics {
          );
      }
-
+ 
 -    public void recordRefusal(final PluginCompatibilityProfile profile, final String reason) {
 -        this.refusals.increment();
 -        profile.noteRefusal(reason);
@@ -619,7 +619,7 @@ index b742b626ad6d4797b13feb620ae9fc4094e39168..b32e4ca1d5bce7a6ea33d4594c491889
 @@ -262,16 +264,13 @@ public final class CompatibilityDiagnostics {
          );
      }
-
+ 
 -    // Records a refusal for one dispatch without changing the plugin's persistent classification. Apartment
 -    // contention can clear before the next event, so record it separately from profile.noteRefusal.
 -    public void recordTransientRefusal(final PluginCompatibilityProfile profile, final String reason) {
@@ -688,7 +688,7 @@ index 00bfdcb7ea46d34157d75d1f2e81e953aff4af09..57f49f3c1cc6fb321c372a8fdf621da1
 -        REFUSE
 +        STRICT_FALLBACK
      }
-
+ 
      public enum ExecutionLane {
          FAST_LANE,
          TRANSACTION_LANE,
@@ -697,7 +697,7 @@ index 00bfdcb7ea46d34157d75d1f2e81e953aff4af09..57f49f3c1cc6fb321c372a8fdf621da1
 -        REFUSAL_LANE
 +        EMERGENCY_COMPATIBILITY_LANE
      }
-
+ 
      public enum DispatchRoute {
 @@ -30,7 +28,7 @@ public final class CompatibilityKernel {
          ORDERED_DECISION,
@@ -706,15 +706,15 @@ index 00bfdcb7ea46d34157d75d1f2e81e953aff4af09..57f49f3c1cc6fb321c372a8fdf621da1
 -        STRICT_REFUSAL
 +        STRICT_SERIALIZED
      }
-
+ 
      public record RoutingDecision(DispatchRoute route, String reason) {
 @@ -90,7 +88,7 @@ public final class CompatibilityKernel {
-
+ 
          boolean hasLegacy = false;
          boolean hasInternal = false;
 -        boolean hasStrictOrRefused = false;
 +        boolean hasStrict = false;
-
+ 
          for (int i = 0; i < listeners.length; ++i) {
              final RegisteredListener listener = listeners[i];
 @@ -103,15 +101,15 @@ public final class CompatibilityKernel {
@@ -729,7 +729,7 @@ index 00bfdcb7ea46d34157d75d1f2e81e953aff4af09..57f49f3c1cc6fb321c372a8fdf621da1
                  }
              }
          }
-
+ 
 -        if (hasStrictOrRefused) {
 -            return new RoutingDecision(DispatchRoute.STRICT_REFUSAL, "strict/refused listener state");
 +        if (hasStrict) {
@@ -744,7 +744,7 @@ index 00bfdcb7ea46d34157d75d1f2e81e953aff4af09..57f49f3c1cc6fb321c372a8fdf621da1
 -            case REFUSED -> InvocationPolicy.REFUSE;
          };
      }
-
+ 
 @@ -153,10 +150,6 @@ public final class CompatibilityKernel {
      ) {
          final String path = pathFor(transaction, listener);
@@ -768,7 +768,7 @@ index 00bfdcb7ea46d34157d75d1f2e81e953aff4af09..57f49f3c1cc6fb321c372a8fdf621da1
 -            case REFUSE -> ExecutionLane.REFUSAL_LANE;
          };
      }
-
+ 
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
 index 9faf357621bc38f7b7d4f5fda095633b6627aa33..58fc13eb4e929797769689282ef239314954bb95 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityServicesManager.java
@@ -783,9 +783,9 @@ index 9faf357621bc38f7b7d4f5fda095633b6627aa33..58fc13eb4e929797769689282ef23931
  import org.bukkit.plugin.RegisteredServiceProvider;
  import org.bukkit.plugin.ServicePriority;
 @@ -22,14 +20,6 @@ import org.jetbrains.annotations.Nullable;
-
+ 
  public final class CompatibilityServicesManager implements ServicesManager {
-
+ 
 -    // Loom - same budget as the event-dispatch handoff (PaperEventManager): the plugin's dedicated
 -    // strict-fallback thread waits out a busy lease instead of failing on the first try. A service call
 -    // must produce a return value, so on budget exhaustion this path still throws — but only after the
@@ -798,7 +798,7 @@ index 9faf357621bc38f7b7d4f5fda095633b6627aa33..58fc13eb4e929797769689282ef23931
      private final CompatibilityKernel compatibilityKernel;
      private final CompatibilityServiceCallGraph callGraph = new CompatibilityServiceCallGraph();
 @@ -167,10 +157,7 @@ public final class CompatibilityServicesManager implements ServicesManager {
-
+ 
              final PluginCompatibilityProfile profile = compatibilityKernel.profileFor(this.providerPlugin);
              if (graphEntry.cycleDetected()) {
 -                // A service call cycle is local to this invocation. The throw below breaks the recursion;
@@ -812,7 +812,7 @@ index 9faf357621bc38f7b7d4f5fda095633b6627aa33..58fc13eb4e929797769689282ef23931
 @@ -190,54 +177,17 @@ public final class CompatibilityServicesManager implements ServicesManager {
                          "service apartment busy " + this.service.getSimpleName() + "#" + method.getName() + " owner=" + scope.busyLease()
                      );
-
+ 
 -                    if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
 -                        compatibilityKernel.diagnostics().recordOwnerDomainWaitViolation(
 -                            profile,
@@ -827,7 +827,7 @@ index 9faf357621bc38f7b7d4f5fda095633b6627aa33..58fc13eb4e929797769689282ef23931
 +                        profile,
 +                        "service apartment busy " + this.service.getSimpleName() + "#" + method.getName()
 +                    );
-
+ 
                      final long start = System.nanoTime();
                      try {
 -                        return compatibilityKernel.apartmentFor(this.providerPlugin)
@@ -875,13 +875,31 @@ index 9faf357621bc38f7b7d4f5fda095633b6627aa33..58fc13eb4e929797769689282ef23931
 @@ -276,9 +226,5 @@ public final class CompatibilityServicesManager implements ServicesManager {
              return StackWalkerUtil.getFirstPluginCaller();
          }
-
+ 
 -        private static Throwable unwrapCompletionException(final CompletionException completionException) {
 -            final Throwable cause = completionException.getCause();
 -            return cause == null ? completionException : cause;
 -        }
      }
  }
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridge.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridge.java
+index 50dd4e1c08d432d6a244fbfe5e29b297192b28e7..fb853a4b543340f669f3f490df78089ab62cf86f 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridge.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridge.java
+@@ -31,7 +31,12 @@ public final class CompatibilitySyncBridge {
+         final PluginCompatibilityProfile profile = diagnostics.profileFor(plugin);
+         final long started = System.nanoTime();
+         try {
+-            return CompatibilityContinuationBridge.callOffOwner(profile, diagnostics, operation, future::join);
++            return CompatibilityContinuationBridge.completeSynchronousContract(
++                profile,
++                diagnostics,
++                operation,
++                () -> future
++            );
+         } catch (final RuntimeException | Error throwable) {
+             throw throwable;
+         } catch (final Throwable throwable) {
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
 index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f4323066e 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
@@ -893,7 +911,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
 -        LEGACY_STRICT,
 -        REFUSED;
 +        LEGACY_STRICT;
-
+ 
          public boolean atLeast(final Mode mode) {
              return this.ordinal() >= mode.ordinal();
 @@ -32,8 +31,7 @@ public final class PluginCompatibilityProfile {
@@ -904,7 +922,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
 -        REFUSED
 +        FORCED_SERIAL_FALLBACK
      }
-
+ 
      public enum EscalationReason {
 @@ -44,8 +42,7 @@ public final class PluginCompatibilityProfile {
          OWNER_BLOCKING_WAIT,
@@ -914,7 +932,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
 -        REFUSAL
 +        STRICT_FALLBACK
      }
-
+ 
      public record Escalation(
 @@ -69,7 +66,7 @@ public final class PluginCompatibilityProfile {
          long asyncBukkitViolations,
@@ -932,19 +950,19 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
 -    private final LongAdder refusals = new LongAdder();
 +    private final LongAdder serializedHandoffs = new LongAdder();
      private final LongAdder ownerDomainWaitViolations = new LongAdder();
-
+ 
      private final Map<String, LongAdder> callbackNanosByEvent = new ConcurrentHashMap<>();
 @@ -195,9 +192,8 @@ public final class PluginCompatibilityProfile {
          this.escalate(Mode.LEGACY_STRICT, EscalationReason.STRICT_FALLBACK, detail);
      }
-
+ 
 -    public void noteRefusal(final String detail) {
 -        this.refusals.increment();
 -        this.escalate(Mode.REFUSED, EscalationReason.REFUSAL, detail);
 +    public void noteSerializedHandoff() {
 +        this.serializedHandoffs.increment();
      }
-
+ 
      public void noteForcedSerializedFallback(final String path, final String detail) {
 @@ -244,7 +240,7 @@ public final class PluginCompatibilityProfile {
              this.asyncBukkitViolations.longValue(),
@@ -972,7 +990,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
 -            this.pathStates.replaceAll((ignored, existing) -> existing == State.FORCED_SERIAL_FALLBACK ? existing : State.REFUSED);
 -        }
      }
-
+ 
      private void markPathState(final String path, final State desiredState) {
          final String normalized = normalizePath(path);
          this.pathStates.compute(normalized, (ignored, existing) -> {
@@ -986,7 +1004,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
              if (desiredState == State.LEGACY_DEGRADED && existing == State.LEGACY_DEGRADED) {
 @@ -323,11 +313,7 @@ public final class PluginCompatibilityProfile {
      }
-
+ 
      private State defaultState() {
 -        return switch (this.mode) {
 -            case NATIVE_LOOM_AWARE -> State.NATIVE_FAST_PATH;
@@ -995,7 +1013,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
 -        };
 +        return this.mode == Mode.NATIVE_LOOM_AWARE ? State.NATIVE_FAST_PATH : State.LEGACY_OBSERVED_SAFE;
      }
-
+ 
      private static String normalizePath(final String path) {
 diff --git a/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java b/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
 index b9adac0a54e18f7d662e6cd63403a729145b16a4..2886d4c00ab68832eb789ef00f4b7cff6d6512fa 100644
@@ -1003,7 +1021,7 @@ index b9adac0a54e18f7d662e6cd63403a729145b16a4..2886d4c00ab68832eb789ef00f4b7cff
 +++ b/src/main/java/org/spigotmc/LoomTicksPerSecondCommand.java
 @@ -76,20 +76,18 @@ public class LoomTicksPerSecondCommand extends Command {
          final TickRegions.RuntimeDiagnostics snap = TickRegions.snapshotDiagnostics();
-
+ 
          final CompatibilityDiagnostics.Snapshot compat = CompatibilityDiagnostics.global().snapshot();
 -        int fast = 0, degraded = 0, strict = 0, refused = 0;
 +        int fast = 0, degraded = 0, strict = 0;
@@ -1017,15 +1035,15 @@ index b9adac0a54e18f7d662e6cd63403a729145b16a4..2886d4c00ab68832eb789ef00f4b7cff
          }
          final int pluginCount = compat.plugins().size();
          final double pluginHealthFrac = pluginCount > 0 ? (double) fast / (double) pluginCount : 1.0D;
-
+ 
          final long asyncViolations = compat.asyncViolations();
 -        final long refusedPaths = compat.refusals();
          final long ownerViolations = snap.ownershipFailures() + snap.leaseClaimFailures() + snap.mailboxMessagesDropped();
-
+ 
          final Runtime rt = Runtime.getRuntime();
 @@ -113,17 +111,16 @@ public class LoomTicksPerSecondCommand extends Command {
              .append(text(coresUsed < 0.0D ? "  n/a" : "  " + ONE_DP.get().format(coresUsed) + " / " + cores + " cores", SOFT)).build());
-
+ 
          sender.sendMessage(text().append(this.label("ᴘʟᴜɢɪɴꜱ"))
 -            .append(this.bar(pluginHealthFrac, this.pluginColour(refused, strict, degraded)))
 +            .append(this.bar(pluginHealthFrac, this.pluginColour(strict, degraded)))
@@ -1034,7 +1052,7 @@ index b9adac0a54e18f7d662e6cd63403a729145b16a4..2886d4c00ab68832eb789ef00f4b7cff
 -            .append(text(" · " + strict + " strict", strict > 0 ? NamedTextColor.GOLD : SUBTLE))
 -            .append(text(" · " + refused + " refused", refused > 0 ? NamedTextColor.RED : SUBTLE)).build());
 +            .append(text(" · " + strict + " strict", strict > 0 ? NamedTextColor.GOLD : SUBTLE)).build());
-
+ 
 -        final long safetyTotal = asyncViolations + refusedPaths + ownerViolations;
 +        final long safetyTotal = asyncViolations + ownerViolations;
          if (safetyTotal > 0L) {
@@ -1048,7 +1066,7 @@ index b9adac0a54e18f7d662e6cd63403a729145b16a4..2886d4c00ab68832eb789ef00f4b7cff
 @@ -180,10 +177,7 @@ public class LoomTicksPerSecondCommand extends Command {
          return mspt < 35.0D ? NamedTextColor.GREEN : (mspt < 50.0D ? NamedTextColor.YELLOW : NamedTextColor.RED);
      }
-
+ 
 -    private TextColor pluginColour(final int refused, final int strict, final int degraded) {
 -        if (refused > 0) {
 -            return NamedTextColor.RED;
@@ -1063,7 +1081,7 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..498549d0183f47d269377fb5ff408ae1
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
 @@ -1,9 +1,19 @@
  package io.papermc.paper.plugin.manager.compat;
-
+ 
 +import ca.spottedleaf.moonrise.common.util.TickThread;
  import io.papermc.paper.plugin.configuration.PluginMeta;
 +import java.util.ArrayList;
@@ -1082,7 +1100,7 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..498549d0183f47d269377fb5ff408ae1
  import org.bukkit.event.HandlerList;
  import org.bukkit.plugin.Plugin;
 @@ -41,11 +51,8 @@ class CompatibilityApartmentTest {
-
+ 
      @Test
      void sameThreadNestedDifferentTransactionReenters() {
 -        // Loom Fix 1d regression - a thread that already holds this plugin's lease re-enters even when the
@@ -1097,7 +1115,7 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..498549d0183f47d269377fb5ff408ae1
          final CompatibilityTransaction outer = transactionFor(plugin);
 @@ -66,12 +73,198 @@ class CompatibilityApartmentTest {
      }
-
+ 
      @Test
 -    void strictFallbackExecutorRunsSerializedTasks() {
 +    void serializedEntryWaitsForLeaseAndDeliversExactlyOnce() throws Exception {
@@ -1108,7 +1126,7 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..498549d0183f47d269377fb5ff408ae1
 +        final CountDownLatch leaseHeld = new CountDownLatch(1);
 +        final CountDownLatch releaseLease = new CountDownLatch(1);
 +        final AtomicReference<Throwable> holderFailure = new AtomicReference<>();
-
+ 
 -        final String value = apartment.submitStrictFallback(() -> "ok").join();
 -        Assertions.assertEquals("ok", value);
 +        final Thread holder = new Thread(() -> {
@@ -1295,14 +1313,14 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..498549d0183f47d269377fb5ff408ae1
 +        }
 +        Assertions.assertEquals(count, apartment.queuedLeaseCount());
      }
-
+ 
      private static CompatibilityTransaction transactionFor(final Plugin plugin) {
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityCallbackTestSuite.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityCallbackTestSuite.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..2784815e33f49790d484a982a9024f9ef8bdcfd9
+index 0000000000000000000000000000000000000000..bd00749124e2d3c2504b51f0214c4beb8fedc5d9
 --- /dev/null
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityCallbackTestSuite.java
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,24 @@
 +package io.papermc.paper.plugin.manager.compat;
 +
 +import org.junit.platform.suite.api.ConfigurationParameter;
@@ -1316,10 +1334,12 @@ index 0000000000000000000000000000000000000000..2784815e33f49790d484a982a9024f9e
 +@IncludeTags("Normal")
 +@SelectClasses({
 +    CompatibilityApartmentTest.class,
++    CompatibilityChunkBridgeTest.class,
 +    CompatibilityDiagnosticsTest.class,
 +    CompatibilityKernelRoutingTest.class,
 +    CompatibilityPluginMatrixTest.class,
 +    CompatibilityServicesManagerTest.class,
++    CompatibilitySyncBridgeTest.class,
 +    PluginCompatibilityProfileTest.class
 +})
 +@ConfigurationParameter(key = "TestSuite", value = "Normal")
@@ -1331,7 +1351,7 @@ index d59b1d22bb7fd50395ce18b0d5ce05b86ec26f03..6ff31ecb58024747dc79718a5e72af6e
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
 @@ -62,18 +62,19 @@ class CompatibilityKernelRoutingTest {
      }
-
+ 
      @Test
 -    void refusedProfilesUseRefusalLane() {
 +    void strictProfilesRemainOnDeliverableSerializedLane() {
@@ -1342,17 +1362,17 @@ index d59b1d22bb7fd50395ce18b0d5ce05b86ec26f03..6ff31ecb58024747dc79718a5e72af6e
          final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), new RegisteredListener[] {listener});
 -        kernel.profileFor(plugin).noteRefusal("test refusal");
 +        kernel.profileFor(plugin).noteStrictFallback("test strict serialization");
-
+ 
          final CompatibilityKernel.RoutingDecision routingDecision = kernel.routingDecision(transaction, new RegisteredListener[] {listener});
          final CompatibilityKernel.InvocationPlan plan = kernel.planFor(listener, transaction, routingDecision);
-
+ 
 -        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.REFUSE, plan.policy());
 -        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.REFUSAL_LANE, plan.lane());
 +        Assertions.assertEquals(CompatibilityKernel.DispatchRoute.STRICT_SERIALIZED, routingDecision.route());
 +        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.EMERGENCY_COMPATIBILITY, plan.policy());
 +        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.EMERGENCY_COMPATIBILITY_LANE, plan.lane());
      }
-
+ 
      private static RegisteredListener listenerFor(final Plugin plugin) {
 @@ -116,4 +117,4 @@ class CompatibilityKernelRoutingTest {
              return HANDLERS;
@@ -1372,7 +1392,7 @@ index 0521fd22f4dd6b434634f313ed54d3f3181a2815..576fe4ed712a8f5088119f3a32dfb561
 -        SHOULD_NOT_WORK
 +        SHOULD_SERIALIZE
      }
-
+ 
      record MatrixEntry(String pluginName, String mainClass, List<String> dependencies, ExpectedOutcome expectedOutcome) {
 @@ -27,22 +27,22 @@ class CompatibilityPluginMatrixTest {
              new MatrixEntry("LoomNativeTools", "com.example.loom.NativeTools", List.of(), ExpectedOutcome.SHOULD_WORK),
@@ -1381,17 +1401,17 @@ index 0521fd22f4dd6b434634f313ed54d3f3181a2815..576fe4ed712a8f5088119f3a32dfb561
 -            new MatrixEntry("UnsafeNativeMutator", "com.example.native.UnsafeNativeMutator", List.of(), ExpectedOutcome.SHOULD_NOT_WORK)
 +            new MatrixEntry("UnsafeNativeMutator", "com.example.native.UnsafeNativeMutator", List.of(), ExpectedOutcome.SHOULD_SERIALIZE)
          );
-
+ 
          boolean sawWork = false;
          boolean sawDegrade = false;
 -        boolean sawNotWork = false;
 +        boolean sawSerialize = false;
-
+ 
          for (final MatrixEntry entry : matrix) {
              final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(
                  mockPlugin(entry.pluginName(), entry.mainClass(), entry.dependencies())
              );
-
+ 
 -            if (entry.expectedOutcome() == ExpectedOutcome.SHOULD_NOT_WORK) {
 -                profile.noteRefusal("unsafe native mutation");
 -                Assertions.assertEquals(PluginCompatibilityProfile.Mode.REFUSED, profile.mode());
@@ -1402,55 +1422,142 @@ index 0521fd22f4dd6b434634f313ed54d3f3181a2815..576fe4ed712a8f5088119f3a32dfb561
 +                sawSerialize = true;
                  continue;
              }
-
+ 
 @@ -62,7 +62,7 @@ class CompatibilityPluginMatrixTest {
-
+ 
          Assertions.assertTrue(sawWork, "Matrix should include should-work plugin");
          Assertions.assertTrue(sawDegrade, "Matrix should include should-degrade plugin");
 -        Assertions.assertTrue(sawNotWork, "Matrix should include should-NOT-work plugin");
 +        Assertions.assertTrue(sawSerialize, "Matrix should include serialized compatibility fallback");
      }
-
+ 
      private static Plugin mockPlugin(final String name, final String mainClass, final List<String> dependencies) {
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java
+index b184d2638016c67c432362ae819ebab5fdd91e5a..120bae6f2aeda2c1ee1cd1a51ce0bf4e4878f22f 100644
+--- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java
+@@ -1,8 +1,12 @@
+ package io.papermc.paper.plugin.manager.compat;
+ 
++import ca.spottedleaf.moonrise.common.util.TickThread;
+ import io.papermc.paper.plugin.configuration.PluginMeta;
+ import java.util.List;
+ import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicReference;
+ import java.util.logging.Logger;
+ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
+@@ -49,19 +53,57 @@ class CompatibilitySyncBridgeTest {
+     }
+ 
+     @Test
+-    void bridgeNeverAllowsOwnerDomainBlocking() {
++    void bridgeServicesCallbacksForRetainedOwner() throws InterruptedException {
+         final Plugin plugin = mockPlugin("LegacyBridgePlugin");
+         final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final AtomicReference<Runnable> queuedOwnerTask = new AtomicReference<>();
++        final CountDownLatch taskQueued = new CountDownLatch(1);
++        Mockito.when(server.enqueueGlobalOwnerTask(Mockito.any(Runnable.class))).thenAnswer(invocation -> {
++            queuedOwnerTask.set(invocation.getArgument(0));
++            taskQueued.countDown();
++            return true;
++        });
++        Mockito.when(server.runQueuedGlobalOwnerTask(Mockito.any())).thenAnswer(invocation -> {
++            final java.util.function.Predicate<Runnable> predicate = invocation.getArgument(0);
++            final Runnable candidate = queuedOwnerTask.get();
++            if (candidate == null || !predicate.test(candidate) || !queuedOwnerTask.compareAndSet(candidate, null)) {
++                return false;
++            }
++            candidate.run();
++            return true;
++        });
++        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.global(server, "test-owner");
++        final AtomicReference<String> result = new AtomicReference<>();
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final AtomicReference<Thread> ownerThreadReference = new AtomicReference<>();
+ 
+-        try (
+-            CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false);
+-            OwnerDomainExecutor.Scope owner = OwnerDomainExecutor.enter(OwnerDomainExecutor.global(server, "test-owner"))
+-        ) {
+-            Assertions.assertThrows(
+-                IllegalStateException.class,
+-                () -> CompatibilitySyncBridge.awaitFuture(new CompletableFuture<>(), "owner domain wait", "TEST_LANE")
+-            );
+-        }
++        final Thread ownerThread = new TickThread(() -> {
++            try (
++                CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false);
++                OwnerDomainExecutor.Scope ownerScope = OwnerDomainExecutor.enter(owner)
++            ) {
++                final CompletableFuture<String> delegated = CompletableFuture.supplyAsync(() ->
++                    OwnerDomainExecutor.supply(owner, () -> {
++                        Assertions.assertTrue(OwnerDomainExecutor.isOwner(owner));
++                        Assertions.assertTrue(TickThread.isTickThread());
++                        Assertions.assertSame(ownerThreadReference.get(), Thread.currentThread());
++                        return "owner-result";
++                    }).join()
++                );
++                Assertions.assertTrue(taskQueued.await(5L, TimeUnit.SECONDS));
++                result.set(CompatibilitySyncBridge.awaitFuture(delegated, "owner domain wait", "TEST_LANE"));
++            } catch (final Throwable throwable) {
++                failure.set(throwable);
++            }
++        }, "compatibility-sync-owner");
++        ownerThreadReference.set(ownerThread);
++        ownerThread.setDaemon(true);
++        ownerThread.start();
++        ownerThread.join(TimeUnit.SECONDS.toMillis(5L));
++
++        Assertions.assertFalse(ownerThread.isAlive(), "owner-aware compatibility wait did not complete");
++        Assertions.assertNull(failure.get());
++        Assertions.assertEquals("owner-result", result.get());
+     }
+ 
+     private static Plugin mockPlugin(final String name) {
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
 index 5d283861d99c3f54ac8d7156b65569b699116156..d742f1350d06e8052f63ef8bfd0956ed73cfb9bf 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
 @@ -36,15 +36,15 @@ class PluginCompatibilityProfileTest {
      }
-
+ 
      @Test
 -    void refusalIsTerminalMode() {
 +    void serializedHandoffKeepsPluginDeliverable() {
          final Plugin plugin = mockPlugin("UnsafePlugin", "com.example.Unsafe", List.of(), List.of());
          final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
-
+ 
 -        profile.noteRefusal("unsafe raw handles");
 -        profile.noteStrictFallback("should not downgrade");
 +        profile.noteSerializedHandoff();
 +        profile.noteStrictFallback("serialize unsafe access");
-
+ 
 -        Assertions.assertEquals(PluginCompatibilityProfile.Mode.REFUSED, profile.mode());
 -        Assertions.assertEquals(1L, profile.snapshot().refusals());
 +        Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_STRICT, profile.mode());
 +        Assertions.assertEquals(1L, profile.snapshot().serializedHandoffs());
      }
-
+ 
      @Test
 diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..7b6b62607a7ba27639c234b465cdf5df46abf4ac
+index 0000000000000000000000000000000000000000..bcbe709586a533470435d641a3c25ea056644d60
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,130 @@
 +package net.minecraft.server.threading.runtime;
 +
++import ca.spottedleaf.moonrise.common.util.TickThread;
 +import java.util.concurrent.CompletableFuture;
 +import java.util.concurrent.TimeUnit;
 +import java.util.concurrent.atomic.AtomicInteger;
 +import java.util.concurrent.atomic.AtomicReference;
 +import net.minecraft.server.MinecraftServer;
 +import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.TickRegions;
 +import net.minecraft.world.level.Level;
 +import org.bukkit.support.environment.Normal;
 +import org.junit.jupiter.api.Assertions;
@@ -1459,6 +1566,78 @@ index 0000000000000000000000000000000000000000..7b6b62607a7ba27639c234b465cdf5df
 +
 +@Normal
 +class OwnerDomainExecutorCooperativeWaitTest {
++
++    @Test
++    void cooperativeWaitClaimsQueuedRegionOwnerTask() throws InterruptedException {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++        Mockito.when(level.dimension()).thenReturn(Level.OVERWORLD);
++        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.region(level, 11, -7, "prequeued-region-task");
++        final CompletableFuture<String> queued = OwnerDomainExecutor.supply(owner, () -> "region-claimed");
++        Assertions.assertFalse(queued.isDone());
++
++        final AtomicReference<String> result = new AtomicReference<>();
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread ownerThread = new TickThread(() -> {
++            final TickRegions.RegionContext context = TickRegions.pushRegionContext(level, 11, -7, 11, -7);
++            try {
++                result.set(OwnerDomainExecutor.awaitCooperatively(queued, "prequeued-region-task"));
++            } catch (final Throwable throwable) {
++                failure.set(throwable);
++            } finally {
++                TickRegions.popContext(context);
++            }
++        }, "prequeued-region-owner");
++        ownerThread.setDaemon(true);
++        ownerThread.start();
++        ownerThread.join(TimeUnit.SECONDS.toMillis(5L));
++
++        Assertions.assertFalse(ownerThread.isAlive(), "prequeued region owner task was not claimed");
++        Assertions.assertNull(failure.get());
++        Assertions.assertEquals("region-claimed", result.get());
++    }
++
++    @Test
++    void cooperativeWaitClaimsOwnerTaskQueuedBeforeRegistration() throws InterruptedException {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final AtomicReference<Runnable> queuedOwnerTask = new AtomicReference<>();
++        Mockito.when(server.enqueueGlobalOwnerTask(Mockito.any(Runnable.class))).thenAnswer(invocation -> {
++            queuedOwnerTask.set(invocation.getArgument(0));
++            return true;
++        });
++        Mockito.when(server.runQueuedGlobalOwnerTask(Mockito.any())).thenAnswer(invocation -> {
++            final java.util.function.Predicate<Runnable> predicate = invocation.getArgument(0);
++            final Runnable candidate = queuedOwnerTask.get();
++            if (candidate == null || !predicate.test(candidate) || !queuedOwnerTask.compareAndSet(candidate, null)) {
++                return false;
++            }
++            candidate.run();
++            return true;
++        });
++        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.global(server, "prequeued-owner-task");
++        final CompletableFuture<String> queued = OwnerDomainExecutor.supply(owner, () -> "claimed");
++        Assertions.assertFalse(queued.isDone());
++        Assertions.assertNotNull(queuedOwnerTask.get());
++
++        final AtomicReference<String> result = new AtomicReference<>();
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread ownerThread = new Thread(() -> {
++            try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enter(owner)) {
++                result.set(OwnerDomainExecutor.awaitCooperatively(queued, "prequeued-owner-task"));
++            } catch (final Throwable throwable) {
++                failure.set(throwable);
++            }
++        }, "prequeued-owner");
++        ownerThread.setDaemon(true);
++        ownerThread.start();
++        ownerThread.join(TimeUnit.SECONDS.toMillis(5L));
++
++        Assertions.assertFalse(ownerThread.isAlive(), "prequeued owner task was not claimed");
++        Assertions.assertNull(failure.get());
++        Assertions.assertEquals("claimed", result.get());
++        Assertions.assertNull(queuedOwnerTask.get());
++    }
 +
 +    @Test
 +    void delegatedWorkCanCallBackIntoWaitingOwner() throws InterruptedException {
