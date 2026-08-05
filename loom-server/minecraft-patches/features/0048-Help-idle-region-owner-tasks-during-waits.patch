@@ -1,0 +1,372 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 21:43:47 +0000
+Subject: [PATCH] Help idle-region owner tasks during waits
+
+
+diff --git a/net/minecraft/server/threading/RegionRuntime.java b/net/minecraft/server/threading/RegionRuntime.java
+index fdcbc63f30326f981703a36edec7c06e639f7193..fd66ecfe6bc0d29cf55a679bc31b2daaf5a151bd 100644
+--- a/net/minecraft/server/threading/RegionRuntime.java
++++ b/net/minecraft/server/threading/RegionRuntime.java
+@@ -29,6 +29,11 @@ public class RegionRuntime {
+     protected RegionRuntime() {
+     }
+ 
++    /**
++     * Sentinel returned by {@link #tryClaimLease} when the bounds are already leased by another thread.
++     */
++    public static final long NO_LEASE = 0L;
++
+     public long claimLease(
+         final ServerLevel world,
+         final int minChunkX,
+@@ -37,7 +42,23 @@ public class RegionRuntime {
+         final int maxChunkZ,
+         final Thread ownerThread
+     ) {
+-        return this.claimLeaseInternal(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread);
++        return this.claimLeaseInternal(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread, true);
++    }
++
++    /**
++     * Claims a lease only when the bounds are free, returning {@link #NO_LEASE} instead of throwing when
++     * another thread already owns overlapping chunks. Callers that can decline the work use this so a losing
++     * attempt is not counted as a lease conflict.
++     */
++    public long tryClaimLease(
++        final ServerLevel world,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final Thread ownerThread
++    ) {
++        return this.claimLeaseInternal(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread, false);
+     }
+ 
+     protected long claimLeaseForTesting(
+@@ -48,7 +69,7 @@ public class RegionRuntime {
+         final int maxChunkZ,
+         final Thread ownerThread
+     ) {
+-        return this.claimLeaseInternal(worldKey, minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread);
++        return this.claimLeaseInternal(worldKey, minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread, true);
+     }
+ 
+     private long claimLeaseInternal(
+@@ -57,7 +78,8 @@ public class RegionRuntime {
+         final int minChunkZ,
+         final int maxChunkX,
+         final int maxChunkZ,
+-        final Thread ownerThread
++        final Thread ownerThread,
++        final boolean required
+     ) {
+         Objects.requireNonNull(worldKey, "World key may not be null");
+         Objects.requireNonNull(ownerThread, "Owner thread may not be null");
+@@ -66,7 +88,7 @@ public class RegionRuntime {
+         }
+ 
+         final long leaseId = this.nextLeaseId.getAndIncrement();
+-        this.ownershipByWorld
++        final boolean claimed = this.ownershipByWorld
+             .computeIfAbsent(worldKey, ignored -> new WorldOwnership())
+             .claimLease(
+                 leaseId,
+@@ -76,10 +98,11 @@ public class RegionRuntime {
+                 maxChunkZ,
+                 ownerThread,
+                 this.leaseConflicts,
+-                this.nextRegionId
++                this.nextRegionId,
++                required
+             );
+ 
+-        return leaseId;
++        return claimed ? leaseId : NO_LEASE;
+     }
+ 
+     public void releaseLease(final ServerLevel world, final long leaseId) {
+@@ -244,7 +267,7 @@ public class RegionRuntime {
+         private long retiredRegions;
+         private long reusedRegionAssignments;
+ 
+-        private void claimLease(
++        private boolean claimLease(
+             final long leaseId,
+             final int minChunkX,
+             final int minChunkZ,
+@@ -252,7 +275,8 @@ public class RegionRuntime {
+             final int maxChunkZ,
+             final Thread ownerThread,
+             final AtomicLong conflictCounter,
+-            final AtomicLong nextRegionId
++            final AtomicLong nextRegionId,
++            final boolean required
+         ) {
+             this.lock.lock();
+             try {
+@@ -267,6 +291,9 @@ public class RegionRuntime {
+                 if (!this.leases.isEmpty()) {
+                     final Lease conflictingLease = this.findConflictingLease(minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThreadId);
+                     if (conflictingLease != null) {
++                        if (!required) {
++                            return false;
++                        }
+                         conflictCounter.getAndIncrement();
+                         throw new IllegalStateException(
+                             "Region lease conflict: new lease [" + minChunkX + "," + minChunkZ + " -> " + maxChunkX + "," + maxChunkZ + "]"
+@@ -292,6 +319,7 @@ public class RegionRuntime {
+                     throw new IllegalStateException("Duplicate lease id: " + lease.id);
+                 }
+                 this.indexLease(lease);
++                return true;
+             } finally {
+                 this.lock.unlock();
+             }
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bdba5a47bd7a701b9902ff7c8c9748474fdd70d2 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -257,6 +257,47 @@ public class TickRegions {
+         return next;
+     }
+ 
++    /**
++     * Pushes a region context only when the bounds are free, returning null when another thread holds an
++     * overlapping lease. Used by callers that can decline the work, so losing the race is an ordinary outcome
++     * rather than a lease-claim failure.
++     */
++    public static @Nullable RegionContext tryPushRegionContext(
++        final ServerLevel world,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ
++    ) {
++        final RegionContext previous = CURRENT_CONTEXT.get();
++        final Thread currentThread = Thread.currentThread();
++        final long leaseId = REGION_RUNTIME.tryClaimLease(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread);
++        if (leaseId == RegionRuntime.NO_LEASE) {
++            return null;
++        }
++        final OwnerDomainExecutor.Scope ownerScope = OwnerDomainExecutor.enterRegion(
++            world,
++            minChunkX,
++            minChunkZ,
++            maxChunkX,
++            maxChunkZ,
++            "region-context"
++        );
++        final RegionContext next = new RegionContext(
++            world,
++            minChunkX,
++            minChunkZ,
++            maxChunkX,
++            maxChunkZ,
++            previous,
++            leaseId,
++            currentThread.threadId(),
++            ownerScope
++        );
++        CURRENT_CONTEXT.set(next);
++        return next;
++    }
++
+     public static void popContext(final RegionContext context) {
+         RegionContext current = CURRENT_CONTEXT.get();
+         if (current != context) {
+@@ -1438,6 +1479,41 @@ public class TickRegions {
+         return stateFor(world).runQueuedOwnerTask(predicate);
+     }
+ 
++    /**
++     * Runs one queued task the caller does not already own, under a freshly claimed lease for that task's
++     * region. Only bounded regions are eligible, and only while no other thread owns them and they do not
++     * intersect a region the caller already holds. A region between ticks has no worker of its own, so
++     * without this a waiter can hold an owner thread for work that nothing is scheduled to run.
++     */
++    public static boolean helpQueuedOwnerTask(final Predicate<Runnable> predicate) {
++        Objects.requireNonNull(predicate, "Predicate may not be null");
++        for (final WorldSchedulerState state : SCHEDULER_STATES.values()) {
++            if (state.helpQueuedOwnerTask(predicate)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private static boolean intersectsHeldContext(
++        final ServerLevel world,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ
++    ) {
++        for (RegionContext context = CURRENT_CONTEXT.get(); context != null; context = context.previous()) {
++            if (context.world() == world
++                && minChunkX <= context.maxChunkX()
++                && maxChunkX >= context.minChunkX()
++                && minChunkZ <= context.maxChunkZ()
++                && maxChunkZ >= context.minChunkZ()) {
++                return true;
++            }
++        }
++        return false;
++    }
++
+     // Loom - tick independent worlds through the same cooperative batch as region shards. The server thread
+     // participates with its GLOBAL_CONTROL owner temporarily detached; nested world coordinators help ready
+     // region work but do not recursively enter another world tick. Failures remain deterministic by world
+@@ -1882,6 +1958,87 @@ public class TickRegions {
+             return false;
+         }
+ 
++        private boolean helpQueuedOwnerTask(final Predicate<Runnable> predicate) {
++            while (true) {
++                RegionBoundTask continuation = null;
++                CrossRegionMessage message = null;
++                synchronized (this.lock) {
++                    for (final RegionBoundTask candidate : this.regionContinuations) {
++                        if (predicate.test(candidate.task())) {
++                            continuation = candidate;
++                            break;
++                        }
++                    }
++                    if (continuation == null) {
++                        for (final CrossRegionMessage candidate : this.mailbox) {
++                            if (predicate.test(candidate.action())) {
++                                message = candidate;
++                                break;
++                            }
++                        }
++                    }
++                }
++                if (continuation == null && message == null) {
++                    return false;
++                }
++
++                final int minChunkX;
++                final int minChunkZ;
++                final int maxChunkX;
++                final int maxChunkZ;
++                if (continuation != null) {
++                    minChunkX = continuation.minChunkX();
++                    minChunkZ = continuation.minChunkZ();
++                    maxChunkX = continuation.maxChunkX();
++                    maxChunkZ = continuation.maxChunkZ();
++                } else {
++                    minChunkX = maxChunkX = message.targetChunkX();
++                    minChunkZ = maxChunkZ = message.targetChunkZ();
++                }
++                if (intersectsHeldContext(this.world, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++                    return false;
++                }
++
++                final RegionContext context = tryPushRegionContext(this.world, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
++                if (context == null) {
++                    // The region has a live owner that will run this itself.
++                    return false;
++                }
++                try {
++                    final boolean claimed;
++                    synchronized (this.lock) {
++                        claimed = continuation != null
++                            ? this.regionContinuations.remove(continuation)
++                            : this.mailbox.remove(message);
++                    }
++                    if (!claimed) {
++                        // Its owner took the task between the scan and the lease claim.
++                        continue;
++                    }
++                    if (continuation != null) {
++                        try {
++                            continuation.task().run();
++                        } catch (final Throwable throwable) {
++                            recordDiagnostic(
++                                DiagnosticType.MAILBOX_MESSAGE_DROPPED,
++                                this.world,
++                                minChunkX,
++                                minChunkZ,
++                                maxChunkX,
++                                maxChunkZ,
++                                "Owner continuation threw exception during cooperative help: " + throwable
++                            );
++                        }
++                    } else {
++                        this.deliverMailboxMessage(message);
++                    }
++                    return true;
++                } finally {
++                    popContext(context);
++                }
++            }
++        }
++
+         private void drainRegionContinuations() {
+             final List<RegionBoundTask> continuations;
+             synchronized (this.lock) {
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index d21de16dbf859cd0475852a46f60cccc9209d330..0612a1b800980219b3d016192d89f422a874feb4 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -43,8 +43,11 @@ public final class OwnerDomainExecutor {
+     private static final CooperativeWait[] NO_COOPERATIVE_WAITS = new CooperativeWait[0];
+     private static volatile CooperativeWait[] cooperativeWaits = NO_COOPERATIVE_WAITS;
+     private static final int MAX_COOPERATIVE_WAIT_DEPTH = 32;
++    private static final int MAX_COOPERATIVE_HELP_DEPTH = 4;
++    private static final long COOPERATIVE_HELP_RETRY_NANOS = 1_000_000L;
+     private static final int COOPERATIVE_WORK_SLICE = 64;
+-    private static final ThreadLocal<int[]> COOPERATIVE_WAIT_DEPTH = ThreadLocal.withInitial(() -> new int[1]);
++    // [0] cooperative wait nesting, [1] foreign-owner help nesting.
++    private static final ThreadLocal<int[]> COOPERATIVE_WAIT_DEPTH = ThreadLocal.withInitial(() -> new int[2]);
+     private static final java.util.concurrent.atomic.LongAdder EXECUTE_INLINE = new java.util.concurrent.atomic.LongAdder();
+     private static final java.util.concurrent.atomic.LongAdder EXECUTE_HANDOFF = new java.util.concurrent.atomic.LongAdder();
+     private static final java.util.concurrent.atomic.LongAdder[] EXECUTE_INLINE_BY_DOMAIN = createDomainCounters();
+@@ -456,14 +459,17 @@ public final class OwnerDomainExecutor {
+                 if (wait.runOneCompleting(future)
+                     || wait.runQueuedOwnerTaskCompleting(future)
+                     || wait.runOne()
+-                    || wait.runQueuedOwnerTask()) {
++                    || wait.runQueuedOwnerTask()
++                    || helpForeignOwnerTask(depth, future)) {
+                     if (++workInSlice == COOPERATIVE_WORK_SLICE) {
+                         workInSlice = 0;
+                         Thread.yield();
+                     }
+                 } else {
+                     workInSlice = 0;
+-                    LockSupport.park(wait);
++                    // Queued work this thread may help with does not signal this wait, so re-check on a
++                    // bounded interval instead of only when an owner handoff or the future wakes us.
++                    LockSupport.parkNanos(wait, COOPERATIVE_HELP_RETRY_NANOS);
+                     if (Thread.interrupted()) {
+                         interrupted = true;
+                     }
+@@ -491,6 +497,26 @@ public final class OwnerDomainExecutor {
+         return cooperativeWaits.length;
+     }
+ 
++    /**
++     * Last-resort progress for a wait whose result depends on an owner nothing is currently running. A region
++     * that is between ticks has no worker, so the task completing this future would otherwise sit queued while
++     * this thread holds its own owner. Only the exact task that finishes the awaited future is eligible, and
++     * only under a lease claimed for a region this thread does not already hold.
++     */
++    private static boolean helpForeignOwnerTask(final int[] depth, final CompletableFuture<?> future) {
++        if (depth[1] >= MAX_COOPERATIVE_HELP_DEPTH) {
++            return false;
++        }
++        ++depth[1];
++        try {
++            return TickRegions.helpQueuedOwnerTask(
++                task -> task instanceof OwnerTask ownerTask && ownerTask.completes(future)
++            );
++        } finally {
++            --depth[1];
++        }
++    }
++
+     public static Diagnostics snapshotDiagnostics() {
+         final EnumMap<Domain, DomainDiagnostics> domains = new EnumMap<>(Domain.class);
+         for (final Domain domain : Domain.values()) {

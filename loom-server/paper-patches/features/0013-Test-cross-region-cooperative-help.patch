@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 21:43:47 +0000
+Subject: [PATCH] Test cross-region cooperative help
+
+
+diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
+index 8b746a2bb14ef9a1f64b75c3d9cc1a57996f816d..d8b784d928ebc56fc4e838c37b1fcab3165c1b40 100644
+--- a/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
++++ b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
+@@ -6,6 +6,7 @@ import java.util.List;
+ import java.util.Queue;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.ConcurrentLinkedQueue;
++import java.util.concurrent.CountDownLatch;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.atomic.AtomicInteger;
+ import java.util.concurrent.atomic.AtomicReference;
+@@ -205,6 +206,110 @@ class OwnerDomainExecutorCooperativeWaitTest {
+         Assertions.assertEquals(0, OwnerDomainExecutor.activeCooperativeWaits());
+     }
+ 
++    @Test
++    void cooperativeWaitRunsCompletingTaskOwnedByAnIdleRegion() throws InterruptedException {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++        Mockito.when(level.dimension()).thenReturn(Level.OVERWORLD);
++
++        // Nothing is ticking this region, so only the waiting thread can make its queued task run.
++        final OwnerDomainExecutor.Owner remote = OwnerDomainExecutor.region(level, 512, 512, "cross-region-read");
++        final AtomicReference<Thread> ranOn = new AtomicReference<>();
++        final CompletableFuture<String> queued = OwnerDomainExecutor.supply(remote, () -> {
++            Assertions.assertTrue(OwnerDomainExecutor.isRegionOwner(level, 512, 512));
++            ranOn.set(Thread.currentThread());
++            return "cross-region";
++        });
++        Assertions.assertFalse(queued.isDone());
++
++        final AtomicReference<String> result = new AtomicReference<>();
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread ownerThread = new TickThread(() -> {
++            final TickRegions.RegionContext context = TickRegions.pushRegionContext(level, 11, -7, 11, -7);
++            try {
++                result.set(OwnerDomainExecutor.awaitCooperatively(queued, "cross-region-read"));
++                Assertions.assertTrue(OwnerDomainExecutor.isRegionOwner(level, 11, -7));
++                Assertions.assertFalse(OwnerDomainExecutor.isRegionOwner(level, 512, 512), "helped lease outlived the task");
++            } catch (final Throwable throwable) {
++                failure.set(throwable);
++            } finally {
++                TickRegions.popContext(context);
++            }
++        }, "cross-region-owner");
++        ownerThread.setDaemon(true);
++        ownerThread.start();
++        ownerThread.join(TimeUnit.SECONDS.toMillis(10L));
++
++        Assertions.assertFalse(ownerThread.isAlive(), "cross-region owner task was never run");
++        Assertions.assertNull(failure.get());
++        Assertions.assertEquals("cross-region", result.get());
++        Assertions.assertSame(ownerThread, ranOn.get(), "the waiting owner did not run the task itself");
++        Assertions.assertEquals(0, OwnerDomainExecutor.activeCooperativeWaits());
++    }
++
++    @Test
++    void cooperativeWaitLeavesTasksOwnedByALiveRegionAlone() throws InterruptedException {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++        Mockito.when(level.dimension()).thenReturn(Level.OVERWORLD);
++
++        final OwnerDomainExecutor.Owner remote = OwnerDomainExecutor.region(level, 512, 512, "held-region-read");
++        final CountDownLatch remoteHeld = new CountDownLatch(1);
++        final CountDownLatch releaseRemote = new CountDownLatch(1);
++        final AtomicReference<Thread> ranOn = new AtomicReference<>();
++        final AtomicReference<Throwable> holderFailure = new AtomicReference<>();
++
++        // The real owner keeps its lease while the waiter looks for work, then runs the task itself.
++        final Thread remoteThread = new TickThread(() -> {
++            final TickRegions.RegionContext context = TickRegions.pushRegionContext(level, 512, 512, 512, 512);
++            try {
++                remoteHeld.countDown();
++                Assertions.assertTrue(releaseRemote.await(10L, TimeUnit.SECONDS));
++                while (!TickRegions.runQueuedOwnerTask(level, task -> true)) {
++                    Thread.onSpinWait();
++                }
++            } catch (final Throwable throwable) {
++                holderFailure.set(throwable);
++            } finally {
++                TickRegions.popContext(context);
++            }
++        }, "held-region-owner");
++        remoteThread.setDaemon(true);
++        remoteThread.start();
++        Assertions.assertTrue(remoteHeld.await(10L, TimeUnit.SECONDS));
++
++        final CompletableFuture<String> queued = OwnerDomainExecutor.supply(remote, () -> {
++            ranOn.set(Thread.currentThread());
++            return "held-region";
++        });
++
++        final AtomicReference<String> result = new AtomicReference<>();
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread ownerThread = new TickThread(() -> {
++            final TickRegions.RegionContext context = TickRegions.pushRegionContext(level, 11, -7, 11, -7);
++            try {
++                releaseRemote.countDown();
++                result.set(OwnerDomainExecutor.awaitCooperatively(queued, "held-region-read"));
++            } catch (final Throwable throwable) {
++                failure.set(throwable);
++            } finally {
++                TickRegions.popContext(context);
++            }
++        }, "held-region-waiter");
++        ownerThread.setDaemon(true);
++        ownerThread.start();
++        ownerThread.join(TimeUnit.SECONDS.toMillis(10L));
++        remoteThread.join(TimeUnit.SECONDS.toMillis(10L));
++
++        Assertions.assertFalse(ownerThread.isAlive(), "waiter did not complete");
++        Assertions.assertNull(failure.get());
++        Assertions.assertNull(holderFailure.get());
++        Assertions.assertEquals("held-region", result.get());
++        Assertions.assertSame(remoteThread, ranOn.get(), "a live region owner's task was stolen by the waiter");
++    }
++
+     private static CompletableFuture<String> nestedWait(final int remaining) {
+         if (remaining == 0) {
+             return CompletableFuture.completedFuture("done");
