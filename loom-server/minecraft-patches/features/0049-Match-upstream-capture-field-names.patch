@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Thu, 6 Aug 2026 01:53:26 +0000
+Subject: [PATCH] Match upstream capture field names
+
+
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index 12f8d218deb671c0ef943d7178954dd847f2f3fa..f5b05be871fa4751859ff8c1c671db5474d1d459 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -152,14 +152,16 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+ 
+     // Loom start - legacy Paper capture-field compatibility
+     // Upstream Paper exposed these mutable public fields as the de facto NMS plugin API for world
+-    // mutation capture (FAWE and others link against them directly); LevelCaptureContext replaced them
++    // mutation capture (plugins link against these directly); LevelCaptureContext replaced them
+     // internally. They are retained so plugins compiled against Paper keep linking and working. They are
+     // honored only on the global Server thread — the same single-threaded contract they had on Paper —
+     // and only while no scoped capture frame is active on that thread. Region workers never observe them.
++    // Their names must track the upstream field names exactly, or a plugin compiled against upstream
++    // fails to link against a field that is present under a different name.
+     public boolean captureBlockStates = false;
+     public boolean captureTreeGeneration = false;
+     public Map<BlockPos, org.bukkit.craftbukkit.block.CraftBlockState> capturedBlockStates = new java.util.LinkedHashMap<>(); // Paper
+-    public Map<BlockPos, BlockEntity> capturedTileEntities = new java.util.LinkedHashMap<>(); // Paper - Retain block place order when capturing blockstates
++    public Map<BlockPos, BlockEntity> capturedBlockEntities = new java.util.LinkedHashMap<>(); // Paper - Retain block place order when capturing blockstates
+     @Nullable
+     public List<net.minecraft.world.entity.item.ItemEntity> captureDrops;
+ 
+@@ -1860,7 +1862,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+                 return captured;
+             }
+         } else if (this.legacyCaptureActive(LevelCaptureContext.BLOCK_STATES)) { // Loom - legacy Paper capture-field compatibility
+-            final net.minecraft.world.level.block.entity.BlockEntity captured = this.capturedTileEntities.get(pos);
++            final net.minecraft.world.level.block.entity.BlockEntity captured = this.capturedBlockEntities.get(pos);
+             if (captured != null) {
+                 return captured;
+             }
+@@ -1886,7 +1888,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+             }
+             // Loom start - legacy Paper capture-field compatibility
+             if (this.legacyCaptureActive(LevelCaptureContext.BLOCK_STATES)) {
+-                this.capturedTileEntities.put(pos.immutable(), blockEntity);
++                this.capturedBlockEntities.put(pos.immutable(), blockEntity);
+                 return;
+             }
+             // Loom end - legacy Paper capture-field compatibility
+diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
+index 08d381c4f23b471bc1c7aea46546b673b670b22e..2955550bbc0eb46e31ce88d3e726527dcde9bce6 100644
+--- a/net/minecraft/world/level/chunk/LevelChunk.java
++++ b/net/minecraft/world/level/chunk/LevelChunk.java
+@@ -579,7 +579,7 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+             ? captureContext.getCapturedBlockEntity(pos)
+             : null;
+         if (blockEntity == null && this.level.legacyCaptureActive(LevelCaptureContext.BLOCK_STATES)) { // Loom - legacy Paper capture-field compatibility
+-            blockEntity = this.level.capturedTileEntities.get(pos);
++            blockEntity = this.level.capturedBlockEntities.get(pos);
+         }
+         if (blockEntity == null) {
+             blockEntity = this.blockEntities.get(pos);
