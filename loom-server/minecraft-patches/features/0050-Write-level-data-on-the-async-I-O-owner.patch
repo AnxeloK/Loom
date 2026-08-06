@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Thu, 6 Aug 2026 02:31:48 +0000
+Subject: [PATCH] Write level data on the async-I/O owner
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 940e80117e945385863cf8c82b5c64cb5d47162e..1c5813e050411996c0df50d3de6274306d6bbf04 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1019,8 +1019,25 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         this.scoreboard.storeToSaveDataIfDirty(this.getDataStorage().computeIfAbsent(ScoreboardSaveData.TYPE));
+ 
+         GameProfile singleplayerProfile = this.getSingleplayerProfile();
+-        this.storageSource.saveDataTag(this.worldData, singleplayerProfile == null ? null : singleplayerProfile.id());
++        // Loom - the snapshot is built here because it reads mutable world state, but compressing and
++        // writing it blocks on the disk for as long as the volume takes, which on the periodic autosave
++        // means stalling the tick. Hand the finished tag to the async-I/O owner instead. An explicit
++        // save or a shutdown still waits, because those promise the data is on disk when they return.
++        final net.minecraft.nbt.CompoundTag levelDataTag = this.storageSource.createLevelDataTag(
++            this.worldData, singleplayerProfile == null ? null : singleplayerProfile.id()
++        );
++        final java.util.concurrent.CompletableFuture<Void> levelDataWrite =
++            this.storageSource.saveLevelDataAsync(levelDataTag);
+         if (flush) {
++            // Prefer the cooperative wait so work routed back to this owner cannot deadlock the save.
++            // Outside an owner domain (startup, shutdown teardown) there is nothing to service, and a
++            // direct wait is both safe and required — the data has to be on disk before this returns.
++            if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.currentOwner() != null
++                && net.minecraft.server.threading.runtime.OwnerDomainExecutor.canRunSynchronousCallbacks()) {
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.awaitCooperatively(levelDataWrite, "save-global-level-data");
++            } else {
++                levelDataWrite.join();
++            }
+             this.savedDataStorage.saveAndJoin();
+         } else {
+             this.savedDataStorage.scheduleSave();
+diff --git a/net/minecraft/world/level/storage/LevelStorageSource.java b/net/minecraft/world/level/storage/LevelStorageSource.java
+index 6f24eb34e0ecc2b03371c585a9538e9337a2295a..e7b6342fc0499ea6d7290a925958995977d369ab 100644
+--- a/net/minecraft/world/level/storage/LevelStorageSource.java
++++ b/net/minecraft/world/level/storage/LevelStorageSource.java
+@@ -63,6 +63,7 @@ import net.minecraft.server.packs.repository.PackRepository;
+ import net.minecraft.util.DirectoryLock;
+ import net.minecraft.util.FileUtil;
+ import net.minecraft.util.MemoryReserve;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
+ import net.minecraft.util.Util;
+ import net.minecraft.util.datafix.DataFixTypes;
+ import net.minecraft.util.datafix.DataFixers;
+@@ -583,10 +584,50 @@ public class LevelStorageSource {
+         }
+ 
+         public void saveDataTag(final WorldData levelData, final @Nullable UUID singleplayerUUID) {
++            this.saveLevelData(this.createLevelDataTag(levelData, singleplayerUUID));
++        }
++
++        /**
++         * Builds the complete level.dat snapshot. Reads mutable world state, so it must run on the
++         * owner that holds that state; the resulting tag is self-contained and safe to write later.
++         */
++        public CompoundTag createLevelDataTag(final WorldData levelData, final @Nullable UUID singleplayerUUID) {
+             CompoundTag dataTag = levelData.createTag(singleplayerUUID);
+             CompoundTag root = new CompoundTag();
+             root.put("Data", dataTag);
+-            this.saveLevelData(root);
++            return root;
++        }
++
++        /**
++         * Writes a prepared snapshot on the async-I/O owner. Compressing and swapping the file blocks
++         * on the disk, which on a busy or slow volume stalls whoever calls it for as long as the write
++         * takes, so the tick owner hands the finished tag over instead of doing it inline. Writes are
++         * chained: two saves must not reorder on disk, and the newest snapshot has to land last.
++         */
++        public CompletableFuture<Void> saveLevelDataAsync(final CompoundTag root) {
++            final net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
++            if (server == null) {
++                this.saveLevelData(root);
++                return CompletableFuture.completedFuture(null);
++            }
++            synchronized (this.levelDataWriteLock) {
++                // A failed write must not poison the writes queued behind it.
++                final CompletableFuture<Void> next = this.pendingLevelDataWrite
++                    .handle((ignored, throwable) -> null)
++                    .thenCompose(ignored -> OwnerDomainExecutor.submit(
++                        OwnerDomainExecutor.asyncIo(server, "save-level-data"),
++                        () -> this.saveLevelData(root)
++                    ));
++                this.pendingLevelDataWrite = next;
++                return next;
++            }
++        }
++
++        /** Completes once every queued level.dat write has been flushed to disk. */
++        public CompletableFuture<Void> pendingLevelDataWrite() {
++            synchronized (this.levelDataWriteLock) {
++                return this.pendingLevelDataWrite;
++            }
+         }
+ 
+         public void saveLevelData(final Dynamic<?> tag) {
+@@ -610,6 +651,10 @@ public class LevelStorageSource {
+             }
+         }
+ 
++        // Serializes level.dat writes handed to the async-I/O owner; see saveLevelDataAsync.
++        private final Object levelDataWriteLock = new Object();
++        private CompletableFuture<Void> pendingLevelDataWrite = CompletableFuture.completedFuture(null);
++
+         public Optional<Path> getIconFile() {
+             return !this.lock.isValid() ? Optional.empty() : Optional.of(this.levelDirectory.iconFile());
+         }
+@@ -724,6 +769,23 @@ public class LevelStorageSource {
+ 
+         @Override
+         public void close() throws IOException {
++            // A queued level.dat write must not outlive the storage it writes through. Bounded like the
++            // other shutdown waits: a stalled volume must not hold the server open forever, and giving up
++            // is safe because the write lands through a temp file and an atomic replace, so a timeout
++            // leaves the previous good level.dat in place rather than a half-written one.
++            try {
++                this.pendingLevelDataWrite().get(60L, java.util.concurrent.TimeUnit.SECONDS);
++            } catch (final java.util.concurrent.TimeoutException e) {
++                LevelStorageSource.LOGGER.error(
++                    "Timed out after 60s waiting for the level data write for {}; keeping the previous level.dat",
++                    this.levelId
++                );
++            } catch (final InterruptedException e) {
++                Thread.currentThread().interrupt();
++                LevelStorageSource.LOGGER.error("Interrupted waiting for the level data write for {}", this.levelId, e);
++            } catch (final Exception e) {
++                LevelStorageSource.LOGGER.error("Failed to flush pending level data for {}", this.levelId, e);
++            }
+             this.lock.close();
+         }
+ 
