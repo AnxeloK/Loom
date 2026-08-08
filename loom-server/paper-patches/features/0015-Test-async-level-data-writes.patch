@@ -1,0 +1,152 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Sat, 8 Aug 2026 23:08:27 +0300
+Subject: [PATCH] Test async level data writes
+
+
+diff --git a/src/test/java/net/minecraft/world/level/storage/LevelStorageSourceAsyncWriteTest.java b/src/test/java/net/minecraft/world/level/storage/LevelStorageSourceAsyncWriteTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..83785c869f1f16d9c06be4640131ca0e75d0ddda
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/level/storage/LevelStorageSourceAsyncWriteTest.java
+@@ -0,0 +1,119 @@
++package net.minecraft.world.level.storage;
++
++import java.io.IOException;
++import java.lang.reflect.Field;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionException;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.nbt.CompoundTag;
++import net.minecraft.server.MinecraftServer;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import org.mockito.MockedStatic;
++import org.mockito.Mockito;
++
++@Normal
++class LevelStorageSourceAsyncWriteTest {
++
++    @Test
++    void failedPreparedWriteCompletesFutureExceptionally(@TempDir final Path tempDir) throws Exception {
++        final LevelStorageSource source = LevelStorageSource.createDefault(tempDir);
++        final LevelStorageSource.LevelStorageAccess access = source.createAccess("world");
++        final Path worldDirectory = tempDir.resolve("world");
++        Files.move(worldDirectory, tempDir.resolve("moved-world"));
++        Files.writeString(worldDirectory, "not a directory");
++
++        try (MockedStatic<MinecraftServer> server = Mockito.mockStatic(MinecraftServer.class)) {
++            server.when(MinecraftServer::getServer).thenReturn(null);
++            final CompletionException failure = Assertions.assertThrows(
++                CompletionException.class,
++                () -> access.saveLevelDataAsync(new CompoundTag()).join()
++            );
++            Assertions.assertInstanceOf(IOException.class, failure.getCause());
++        } finally {
++            access.close();
++        }
++    }
++
++    @Test
++    void interruptedCloseKeepsStorageLockUntilWriteCompletes(@TempDir final Path tempDir) throws Exception {
++        final LevelStorageSource source = LevelStorageSource.createDefault(tempDir);
++        final LevelStorageSource.LevelStorageAccess access = source.createAccess("world");
++        final CompletableFuture<Void> pendingWrite = new CompletableFuture<>();
++        setPendingWrite(access, pendingWrite);
++
++        final CountDownLatch closeStarted = new CountDownLatch(1);
++        final AtomicReference<Throwable> closeFailure = new AtomicReference<>();
++        final AtomicBoolean interruptRestored = new AtomicBoolean();
++        final Thread closeThread = Thread.ofPlatform().name("interrupted-level-data-close").start(() -> {
++            closeStarted.countDown();
++            try {
++                access.close();
++            } catch (final Throwable throwable) {
++                closeFailure.set(throwable);
++                interruptRestored.set(Thread.currentThread().isInterrupted());
++            }
++        });
++
++        Assertions.assertTrue(closeStarted.await(5L, TimeUnit.SECONDS));
++        awaitBlockingState(closeThread);
++        closeThread.interrupt();
++        closeThread.join(TimeUnit.SECONDS.toMillis(5L));
++
++        Assertions.assertFalse(closeThread.isAlive());
++        final IOException interruption = Assertions.assertInstanceOf(IOException.class, closeFailure.get());
++        Assertions.assertInstanceOf(InterruptedException.class, interruption.getCause());
++        Assertions.assertTrue(interruptRestored.get());
++        Assertions.assertTrue(access.getIconFile().isPresent(), "interrupted close released the storage lock");
++
++        final CompletionException rejectedWrite = Assertions.assertThrows(
++            CompletionException.class,
++            () -> access.saveLevelDataAsync(new CompoundTag()).join()
++        );
++        Assertions.assertInstanceOf(IllegalStateException.class, rejectedWrite.getCause());
++
++        pendingWrite.complete(null);
++        access.close();
++        Assertions.assertTrue(access.getIconFile().isEmpty());
++    }
++
++    @Test
++    void terminalWriteFailureIsReportedAfterLockRelease(@TempDir final Path tempDir) throws Exception {
++        final LevelStorageSource source = LevelStorageSource.createDefault(tempDir);
++        final LevelStorageSource.LevelStorageAccess access = source.createAccess("world");
++        final IOException writeFailure = new IOException("write failed");
++        setPendingWrite(access, CompletableFuture.failedFuture(writeFailure));
++
++        final IOException closeFailure = Assertions.assertThrows(IOException.class, access::close);
++        Assertions.assertSame(writeFailure, closeFailure.getCause());
++        Assertions.assertTrue(access.getIconFile().isEmpty(), "terminal write failure left the storage lock open");
++    }
++
++    private static void setPendingWrite(
++        final LevelStorageSource.LevelStorageAccess access,
++        final CompletableFuture<Void> pendingWrite
++    ) throws ReflectiveOperationException {
++        final Field field = access.getClass().getDeclaredField("pendingLevelDataWrite");
++        field.setAccessible(true);
++        field.set(access, pendingWrite);
++    }
++
++    private static void awaitBlockingState(final Thread thread) {
++        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
++        while (thread.isAlive() && System.nanoTime() < deadline) {
++            final Thread.State state = thread.getState();
++            if (state == Thread.State.WAITING || state == Thread.State.TIMED_WAITING) {
++                return;
++            }
++            Thread.onSpinWait();
++        }
++        Assertions.fail("close thread did not begin waiting for the pending level data write");
++    }
++}
+diff --git a/src/test/java/net/minecraft/world/level/storage/LevelStorageSourceAsyncWriteTestSuite.java b/src/test/java/net/minecraft/world/level/storage/LevelStorageSourceAsyncWriteTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f820d32efea4b7d197c3ef3bfd40ffbd89dd5c4
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/level/storage/LevelStorageSourceAsyncWriteTestSuite.java
+@@ -0,0 +1,15 @@
++package net.minecraft.world.level.storage;
++
++import org.junit.platform.suite.api.ConfigurationParameter;
++import org.junit.platform.suite.api.IncludeTags;
++import org.junit.platform.suite.api.SelectClasses;
++import org.junit.platform.suite.api.Suite;
++import org.junit.platform.suite.api.SuiteDisplayName;
++
++@Suite
++@SuiteDisplayName("Async level data writes")
++@IncludeTags("Normal")
++@SelectClasses(LevelStorageSourceAsyncWriteTest.class)
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class LevelStorageSourceAsyncWriteTestSuite {
++}

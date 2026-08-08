@@ -5,12 +5,12 @@ Subject: [PATCH] Write level data on the async-I/O owner
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 940e80117e945385863cf8c82b5c64cb5d47162e..1c5813e050411996c0df50d3de6274306d6bbf04 100644
+index 940e80117e945385863cf8c82b5c64cb5d47162e..6f0f3039a9b9713b1181a6369ed51767419e2771 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -1019,8 +1019,25 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1019,8 +1019,27 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.scoreboard.storeToSaveDataIfDirty(this.getDataStorage().computeIfAbsent(ScoreboardSaveData.TYPE));
- 
+
          GameProfile singleplayerProfile = this.getSingleplayerProfile();
 -        this.storageSource.saveDataTag(this.worldData, singleplayerProfile == null ? null : singleplayerProfile.id());
 +        // Loom - the snapshot is built here because it reads mutable world state, but compressing and
@@ -30,13 +30,59 @@ index 940e80117e945385863cf8c82b5c64cb5d47162e..1c5813e050411996c0df50d3de627430
 +                && net.minecraft.server.threading.runtime.OwnerDomainExecutor.canRunSynchronousCallbacks()) {
 +                net.minecraft.server.threading.runtime.OwnerDomainExecutor.awaitCooperatively(levelDataWrite, "save-global-level-data");
 +            } else {
-+                levelDataWrite.join();
++                net.minecraft.server.threading.runtime.ThreadedRegionsBlockingBarrier.awaitNonOwnerFuture(
++                    levelDataWrite, "save-global-level-data"
++                );
 +            }
              this.savedDataStorage.saveAndJoin();
          } else {
              this.savedDataStorage.scheduleSave();
+@@ -1087,6 +1106,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             // removes the subsequent durability wait; every vanilla save is still scheduled.
+             savedAny = this.saveAllChunks(silent, false, force);
+             if (flush) {
++                barriers.add(this.storageSource.pendingLevelDataWrite());
+                 barriers.add(this.getDataStorage().scheduleSave());
+                 for (final ServerLevel level : levels) {
+                     barriers.add(level.getDataStorage().scheduleSave());
+diff --git a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
+index 49a89fad126f8a93c29f842c2db0ac76c18dc183..7a0b5dc6b76d722dcaa5e54e943a1b5c507a154f 100644
+--- a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
++++ b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
+@@ -6,7 +6,9 @@ import io.papermc.paper.plugin.manager.compat.CompatibilitySyncBridge;
+ import io.papermc.paper.plugin.manager.compat.PluginCompatibilityProfile;
+ import io.papermc.paper.plugin.manager.compat.CompatibilityRuntimeContext;
+ import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ExecutionException;
+ import java.util.concurrent.TimeUnit;
++import java.util.concurrent.TimeoutException;
+ import java.util.concurrent.locks.Condition;
+ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerLevel;
+@@ -131,6 +133,21 @@ public final class ThreadedRegionsBlockingBarrier {
+         }
+     }
+
++    public static <T> T awaitNonOwnerFutureInterruptibly(
++        final CompletableFuture<T> future,
++        final long time,
++        final TimeUnit unit,
++        final String operation
++    ) throws InterruptedException, ExecutionException, TimeoutException {
++        assertOffOwnerDomain(operation);
++        final long started = System.nanoTime();
++        try {
++            return future.get(time, unit);
++        } finally {
++            noteWaitMetrics(operation, System.nanoTime() - started);
++        }
++    }
++
+     private static void assertOffOwnerDomain(final String operation) {
+         if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
+             final org.bukkit.plugin.Plugin plugin = CompatibilityRuntimeContext.currentPlugin();
 diff --git a/net/minecraft/world/level/storage/LevelStorageSource.java b/net/minecraft/world/level/storage/LevelStorageSource.java
-index 6f24eb34e0ecc2b03371c585a9538e9337a2295a..e7b6342fc0499ea6d7290a925958995977d369ab 100644
+index 6f24eb34e0ecc2b03371c585a9538e9337a2295a..e4832799c9d9fcbaf7d86ad50866cebee876bdd2 100644
 --- a/net/minecraft/world/level/storage/LevelStorageSource.java
 +++ b/net/minecraft/world/level/storage/LevelStorageSource.java
 @@ -63,6 +63,7 @@ import net.minecraft.server.packs.repository.PackRepository;
@@ -47,9 +93,19 @@ index 6f24eb34e0ecc2b03371c585a9538e9337a2295a..e7b6342fc0499ea6d7290a9259589959
  import net.minecraft.util.Util;
  import net.minecraft.util.datafix.DataFixTypes;
  import net.minecraft.util.datafix.DataFixers;
-@@ -583,10 +584,50 @@ public class LevelStorageSource {
+@@ -470,6 +471,9 @@ public class LevelStorageSource {
+
+         private void createLock() throws IOException {
+             this.lock = DirectoryLock.create(this.levelDirectory.path);
++            synchronized (this.levelDataWriteLock) {
++                this.closingLevelDataWrites = false;
++            }
          }
- 
+
+         public void releaseTemporarilyAndRun(final IORunnable runnable) throws IOException {
+@@ -583,10 +587,72 @@ public class LevelStorageSource {
+         }
+
          public void saveDataTag(final WorldData levelData, final @Nullable UUID singleplayerUUID) {
 +            this.saveLevelData(this.createLevelDataTag(levelData, singleplayerUUID));
 +        }
@@ -75,18 +131,40 @@ index 6f24eb34e0ecc2b03371c585a9538e9337a2295a..e7b6342fc0499ea6d7290a9259589959
 +        public CompletableFuture<Void> saveLevelDataAsync(final CompoundTag root) {
 +            final net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
 +            if (server == null) {
-+                this.saveLevelData(root);
-+                return CompletableFuture.completedFuture(null);
++                synchronized (this.levelDataWriteLock) {
++                    if (this.closingLevelDataWrites) {
++                        return CompletableFuture.failedFuture(
++                            new IllegalStateException("Level data storage is closing for " + this.levelId)
++                        );
++                    }
++                    try {
++                        this.writeLevelData(root);
++                        return CompletableFuture.completedFuture(null);
++                    } catch (final IOException exception) {
++                        LevelStorageSource.LOGGER.error("Failed to save level {}", this.levelDirectory.path(), exception);
++                        return CompletableFuture.failedFuture(exception);
++                    }
++                }
 +            }
 +            synchronized (this.levelDataWriteLock) {
++                if (this.closingLevelDataWrites) {
++                    return CompletableFuture.failedFuture(
++                        new IllegalStateException("Level data storage is closing for " + this.levelId)
++                    );
++                }
 +                // A failed write must not poison the writes queued behind it.
 +                final CompletableFuture<Void> next = this.pendingLevelDataWrite
 +                    .handle((ignored, throwable) -> null)
 +                    .thenCompose(ignored -> OwnerDomainExecutor.submit(
 +                        OwnerDomainExecutor.asyncIo(server, "save-level-data"),
-+                        () -> this.saveLevelData(root)
++                        () -> this.writeLevelDataUnchecked(root)
 +                    ));
 +                this.pendingLevelDataWrite = next;
++                next.whenComplete((ignored, failure) -> {
++                    if (failure != null) {
++                        LevelStorageSource.LOGGER.error("Failed to save level {}", this.levelDirectory.path(), failure);
++                    }
++                });
 +                return next;
 +            }
 +        }
@@ -97,40 +175,115 @@ index 6f24eb34e0ecc2b03371c585a9538e9337a2295a..e7b6342fc0499ea6d7290a9259589959
 +                return this.pendingLevelDataWrite;
 +            }
          }
- 
+
          public void saveLevelData(final Dynamic<?> tag) {
-@@ -610,6 +651,10 @@ public class LevelStorageSource {
+@@ -600,16 +666,36 @@ public class LevelStorageSource {
+             Path worldDir = this.levelDirectory.path();
+
+             try {
+-                Path dataFile = Files.createTempFile(worldDir, "level", ".dat");
+-                NbtIo.writeCompressed(root, dataFile);
+-                Path oldDataFile = this.levelDirectory.oldDataFile();
+-                Path currentFile = this.levelDirectory.dataFile();
+-                Util.safeReplaceFile(currentFile, dataFile, oldDataFile);
++                this.writeLevelData(root);
+             } catch (Exception e) {
+                 LevelStorageSource.LOGGER.error("Failed to save level {}", worldDir, e);
              }
          }
- 
+
++        private void writeLevelDataUnchecked(final CompoundTag root) {
++            try {
++                this.writeLevelData(root);
++            } catch (final IOException exception) {
++                throw new UncheckedIOException(exception);
++            }
++        }
++
++        private void writeLevelData(final CompoundTag root) throws IOException {
++            final Path worldDir = this.levelDirectory.path();
++            final Path dataFile = Files.createTempFile(worldDir, "level", ".dat");
++            NbtIo.writeCompressed(root, dataFile);
++            final Path oldDataFile = this.levelDirectory.oldDataFile();
++            final Path currentFile = this.levelDirectory.dataFile();
++            if (!Util.safeReplaceOrMoveFile(currentFile, dataFile, oldDataFile, false)) {
++                throw new IOException("Failed to replace level data for " + this.levelId);
++            }
++        }
++
 +        // Serializes level.dat writes handed to the async-I/O owner; see saveLevelDataAsync.
 +        private final Object levelDataWriteLock = new Object();
 +        private CompletableFuture<Void> pendingLevelDataWrite = CompletableFuture.completedFuture(null);
++        private boolean closingLevelDataWrites;
 +
          public Optional<Path> getIconFile() {
              return !this.lock.isValid() ? Optional.empty() : Optional.of(this.levelDirectory.iconFile());
          }
-@@ -724,6 +769,23 @@ public class LevelStorageSource {
- 
+@@ -724,7 +810,66 @@ public class LevelStorageSource {
+
          @Override
          public void close() throws IOException {
-+            // A queued level.dat write must not outlive the storage it writes through. Bounded like the
-+            // other shutdown waits: a stalled volume must not hold the server open forever, and giving up
-+            // is safe because the write lands through a temp file and an atomic replace, so a timeout
-+            // leaves the previous good level.dat in place rather than a half-written one.
-+            try {
-+                this.pendingLevelDataWrite().get(60L, java.util.concurrent.TimeUnit.SECONDS);
-+            } catch (final java.util.concurrent.TimeoutException e) {
-+                LevelStorageSource.LOGGER.error(
-+                    "Timed out after 60s waiting for the level data write for {}; keeping the previous level.dat",
-+                    this.levelId
-+                );
-+            } catch (final InterruptedException e) {
-+                Thread.currentThread().interrupt();
-+                LevelStorageSource.LOGGER.error("Interrupted waiting for the level data write for {}", this.levelId, e);
-+            } catch (final Exception e) {
-+                LevelStorageSource.LOGGER.error("Failed to flush pending level data for {}", this.levelId, e);
+-            this.lock.close();
++            final CompletableFuture<Void> pendingWrite;
++            synchronized (this.levelDataWriteLock) {
++                this.closingLevelDataWrites = true;
++                pendingWrite = this.pendingLevelDataWrite;
 +            }
-             this.lock.close();
++
++            IOException writeFailure = null;
++            if (OwnerDomainExecutor.currentOwner() != null && OwnerDomainExecutor.canRunSynchronousCallbacks()) {
++                final CompletableFuture<Void> boundedWrite = pendingWrite.copy()
++                    .orTimeout(60L, java.util.concurrent.TimeUnit.SECONDS);
++                try {
++                    OwnerDomainExecutor.awaitCooperatively(boundedWrite, "close-level-data-storage");
++                } catch (final java.util.concurrent.CompletionException exception) {
++                    if (exception.getCause() instanceof java.util.concurrent.TimeoutException timeout) {
++                        throw new IOException(
++                            "Timed out after 60s waiting for the level data write for " + this.levelId
++                                + "; the storage lock remains held",
++                            timeout
++                        );
++                    }
++                    writeFailure = new IOException("Failed to flush pending level data for " + this.levelId, exception.getCause());
++                } catch (final java.util.concurrent.CancellationException exception) {
++                    writeFailure = new IOException("Pending level data write was cancelled for " + this.levelId, exception);
++                }
++            } else {
++                try {
++                    net.minecraft.server.threading.runtime.ThreadedRegionsBlockingBarrier.awaitNonOwnerFutureInterruptibly(
++                        pendingWrite, 60L, java.util.concurrent.TimeUnit.SECONDS, "close-level-data-storage"
++                    );
++                } catch (final java.util.concurrent.TimeoutException exception) {
++                    throw new IOException(
++                        "Timed out after 60s waiting for the level data write for " + this.levelId
++                            + "; the storage lock remains held",
++                        exception
++                    );
++                } catch (final InterruptedException exception) {
++                    Thread.currentThread().interrupt();
++                    throw new IOException(
++                        "Interrupted while waiting for the level data write for " + this.levelId
++                            + "; the storage lock remains held",
++                        exception
++                    );
++                } catch (final java.util.concurrent.ExecutionException exception) {
++                    writeFailure = new IOException("Failed to flush pending level data for " + this.levelId, exception.getCause());
++                } catch (final java.util.concurrent.CancellationException exception) {
++                    writeFailure = new IOException("Pending level data write was cancelled for " + this.levelId, exception);
++                }
++            }
++
++            try {
++                this.lock.close();
++            } catch (final IOException lockFailure) {
++                if (writeFailure == null) {
++                    throw lockFailure;
++                }
++                writeFailure.addSuppressed(lockFailure);
++            }
++            if (writeFailure != null) {
++                throw writeFailure;
++            }
          }
- 
+
+         public boolean restoreLevelDataFromOld() {
