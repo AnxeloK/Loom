@@ -11,7 +11,7 @@ index fdcbc63f30326f981703a36edec7c06e639f7193..fd66ecfe6bc0d29cf55a679bc31b2daa
 @@ -29,6 +29,11 @@ public class RegionRuntime {
      protected RegionRuntime() {
      }
- 
+
 +    /**
 +     * Sentinel returned by {@link #tryClaimLease} when the bounds are already leased by another thread.
 +     */
@@ -43,7 +43,7 @@ index fdcbc63f30326f981703a36edec7c06e639f7193..fd66ecfe6bc0d29cf55a679bc31b2daa
 +    ) {
 +        return this.claimLeaseInternal(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread, false);
      }
- 
+
      protected long claimLeaseForTesting(
 @@ -48,7 +69,7 @@ public class RegionRuntime {
          final int maxChunkZ,
@@ -52,7 +52,7 @@ index fdcbc63f30326f981703a36edec7c06e639f7193..fd66ecfe6bc0d29cf55a679bc31b2daa
 -        return this.claimLeaseInternal(worldKey, minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread);
 +        return this.claimLeaseInternal(worldKey, minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread, true);
      }
- 
+
      private long claimLeaseInternal(
 @@ -57,7 +78,8 @@ public class RegionRuntime {
          final int minChunkZ,
@@ -66,7 +66,7 @@ index fdcbc63f30326f981703a36edec7c06e639f7193..fd66ecfe6bc0d29cf55a679bc31b2daa
          Objects.requireNonNull(ownerThread, "Owner thread may not be null");
 @@ -66,7 +88,7 @@ public class RegionRuntime {
          }
- 
+
          final long leaseId = this.nextLeaseId.getAndIncrement();
 -        this.ownershipByWorld
 +        final boolean claimed = this.ownershipByWorld
@@ -81,16 +81,16 @@ index fdcbc63f30326f981703a36edec7c06e639f7193..fd66ecfe6bc0d29cf55a679bc31b2daa
 +                this.nextRegionId,
 +                required
              );
- 
+
 -        return leaseId;
 +        return claimed ? leaseId : NO_LEASE;
      }
- 
+
      public void releaseLease(final ServerLevel world, final long leaseId) {
 @@ -244,7 +267,7 @@ public class RegionRuntime {
          private long retiredRegions;
          private long reusedRegionAssignments;
- 
+
 -        private void claimLease(
 +        private boolean claimLease(
              final long leaseId,
@@ -125,13 +125,33 @@ index fdcbc63f30326f981703a36edec7c06e639f7193..fd66ecfe6bc0d29cf55a679bc31b2daa
                  this.lock.unlock();
              }
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
-index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bdba5a47bd7a701b9902ff7c8c9748474fdd70d2 100644
+index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..fac4b0e0ec40d2e1f71b60b8d762887a7bef3bdd 100644
 --- a/net/minecraft/server/threading/TickRegions.java
 +++ b/net/minecraft/server/threading/TickRegions.java
-@@ -257,6 +257,47 @@ public class TickRegions {
+@@ -2,6 +2,7 @@ package net.minecraft.server.threading;
+
+ import ca.spottedleaf.moonrise.common.util.TickThread;
+ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
++import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
+ import net.minecraft.util.Util;
+@@ -249,14 +250,72 @@ public class TickRegions {
+             maxChunkX,
+             maxChunkZ,
+             previous,
++            previous,
+             leaseId,
+             currentThread.threadId(),
+-            ownerScope
++            ownerScope,
++            null,
++            false
+         );
+         CURRENT_CONTEXT.set(next);
          return next;
      }
- 
+
 +    /**
 +     * Pushes a region context only when the bounds are free, returning null when another thread holds an
 +     * overlapping lease. Used by callers that can decline the work, so losing the race is an ordinary outcome
@@ -150,36 +170,161 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bdba5a47bd7a701b9902ff7c8c974847
 +        if (leaseId == RegionRuntime.NO_LEASE) {
 +            return null;
 +        }
-+        final OwnerDomainExecutor.Scope ownerScope = OwnerDomainExecutor.enterRegion(
-+            world,
-+            minChunkX,
-+            minChunkZ,
-+            maxChunkX,
-+            maxChunkZ,
-+            "region-context"
-+        );
-+        final RegionContext next = new RegionContext(
-+            world,
-+            minChunkX,
-+            minChunkZ,
-+            maxChunkX,
-+            maxChunkZ,
-+            previous,
-+            leaseId,
-+            currentThread.threadId(),
-+            ownerScope
-+        );
-+        CURRENT_CONTEXT.set(next);
-+        return next;
++        final OwnerDomainExecutor.Scope suspendedOwnerScope = OwnerDomainExecutor.suspendCurrentOwner();
++        OwnerDomainExecutor.Scope ownerScope = null;
++        try {
++            ownerScope = OwnerDomainExecutor.enterRegion(
++                world,
++                minChunkX,
++                minChunkZ,
++                maxChunkX,
++                maxChunkZ,
++                "cooperative-region-help"
++            );
++            final RegionContext next = new RegionContext(
++                world,
++                minChunkX,
++                minChunkZ,
++                maxChunkX,
++                maxChunkZ,
++                previous,
++                null,
++                leaseId,
++                currentThread.threadId(),
++                ownerScope,
++                suspendedOwnerScope,
++                true
++            );
++            CURRENT_CONTEXT.set(next);
++            return next;
++        } catch (final Throwable throwable) {
++            if (ownerScope != null) {
++                ownerScope.close();
++            }
++            suspendedOwnerScope.close();
++            REGION_RUNTIME.releaseLease(world, leaseId);
++            throw throwable;
++        }
 +    }
 +
      public static void popContext(final RegionContext context) {
          RegionContext current = CURRENT_CONTEXT.get();
          if (current != context) {
-@@ -1438,6 +1479,41 @@ public class TickRegions {
+@@ -279,7 +338,14 @@ public class TickRegions {
+         try {
+             current.ownerScope().close();
+         } finally {
+-            REGION_RUNTIME.releaseLease(current.world(), current.leaseId());
++            try {
++                if (current.suspendedOwnerScope() != null) {
++                    current.suspendedOwnerScope().close();
++                }
++            } finally {
++                REGION_RUNTIME.releaseLease(current.world(), current.leaseId());
++                OwnerDomainExecutor.signalCooperativeWaiters();
++            }
+         }
+     }
+
+@@ -290,7 +356,8 @@ public class TickRegions {
+                 || current.minChunkZ() != expected.minChunkZ()
+                 || current.maxChunkX() != expected.maxChunkX()
+                 || current.maxChunkZ() != expected.maxChunkZ()
+-                || current.ownerThreadId() != expected.ownerThreadId()) {
++                || current.ownerThreadId() != expected.ownerThreadId()
++                || current.isolatedOwnerView() != expected.isolatedOwnerView()) {
+                 return false;
+             }
+             current = current.previous();
+@@ -307,7 +374,7 @@ public class TickRegions {
+         if (isCurrentThreadOwnerByContext(world, chunkX, chunkZ, currentThread.threadId())) {
+             return true;
+         }
+-        if (REGION_RUNTIME.isOwner(world, chunkX, chunkZ, currentThread)) {
++        if (!hasIsolatedOwnerView() && REGION_RUNTIME.isOwner(world, chunkX, chunkZ, currentThread)) {
+             return true;
+         }
+
+@@ -327,7 +394,7 @@ public class TickRegions {
+         if (isCurrentThreadOwnerByContext(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread.threadId())) {
+             return true;
+         }
+-        if (REGION_RUNTIME.isOwner(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread)) {
++        if (!hasIsolatedOwnerView() && REGION_RUNTIME.isOwner(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread)) {
+             return true;
+         }
+
+@@ -348,13 +415,18 @@ public class TickRegions {
+         final Thread currentThread = Thread.currentThread();
+         final long threadId = currentThread.threadId();
+         return isCurrentThreadOwnerByContext(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, threadId)
+-            || REGION_RUNTIME.isOwner(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread);
++            || (!hasIsolatedOwnerView() && REGION_RUNTIME.isOwner(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread));
+     }
+
+     public static @Nullable RegionContext currentContext() {
+         return CURRENT_CONTEXT.get();
+     }
+
++    private static boolean hasIsolatedOwnerView() {
++        final RegionContext context = CURRENT_CONTEXT.get();
++        return context != null && context.isolatedOwnerView();
++    }
++
+     public static long getOwnershipCheckCount() {
+         return OWNERSHIP_CHECKS.sum();
+     }
+@@ -787,6 +859,8 @@ public class TickRegions {
+         boolean interrupted = Thread.interrupted();
+         int idleSpins = 0;
+         final boolean alreadyTickingWorld = RUNNING_WORLD_TICK.get();
++        final MinecraftServer server = MinecraftServer.getServer();
++        final boolean canServiceGlobalWaits = server != null && Thread.currentThread() == server.getRunningThread();
+         batch.waiter = Thread.currentThread();
+         try (OwnerDomainExecutor.Scope ignored = currentOwner == null
+             ? null
+@@ -798,7 +872,9 @@ public class TickRegions {
+                 // Preserve an acyclic progress rule: a coordinator always claims its own available
+                 // work before entering an unrelated batch. Cross-batch helping is only needed once
+                 // every local index is already claimed by an active helper.
+-                if (batch.runOne() || runQueuedCooperativeTask(alreadyTickingWorld)) {
++                if (batch.runOne()
++                    || runQueuedCooperativeTask(alreadyTickingWorld)
++                    || (canServiceGlobalWaits && OwnerDomainExecutor.runGlobalTaskCompletingActiveWait(server))) {
+                     idleSpins = 0;
+                     continue;
+                 }
+@@ -1236,7 +1312,7 @@ public class TickRegions {
+         final int chunkZ,
+         final long threadId
+     ) {
+-        for (RegionContext context = CURRENT_CONTEXT.get(); context != null; context = context.previous()) {
++        for (RegionContext context = CURRENT_CONTEXT.get(); context != null; context = context.ownerViewPrevious()) {
+             if (context.ownerThreadId() == threadId && context.world() == world && context.contains(chunkX, chunkZ)) {
+                 return true;
+             }
+@@ -1252,7 +1328,7 @@ public class TickRegions {
+         final int maxChunkZ,
+         final long threadId
+     ) {
+-        for (RegionContext context = CURRENT_CONTEXT.get(); context != null; context = context.previous()) {
++        for (RegionContext context = CURRENT_CONTEXT.get(); context != null; context = context.ownerViewPrevious()) {
+             if (context.ownerThreadId() == threadId
+                 && context.world() == world
+                 && context.contains(minChunkX, minChunkZ)
+@@ -1290,7 +1366,7 @@ public class TickRegions {
+         final Thread currentThread = Thread.currentThread();
+         final long threadId = currentThread.threadId();
+         return isCurrentThreadOwnerByContext(world, chunkX, chunkZ, threadId)
+-            || REGION_RUNTIME.isOwner(world, chunkX, chunkZ, currentThread);
++            || (!hasIsolatedOwnerView() && REGION_RUNTIME.isOwner(world, chunkX, chunkZ, currentThread));
+     }
+
+     private static long regionBucketKey(final int chunkX, final int chunkZ) {
+@@ -1438,6 +1514,44 @@ public class TickRegions {
          return stateFor(world).runQueuedOwnerTask(predicate);
      }
- 
+
 +    /**
 +     * Runs one queued task the caller does not already own, under a freshly claimed lease for that task's
 +     * region. Only bounded regions are eligible, and only while no other thread owns them and they do not
@@ -188,6 +333,9 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bdba5a47bd7a701b9902ff7c8c974847
 +     */
 +    public static boolean helpQueuedOwnerTask(final Predicate<Runnable> predicate) {
 +        Objects.requireNonNull(predicate, "Predicate may not be null");
++        if (CURRENT_CONTEXT.get() == null) {
++            return false;
++        }
 +        for (final WorldSchedulerState state : SCHEDULER_STATES.values()) {
 +            if (state.helpQueuedOwnerTask(predicate)) {
 +                return true;
@@ -218,38 +366,87 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bdba5a47bd7a701b9902ff7c8c974847
      // Loom - tick independent worlds through the same cooperative batch as region shards. The server thread
      // participates with its GLOBAL_CONTROL owner temporarily detached; nested world coordinators help ready
      // region work but do not recursively enter another world tick. Failures remain deterministic by world
-@@ -1882,6 +1958,87 @@ public class TickRegions {
+@@ -1691,6 +1805,10 @@ public class TickRegions {
+         private long parallelMailboxDrainCount;
+         private long mailboxBudgetSkipCount;
+         private boolean mailboxOverflowWarned;
++        private final java.util.Set<RegionBoundTask> cooperativeContinuationClaims =
++            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
++        private final java.util.Set<CrossRegionMessage> cooperativeMailboxClaims =
++            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+
+         private WorldSchedulerState(final ServerLevel world) {
+             this.world = world;
+@@ -1831,6 +1949,9 @@ public class TickRegions {
+             synchronized (this.lock) {
+                 for (final Iterator<RegionBoundTask> iterator = this.regionContinuations.iterator(); iterator.hasNext(); ) {
+                     final RegionBoundTask candidate = iterator.next();
++                    if (this.cooperativeContinuationClaims.contains(candidate)) {
++                        continue;
++                    }
+                     if (predicate.test(candidate.task())) {
+                         iterator.remove();
+                         continuation = candidate.task();
+@@ -1850,6 +1971,9 @@ public class TickRegions {
+                 if (continuation == null) {
+                     for (final Iterator<CrossRegionMessage> iterator = this.mailbox.iterator(); iterator.hasNext(); ) {
+                         final CrossRegionMessage candidate = iterator.next();
++                        if (this.cooperativeMailboxClaims.contains(candidate)) {
++                            continue;
++                        }
+                         if (predicate.test(candidate.action())) {
+                             iterator.remove();
+                             message = candidate;
+@@ -1882,14 +2006,190 @@ public class TickRegions {
              return false;
          }
- 
+
 +        private boolean helpQueuedOwnerTask(final Predicate<Runnable> predicate) {
-+            while (true) {
-+                RegionBoundTask continuation = null;
-+                CrossRegionMessage message = null;
-+                synchronized (this.lock) {
-+                    for (final RegionBoundTask candidate : this.regionContinuations) {
-+                        if (predicate.test(candidate.task())) {
-+                            continuation = candidate;
++            final RegionBoundTask continuation;
++            final CrossRegionMessage message;
++            final int minChunkX;
++            final int minChunkZ;
++            final int maxChunkX;
++            final int maxChunkZ;
++            synchronized (this.lock) {
++                RegionBoundTask selectedContinuation = null;
++                CrossRegionMessage selectedMessage = null;
++                for (final RegionBoundTask candidate : this.regionContinuations) {
++                    if (!this.cooperativeContinuationClaims.contains(candidate) && predicate.test(candidate.task())) {
++                        selectedContinuation = candidate;
++                        break;
++                    }
++                }
++                if (selectedContinuation != null) {
++                    selectedContinuation = orderedPredecessor(
++                        this.regionContinuations,
++                        this.cooperativeContinuationClaims,
++                        selectedContinuation,
++                        RegionBoundTask::task
++                    );
++                }
++                if (selectedContinuation == null) {
++                    for (final CrossRegionMessage candidate : this.mailbox) {
++                        if (!this.cooperativeMailboxClaims.contains(candidate) && predicate.test(candidate.action())) {
++                            selectedMessage = candidate;
 +                            break;
 +                        }
 +                    }
-+                    if (continuation == null) {
-+                        for (final CrossRegionMessage candidate : this.mailbox) {
-+                            if (predicate.test(candidate.action())) {
-+                                message = candidate;
-+                                break;
-+                            }
-+                        }
++                    if (selectedMessage != null) {
++                        selectedMessage = orderedPredecessor(
++                            this.mailbox,
++                            this.cooperativeMailboxClaims,
++                            selectedMessage,
++                            CrossRegionMessage::action
++                        );
 +                    }
 +                }
-+                if (continuation == null && message == null) {
++                if (selectedContinuation == null && selectedMessage == null) {
 +                    return false;
 +                }
 +
-+                final int minChunkX;
-+                final int minChunkZ;
-+                final int maxChunkX;
-+                final int maxChunkZ;
++                continuation = selectedContinuation;
++                message = selectedMessage;
 +                if (continuation != null) {
 +                    minChunkX = continuation.minChunkX();
 +                    minChunkZ = continuation.minChunkZ();
@@ -259,63 +456,206 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bdba5a47bd7a701b9902ff7c8c974847
 +                    minChunkX = maxChunkX = message.targetChunkX();
 +                    minChunkZ = maxChunkZ = message.targetChunkZ();
 +                }
-+                if (intersectsHeldContext(this.world, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
-+                    return false;
-+                }
-+
-+                final RegionContext context = tryPushRegionContext(this.world, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
-+                if (context == null) {
-+                    // The region has a live owner that will run this itself.
-+                    return false;
-+                }
-+                try {
-+                    final boolean claimed;
-+                    synchronized (this.lock) {
-+                        claimed = continuation != null
-+                            ? this.regionContinuations.remove(continuation)
-+                            : this.mailbox.remove(message);
-+                    }
-+                    if (!claimed) {
-+                        // Its owner took the task between the scan and the lease claim.
-+                        continue;
-+                    }
-+                    if (continuation != null) {
-+                        try {
-+                            continuation.task().run();
-+                        } catch (final Throwable throwable) {
-+                            recordDiagnostic(
-+                                DiagnosticType.MAILBOX_MESSAGE_DROPPED,
-+                                this.world,
-+                                minChunkX,
-+                                minChunkZ,
-+                                maxChunkX,
-+                                maxChunkZ,
-+                                "Owner continuation threw exception during cooperative help: " + throwable
-+                            );
-+                        }
-+                    } else {
-+                        this.deliverMailboxMessage(message);
-+                    }
-+                    return true;
-+                } finally {
-+                    popContext(context);
++                if (continuation != null) {
++                    this.cooperativeContinuationClaims.add(continuation);
++                } else {
++                    this.cooperativeMailboxClaims.add(message);
 +                }
 +            }
++
++            if (intersectsHeldContext(this.world, minChunkX, minChunkZ, maxChunkX, maxChunkZ)) {
++                this.releaseCooperativeClaim(continuation, message);
++                return false;
++            }
++
++            final RegionContext context;
++            try {
++                context = tryPushRegionContext(this.world, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
++            } catch (final RuntimeException | Error throwable) {
++                this.releaseCooperativeClaim(continuation, message);
++                throw throwable;
++            }
++            if (context == null) {
++                // The region has a live owner that will run this itself. Keep queue and lease locks disjoint:
++                // owner paths may already hold a region lease when they drain this queue.
++                this.releaseCooperativeClaim(continuation, message);
++                return false;
++            }
++
++            final boolean removed;
++            synchronized (this.lock) {
++                removed = continuation != null
++                    ? removeByIdentity(this.regionContinuations, continuation)
++                    : removeByIdentity(this.mailbox, message);
++                if (continuation != null) {
++                    this.cooperativeContinuationClaims.remove(continuation);
++                } else {
++                    this.cooperativeMailboxClaims.remove(message);
++                }
++            }
++            if (!removed) {
++                popContext(context);
++                throw new IllegalStateException("Reserved cooperative owner task vanished from its queue");
++            }
++
++            try {
++                if (continuation != null) {
++                    try {
++                        continuation.task().run();
++                    } catch (final Throwable throwable) {
++                        recordDiagnostic(
++                            DiagnosticType.MAILBOX_MESSAGE_DROPPED,
++                            this.world,
++                            minChunkX,
++                            minChunkZ,
++                            maxChunkX,
++                            maxChunkZ,
++                            "Owner continuation threw exception during cooperative help: " + throwable
++                        );
++                    }
++                } else {
++                    this.runMailboxMessage(message);
++                }
++                return true;
++            } finally {
++                popContext(context);
++            }
++        }
++
++        private void releaseCooperativeClaim(
++            final @Nullable RegionBoundTask continuation,
++            final @Nullable CrossRegionMessage message
++        ) {
++            synchronized (this.lock) {
++                final boolean removed = continuation != null
++                    ? this.cooperativeContinuationClaims.remove(continuation)
++                    : this.cooperativeMailboxClaims.remove(message);
++                if (!removed) {
++                    throw new IllegalStateException("Cooperative owner task claim was released out of order");
++                }
++            }
++        }
++
++        private static <T> boolean removeByIdentity(final ArrayDeque<T> queue, final T expected) {
++            for (final Iterator<T> iterator = queue.iterator(); iterator.hasNext(); ) {
++                if (iterator.next() == expected) {
++                    iterator.remove();
++                    return true;
++                }
++            }
++            return false;
++        }
++
++        private static <T> @Nullable T orderedPredecessor(
++            final ArrayDeque<T> queue,
++            final java.util.Set<T> cooperativeClaims,
++            final T target,
++            final java.util.function.Function<T, Runnable> task
++        ) {
++            final Runnable targetTask = task.apply(target);
++            for (final T candidate : queue) {
++                if (candidate == target) {
++                    return target;
++                }
++                if (OwnerDomainExecutor.mustRunBefore(task.apply(candidate), targetTask)) {
++                    if (cooperativeClaims.contains(candidate)) {
++                        return null;
++                    }
++                    return candidate;
++                }
++            }
++            throw new IllegalStateException("Cooperative owner target vanished while holding the scheduler lock");
 +        }
 +
          private void drainRegionContinuations() {
              final List<RegionBoundTask> continuations;
              synchronized (this.lock) {
+                 if (this.regionContinuations.isEmpty()) {
+                     return;
+                 }
+-                continuations = new ArrayList<>(this.regionContinuations);
+-                this.regionContinuations.clear();
++                continuations = new ArrayList<>(this.regionContinuations.size());
++                for (final Iterator<RegionBoundTask> iterator = this.regionContinuations.iterator(); iterator.hasNext(); ) {
++                    final RegionBoundTask continuation = iterator.next();
++                    if (this.cooperativeContinuationClaims.contains(continuation)) {
++                        break;
++                    }
++                    iterator.remove();
++                    continuations.add(continuation);
++                }
++            }
++            if (continuations.isEmpty()) {
++                return;
+             }
+             runRegionBoundTasksFromCurrentContext(this.world, continuations, "region-continuation");
+         }
+@@ -1930,11 +2230,13 @@ public class TickRegions {
+                 final int mailboxBudget = getAdaptiveMailboxBudget(this.world, available);
+                 final int budgeted = Math.min(available, mailboxBudget);
+                 final List<CrossRegionMessage> toDeliver = new ArrayList<>(budgeted);
+-                for (int i = 0; i < budgeted; ++i) {
+-                    final CrossRegionMessage message = this.mailbox.pollFirst();
+-                    if (message == null) {
++                for (final Iterator<CrossRegionMessage> iterator = this.mailbox.iterator();
++                     iterator.hasNext() && toDeliver.size() < budgeted; ) {
++                    final CrossRegionMessage message = iterator.next();
++                    if (this.cooperativeMailboxClaims.contains(message)) {
+                         break;
+                     }
++                    iterator.remove();
+                     toDeliver.add(message);
+                 }
+
+@@ -2212,6 +2514,9 @@ public class TickRegions {
+
+                 for (final Iterator<CrossRegionMessage> iterator = this.mailbox.iterator(); iterator.hasNext(); ) {
+                     final CrossRegionMessage message = iterator.next();
++                    if (this.cooperativeMailboxClaims.contains(message)) {
++                        continue;
++                    }
+                     if (message.plugin() == plugin) {
+                         iterator.remove();
+                         ++this.droppedMessageCount;
+@@ -2634,9 +2939,12 @@ public class TickRegions {
+         int maxChunkX,
+         int maxChunkZ,
+         @Nullable RegionContext previous,
++        @Nullable RegionContext ownerViewPrevious,
+         long leaseId,
+         long ownerThreadId,
+-        OwnerDomainExecutor.Scope ownerScope
++        OwnerDomainExecutor.Scope ownerScope,
++        OwnerDomainExecutor.@Nullable Scope suspendedOwnerScope,
++        boolean isolatedOwnerView
+     ) {
+
+         public boolean contains(final int chunkX, final int chunkZ) {
 diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
-index d21de16dbf859cd0475852a46f60cccc9209d330..0612a1b800980219b3d016192d89f422a874feb4 100644
+index d21de16dbf859cd0475852a46f60cccc9209d330..b17465ccf1ca5ab6b05c73181b7faba9a702cccb 100644
 --- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 +++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
-@@ -43,8 +43,11 @@ public final class OwnerDomainExecutor {
+@@ -2,8 +2,10 @@ package net.minecraft.server.threading.runtime;
+
+ import com.mojang.logging.LogUtils;
+ import java.util.EnumMap;
++import java.util.IdentityHashMap;
+ import java.util.Map;
+ import java.util.Objects;
++import java.util.Set;
+ import java.util.UUID;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.ConcurrentLinkedQueue;
+@@ -40,15 +42,20 @@ public final class OwnerDomainExecutor {
+     private static final ThreadLocal<@Nullable OwnerContext> CURRENT_OWNER = new ThreadLocal<>();
+     private static final Executor LOGIN_EXECUTOR = Executors.newSingleThreadExecutor(new NamedThreadFactory("Owner domain login"));
+     private static final Object COOPERATIVE_WAITS_LOCK = new Object();
++    private static final Object WAIT_DEPENDENCIES_LOCK = new Object();
++    private static final Map<CompletableFuture<?>, Set<CompletableFuture<?>>> WAIT_DEPENDENCIES = new IdentityHashMap<>();
      private static final CooperativeWait[] NO_COOPERATIVE_WAITS = new CooperativeWait[0];
      private static volatile CooperativeWait[] cooperativeWaits = NO_COOPERATIVE_WAITS;
      private static final int MAX_COOPERATIVE_WAIT_DEPTH = 32;
 +    private static final int MAX_COOPERATIVE_HELP_DEPTH = 4;
-+    private static final long COOPERATIVE_HELP_RETRY_NANOS = 1_000_000L;
      private static final int COOPERATIVE_WORK_SLICE = 64;
 -    private static final ThreadLocal<int[]> COOPERATIVE_WAIT_DEPTH = ThreadLocal.withInitial(() -> new int[1]);
 +    // [0] cooperative wait nesting, [1] foreign-owner help nesting.
@@ -323,7 +663,46 @@ index d21de16dbf859cd0475852a46f60cccc9209d330..0612a1b800980219b3d016192d89f422
      private static final java.util.concurrent.atomic.LongAdder EXECUTE_INLINE = new java.util.concurrent.atomic.LongAdder();
      private static final java.util.concurrent.atomic.LongAdder EXECUTE_HANDOFF = new java.util.concurrent.atomic.LongAdder();
      private static final java.util.concurrent.atomic.LongAdder[] EXECUTE_INLINE_BY_DOMAIN = createDomainCounters();
-@@ -456,14 +459,17 @@ public final class OwnerDomainExecutor {
+     private static final java.util.concurrent.atomic.LongAdder[] EXECUTE_HANDOFF_BY_DOMAIN = createDomainCounters();
++    private static final AtomicLong OWNER_TASK_SEQUENCE = new AtomicLong();
+
+     private OwnerDomainExecutor() {
+     }
+@@ -338,6 +345,15 @@ public final class OwnerDomainExecutor {
+         executeInternal(owner, task, null, null);
+     }
+
++    static void executeCompleting(
++        final Owner owner,
++        final Runnable task,
++        final CompletableFuture<?> completion
++    ) {
++        Objects.requireNonNull(completion, "completion");
++        executeInternal(owner, task, null, completion);
++    }
++
+     // Loom - onUnreachable fires when the handoff target can no longer take the task (currently only a
+     // player owner whose player has disconnected). Fire-and-forget callers pass null and keep the historic
+     // drop semantics; future-returning callers use it to fail the future instead of leaving it pending
+@@ -367,6 +383,9 @@ public final class OwnerDomainExecutor {
+             case LOGIN -> LOGIN_EXECUTOR.execute(wrap(owner, task, completion));
+             case ASYNC_IO -> Util.nonCriticalIoPool().execute(wrap(owner, task, completion));
+         }
++        if (completion != null) {
++            signalCooperativeWaiters(completion);
++        }
+     }
+
+     public static CompletableFuture<Void> submit(final Owner owner, final Runnable task) {
+@@ -450,20 +469,25 @@ public final class OwnerDomainExecutor {
+         boolean interrupted = false;
+         try {
+             final CompletableFuture<T> future = Objects.requireNonNull(futureSupplier.get(), "futureSupplier returned null future");
++            wait.await(future);
+             future.whenComplete((result, throwable) -> wait.signal());
+             int workInSlice = 0;
+             while (!future.isDone()) {
++                final long observedSignal = wait.signalSequence();
                  if (wait.runOneCompleting(future)
                      || wait.runQueuedOwnerTaskCompleting(future)
                      || wait.runOne()
@@ -337,16 +716,135 @@ index d21de16dbf859cd0475852a46f60cccc9209d330..0612a1b800980219b3d016192d89f422
                  } else {
                      workInSlice = 0;
 -                    LockSupport.park(wait);
-+                    // Queued work this thread may help with does not signal this wait, so re-check on a
-+                    // bounded interval instead of only when an owner handoff or the future wakes us.
-+                    LockSupport.parkNanos(wait, COOPERATIVE_HELP_RETRY_NANOS);
++                    if (!future.isDone() && wait.signalSequence() == observedSignal) {
++                        LockSupport.park(wait);
++                    }
                      if (Thread.interrupted()) {
                          interrupted = true;
                      }
-@@ -491,6 +497,26 @@ public final class OwnerDomainExecutor {
+@@ -491,6 +515,145 @@ public final class OwnerDomainExecutor {
          return cooperativeWaits.length;
      }
- 
+
++    /**
++     * Records that {@code awaited} cannot complete until {@code prerequisite} completes. Owner queues use
++     * this metadata to find the exact continuation that can make a composed synchronous wait progress.
++     */
++    public static void linkWaitDependency(
++        final CompletableFuture<?> awaited,
++        final CompletableFuture<?> prerequisite
++    ) {
++        Objects.requireNonNull(awaited, "awaited");
++        Objects.requireNonNull(prerequisite, "prerequisite");
++        if (awaited == prerequisite || awaited.isDone()) {
++            return;
++        }
++
++        synchronized (WAIT_DEPENDENCIES_LOCK) {
++            if (completionCanFinishLocked(prerequisite, awaited, 0)) {
++                throw new IllegalStateException("Owner wait dependency cycle detected");
++            }
++            WAIT_DEPENDENCIES.computeIfAbsent(
++                awaited,
++                ignored -> java.util.Collections.newSetFromMap(new IdentityHashMap<>())
++            ).add(prerequisite);
++        }
++        awaited.whenComplete((result, throwable) -> {
++            synchronized (WAIT_DEPENDENCIES_LOCK) {
++                WAIT_DEPENDENCIES.remove(awaited);
++            }
++        });
++        signalCooperativeWaiters(prerequisite);
++    }
++
++    private static boolean completionCanFinish(
++        final CompletableFuture<?> awaited,
++        final @Nullable CompletableFuture<?> completion
++    ) {
++        if (completion == null) {
++            return false;
++        }
++        synchronized (WAIT_DEPENDENCIES_LOCK) {
++            return completionCanFinishLocked(awaited, completion, 0);
++        }
++    }
++
++    private static boolean completionCanFinishLocked(
++        final CompletableFuture<?> awaited,
++        final CompletableFuture<?> completion,
++        final int depth
++    ) {
++        if (awaited == completion) {
++            return true;
++        }
++        if (depth >= MAX_COOPERATIVE_WAIT_DEPTH) {
++            return false;
++        }
++        final Set<CompletableFuture<?>> prerequisites = WAIT_DEPENDENCIES.get(awaited);
++        if (prerequisites == null) {
++            return false;
++        }
++        for (final CompletableFuture<?> prerequisite : prerequisites) {
++            if (completionCanFinishLocked(prerequisite, completion, depth + 1)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    public static void signalCooperativeWaiters() {
++        for (final CooperativeWait wait : cooperativeWaits) {
++            wait.signal();
++        }
++    }
++
++    private static void signalCooperativeWaiters(final CompletableFuture<?> completion) {
++        for (final CooperativeWait wait : cooperativeWaits) {
++            if (wait.awaits(completion)) {
++                wait.signal();
++            }
++        }
++    }
++
++    public static boolean runGlobalTaskCompletingActiveWait(final MinecraftServer server) {
++        Objects.requireNonNull(server, "server");
++        return server.runQueuedGlobalOwnerTask(task -> {
++            if (!(task instanceof OwnerTask ownerTask) || ownerTask.owner.server() != server) {
++                return false;
++            }
++            for (final CooperativeWait wait : cooperativeWaits) {
++                final CompletableFuture<?> awaited = wait.awaitedFuture;
++                if (awaited != null && ownerTask.completes(awaited)) {
++                    return true;
++                }
++            }
++            return false;
++        });
++    }
++
++    public static boolean mustRunBefore(final Runnable candidate, final Runnable target) {
++        if (!(candidate instanceof OwnerTask earlier) || !(target instanceof OwnerTask later) || earlier.sequence >= later.sequence) {
++            return false;
++        }
++        final Owner first = earlier.owner;
++        final Owner second = later.owner;
++        if (first.server() != second.server()) {
++            return false;
++        }
++        if (first.domain() == Domain.GLOBAL_CONTROL || second.domain() == Domain.GLOBAL_CONTROL) {
++            return first.domain() == second.domain();
++        }
++        if ((first.domain() == Domain.REGION || first.domain() == Domain.PLAYER)
++            && (second.domain() == Domain.REGION || second.domain() == Domain.PLAYER)
++            && first.level() == second.level()) {
++            return first.minChunkX() <= second.maxChunkX()
++                && first.maxChunkX() >= second.minChunkX()
++                && first.minChunkZ() <= second.maxChunkZ()
++                && first.maxChunkZ() >= second.minChunkZ();
++        }
++        return first.domain() == second.domain();
++    }
++
 +    /**
 +     * Last-resort progress for a wait whose result depends on an owner nothing is currently running. A region
 +     * that is between ticks has no worker, so the task completing this future would otherwise sit queued while
@@ -370,3 +868,104 @@ index d21de16dbf859cd0475852a46f60cccc9209d330..0612a1b800980219b3d016192d89f422
      public static Diagnostics snapshotDiagnostics() {
          final EnumMap<Domain, DomainDiagnostics> domains = new EnumMap<>(Domain.class);
          for (final Domain domain : Domain.values()) {
+@@ -633,15 +796,17 @@ public final class OwnerDomainExecutor {
+         private final Owner owner;
+         private final Runnable task;
+         private final @Nullable CompletableFuture<?> completion;
++        private final long sequence;
+
+         private OwnerTask(final Owner owner, final Runnable task, final @Nullable CompletableFuture<?> completion) {
+             this.owner = owner;
+             this.task = task;
+             this.completion = completion;
++            this.sequence = OWNER_TASK_SEQUENCE.getAndIncrement();
+         }
+
+         private boolean completes(final CompletableFuture<?> future) {
+-            return this.completion == future;
++            return completionCanFinish(future, this.completion);
+         }
+
+         @Override
+@@ -710,6 +875,8 @@ public final class OwnerDomainExecutor {
+         private final OwnerContext ownerContext;
+         private final String operation;
+         private final ConcurrentLinkedQueue<Runnable> tasks = new ConcurrentLinkedQueue<>();
++        private final AtomicLong signalSequence = new AtomicLong();
++        private volatile @Nullable CompletableFuture<?> awaitedFuture;
+         private boolean accepting = true;
+
+         private CooperativeWait(final Thread thread, final OwnerContext ownerContext, final String operation) {
+@@ -731,6 +898,15 @@ public final class OwnerDomainExecutor {
+             return false;
+         }
+
++        private void await(final CompletableFuture<?> future) {
++            this.awaitedFuture = future;
++        }
++
++        private boolean awaits(final CompletableFuture<?> future) {
++            final CompletableFuture<?> awaited = this.awaitedFuture;
++            return awaited != null && completionCanFinish(awaited, future);
++        }
++
+         private synchronized boolean offer(final Runnable task) {
+             if (!this.accepting) {
+                 return false;
+@@ -809,8 +985,13 @@ public final class OwnerDomainExecutor {
+         }
+
+         private void signal() {
++            this.signalSequence.incrementAndGet();
+             LockSupport.unpark(this.thread);
+         }
++
++        private long signalSequence() {
++            return this.signalSequence.get();
++        }
+     }
+
+     public static final class Scope implements AutoCloseable {
+diff --git a/net/minecraft/server/threading/runtime/OwnershipRouter.java b/net/minecraft/server/threading/runtime/OwnershipRouter.java
+index f75fa8ee15efa0ee6b99c56409d5cd2efd456cf7..c8d4c635157a1d398f614b428440d6016b4b6011 100644
+--- a/net/minecraft/server/threading/runtime/OwnershipRouter.java
++++ b/net/minecraft/server/threading/runtime/OwnershipRouter.java
+@@ -141,7 +141,7 @@ public final class OwnershipRouter {
+     ) {
+         Objects.requireNonNull(supplier, "supplier");
+         final CompletableFuture<T> result = new CompletableFuture<>();
+-        runWhenChunksReady(
++        final CompletableFuture<Void> readiness = runWhenChunksReady(
+             level,
+             minChunkX,
+             minChunkZ,
+@@ -151,7 +151,9 @@ public final class OwnershipRouter {
+             priority,
+             operation,
+             chunks -> result.complete(supplier.get())
+-        ).whenComplete((ignored, throwable) -> {
++        );
++        OwnerDomainExecutor.linkWaitDependency(result, readiness);
++        readiness.whenComplete((ignored, throwable) -> {
+             if (throwable != null) {
+                 result.completeExceptionally(throwable);
+             }
+@@ -225,7 +227,7 @@ public final class OwnershipRouter {
+         }
+
+         try {
+-            OwnerDomainExecutor.execute(
++            OwnerDomainExecutor.executeCompleting(
+                 OwnerDomainExecutor.region(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation),
+                 () -> {
+                     if (future.isDone()) {
+@@ -242,7 +244,8 @@ public final class OwnershipRouter {
+                     try (lease) {
+                         completeChunkReadyCallback(future, chunks, onReady);
+                     }
+-                }
++                },
++                future
+             );
+         } catch (final Throwable throwable) {
+             lease.close();
