@@ -918,3 +918,488 @@ index 1fe13a08b0b4c95cf7b34c654915dae213bd68e2..08d381c4f23b471bc1c7aea46546b673
          if (blockEntity == null) {
              blockEntity = this.blockEntities.get(pos);
          }
+diff --git a/net/minecraft/world/level/levelgen/structure/StructurePiece.java b/net/minecraft/world/level/levelgen/structure/StructurePiece.java
+index ed7e541b422ef4cc8e86cc397b17311bafb5ae6f..a04be389ba8c0cd968837d2a381fe61f5a6a0f0f 100644
+--- a/net/minecraft/world/level/levelgen/structure/StructurePiece.java
++++ b/net/minecraft/world/level/levelgen/structure/StructurePiece.java
+@@ -318,9 +318,8 @@ public abstract class StructurePiece {
+             for (int x = x0; x <= x1; x++) {
+                 for (int z = z0; z <= z1; z++) {
+                     if (!skipAir || !this.getBlock(level, x, y, z, chunkBB).isAir()) {
+-                        boolean isEdge = y == y0 || y == y1 || x == x0 || x == x1 || z == z0 || z == z1;
+-                        BlockState selected = selector.next(random, x, y, z, isEdge);
+-                        this.placeBlock(level, selected, x, y, z, chunkBB);
++                        selector.next(random, x, y, z, y == y0 || y == y1 || x == x0 || x == x1 || z == z0 || z == z1);
++                        this.placeBlock(level, selector.getNext(), x, y, z, chunkBB);
+                     }
+                 }
+             }
+@@ -627,6 +626,12 @@ public abstract class StructurePiece {
+     }
+
+     public abstract static class BlockSelector {
+-        public abstract BlockState next(RandomSource random, int worldX, int worldY, int worldZ, boolean isEdge);
++        protected BlockState next = Blocks.AIR.defaultBlockState();
++
++        public abstract void next(RandomSource random, int worldX, int worldY, int worldZ, boolean isEdge);
++
++        public BlockState getNext() {
++            return this.next;
++        }
+     }
+ }
+diff --git a/net/minecraft/world/level/levelgen/structure/structures/JungleTemplePiece.java b/net/minecraft/world/level/levelgen/structure/structures/JungleTemplePiece.java
+index a1fd4b1214644d898fc4b6ae8d7cc3714951b088..551fb6c4d4c9d1bc410da20c1710a8791f64ec39 100644
+--- a/net/minecraft/world/level/levelgen/structure/structures/JungleTemplePiece.java
++++ b/net/minecraft/world/level/levelgen/structure/structures/JungleTemplePiece.java
+@@ -35,6 +35,13 @@ public class JungleTemplePiece extends ScatteredFeaturePiece {
+     private boolean placedTrap1;
+     private boolean placedTrap2;
+     private static final JungleTemplePiece.MossStoneSelector STONE_SELECTOR = new JungleTemplePiece.MossStoneSelector();
++    private static final ThreadLocal<JungleTemplePiece.MossStoneSelector> THREAD_LOCAL_STONE_SELECTOR = ThreadLocal.withInitial(
++        JungleTemplePiece.MossStoneSelector::new
++    );
++
++    private static JungleTemplePiece.MossStoneSelector stoneSelector() {
++        return THREAD_LOCAL_STONE_SELECTOR.get();
++    }
+
+     public JungleTemplePiece(final RandomSource random, final int west, final int north) {
+         super(StructurePieceType.JUNGLE_PYRAMID_PIECE, west, 64, north, 12, 10, 15, getRandomHorizontalDirection(random));
+@@ -68,19 +75,19 @@ public class JungleTemplePiece extends ScatteredFeaturePiece {
+         final BlockPos referencePos
+     ) {
+         if (this.updateAverageGroundHeight(level, chunkBB, 0)) {
+-            this.generateBox(level, chunkBB, 0, -4, 0, this.width - 1, 0, this.depth - 1, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 2, 1, 2, 9, 2, 2, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 2, 1, 12, 9, 2, 12, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 2, 1, 3, 2, 2, 11, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 9, 1, 3, 9, 2, 11, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 1, 3, 1, 10, 6, 1, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 1, 3, 13, 10, 6, 13, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 1, 3, 2, 1, 6, 12, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 10, 3, 2, 10, 6, 12, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 2, 3, 2, 9, 3, 12, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 2, 6, 2, 9, 6, 12, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 3, 7, 3, 8, 7, 11, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 4, 8, 4, 7, 8, 10, false, random, STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 0, -4, 0, this.width - 1, 0, this.depth - 1, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 2, 1, 2, 9, 2, 2, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 2, 1, 12, 9, 2, 12, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 2, 1, 3, 2, 2, 11, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 9, 1, 3, 9, 2, 11, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 1, 3, 1, 10, 6, 1, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 1, 3, 13, 10, 6, 13, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 1, 3, 2, 1, 6, 12, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 10, 3, 2, 10, 6, 12, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 2, 3, 2, 9, 3, 12, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 2, 6, 2, 9, 6, 12, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 3, 7, 3, 8, 7, 11, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 4, 8, 4, 7, 8, 10, false, random, stoneSelector());
+             this.generateAirBox(level, chunkBB, 3, 1, 3, 8, 2, 11);
+             this.generateAirBox(level, chunkBB, 4, 3, 6, 7, 3, 9);
+             this.generateAirBox(level, chunkBB, 2, 4, 2, 9, 5, 12);
+@@ -96,32 +103,32 @@ public class JungleTemplePiece extends ScatteredFeaturePiece {
+             this.placeBlock(level, Blocks.AIR.defaultBlockState(), 10, 5, 9, chunkBB);
+
+             for (int z = 0; z <= 14; z += 14) {
+-                this.generateBox(level, chunkBB, 2, 4, z, 2, 5, z, false, random, STONE_SELECTOR);
+-                this.generateBox(level, chunkBB, 4, 4, z, 4, 5, z, false, random, STONE_SELECTOR);
+-                this.generateBox(level, chunkBB, 7, 4, z, 7, 5, z, false, random, STONE_SELECTOR);
+-                this.generateBox(level, chunkBB, 9, 4, z, 9, 5, z, false, random, STONE_SELECTOR);
++                this.generateBox(level, chunkBB, 2, 4, z, 2, 5, z, false, random, stoneSelector());
++                this.generateBox(level, chunkBB, 4, 4, z, 4, 5, z, false, random, stoneSelector());
++                this.generateBox(level, chunkBB, 7, 4, z, 7, 5, z, false, random, stoneSelector());
++                this.generateBox(level, chunkBB, 9, 4, z, 9, 5, z, false, random, stoneSelector());
+             }
+
+-            this.generateBox(level, chunkBB, 5, 6, 0, 6, 6, 0, false, random, STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 5, 6, 0, 6, 6, 0, false, random, stoneSelector());
+
+             for (int x = 0; x <= 11; x += 11) {
+                 for (int z = 2; z <= 12; z += 2) {
+-                    this.generateBox(level, chunkBB, x, 4, z, x, 5, z, false, random, STONE_SELECTOR);
++                    this.generateBox(level, chunkBB, x, 4, z, x, 5, z, false, random, stoneSelector());
+                 }
+
+-                this.generateBox(level, chunkBB, x, 6, 5, x, 6, 5, false, random, STONE_SELECTOR);
+-                this.generateBox(level, chunkBB, x, 6, 9, x, 6, 9, false, random, STONE_SELECTOR);
++                this.generateBox(level, chunkBB, x, 6, 5, x, 6, 5, false, random, stoneSelector());
++                this.generateBox(level, chunkBB, x, 6, 9, x, 6, 9, false, random, stoneSelector());
+             }
+
+-            this.generateBox(level, chunkBB, 2, 7, 2, 2, 9, 2, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 9, 7, 2, 9, 9, 2, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 2, 7, 12, 2, 9, 12, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 9, 7, 12, 9, 9, 12, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 4, 9, 4, 4, 9, 4, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 7, 9, 4, 7, 9, 4, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 4, 9, 10, 4, 9, 10, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 7, 9, 10, 7, 9, 10, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 5, 9, 7, 6, 9, 7, false, random, STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 2, 7, 2, 2, 9, 2, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 9, 7, 2, 9, 9, 2, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 2, 7, 12, 2, 9, 12, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 9, 7, 12, 9, 9, 12, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 4, 9, 4, 4, 9, 4, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 7, 9, 4, 7, 9, 4, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 4, 9, 10, 4, 9, 10, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 7, 9, 10, 7, 9, 10, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 5, 9, 7, 6, 9, 7, false, random, stoneSelector());
+             BlockState eastStairs = Blocks.COBBLESTONE_STAIRS.defaultBlockState().setValue(StairBlock.FACING, Direction.EAST);
+             BlockState westStairs = Blocks.COBBLESTONE_STAIRS.defaultBlockState().setValue(StairBlock.FACING, Direction.WEST);
+             BlockState southStairs = Blocks.COBBLESTONE_STAIRS.defaultBlockState().setValue(StairBlock.FACING, Direction.SOUTH);
+@@ -140,10 +147,10 @@ public class JungleTemplePiece extends ScatteredFeaturePiece {
+             this.placeBlock(level, northStairs, 7, 1, 8, chunkBB);
+             this.placeBlock(level, northStairs, 7, 2, 9, chunkBB);
+             this.placeBlock(level, northStairs, 7, 3, 10, chunkBB);
+-            this.generateBox(level, chunkBB, 4, 1, 9, 4, 1, 9, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 7, 1, 9, 7, 1, 9, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 4, 1, 10, 7, 2, 10, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 5, 4, 5, 6, 4, 5, false, random, STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 4, 1, 9, 4, 1, 9, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 7, 1, 9, 7, 1, 9, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 4, 1, 10, 7, 2, 10, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 5, 4, 5, 6, 4, 5, false, random, stoneSelector());
+             this.placeBlock(level, eastStairs, 4, 4, 5, chunkBB);
+             this.placeBlock(level, westStairs, 7, 4, 5, chunkBB);
+
+@@ -158,17 +165,17 @@ public class JungleTemplePiece extends ScatteredFeaturePiece {
+             this.generateAirBox(level, chunkBB, 1, -3, 1, 9, -1, 5);
+
+             for (int z = 1; z <= 13; z += 2) {
+-                this.generateBox(level, chunkBB, 1, -3, z, 1, -2, z, false, random, STONE_SELECTOR);
++                this.generateBox(level, chunkBB, 1, -3, z, 1, -2, z, false, random, stoneSelector());
+             }
+
+             for (int z = 2; z <= 12; z += 2) {
+-                this.generateBox(level, chunkBB, 1, -1, z, 3, -1, z, false, random, STONE_SELECTOR);
++                this.generateBox(level, chunkBB, 1, -1, z, 3, -1, z, false, random, stoneSelector());
+             }
+
+-            this.generateBox(level, chunkBB, 2, -2, 1, 5, -2, 1, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 7, -2, 1, 9, -2, 1, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 6, -3, 1, 6, -3, 1, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 6, -1, 1, 6, -1, 1, false, random, STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 2, -2, 1, 5, -2, 1, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 7, -2, 1, 9, -2, 1, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 6, -3, 1, 6, -3, 1, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 6, -1, 1, 6, -1, 1, false, random, stoneSelector());
+             this.placeBlock(
+                 level,
+                 Blocks.TRIPWIRE_HOOK.defaultBlockState().setValue(TripWireHookBlock.FACING, Direction.EAST).setValue(TripWireHookBlock.ATTACHED, true),
+@@ -353,7 +360,7 @@ public class JungleTemplePiece extends ScatteredFeaturePiece {
+             this.placeBlock(level, Blocks.MOSSY_COBBLESTONE.defaultBlockState(), 7, -2, 5, chunkBB);
+             this.placeBlock(level, Blocks.MOSSY_COBBLESTONE.defaultBlockState(), 7, -1, 5, chunkBB);
+             this.placeBlock(level, Blocks.MOSSY_COBBLESTONE.defaultBlockState(), 8, -3, 5, chunkBB);
+-            this.generateBox(level, chunkBB, 9, -1, 1, 9, -1, 5, false, random, STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 9, -1, 1, 9, -1, 5, false, random, stoneSelector());
+             this.generateAirBox(level, chunkBB, 8, -3, 8, 10, -1, 10);
+             this.placeBlock(level, Blocks.CHISELED_STONE_BRICKS.defaultBlockState(), 8, -2, 11, chunkBB);
+             this.placeBlock(level, Blocks.CHISELED_STONE_BRICKS.defaultBlockState(), 9, -2, 11, chunkBB);
+@@ -362,8 +369,8 @@ public class JungleTemplePiece extends ScatteredFeaturePiece {
+             this.placeBlock(level, lever, 8, -2, 12, chunkBB);
+             this.placeBlock(level, lever, 9, -2, 12, chunkBB);
+             this.placeBlock(level, lever, 10, -2, 12, chunkBB);
+-            this.generateBox(level, chunkBB, 8, -3, 8, 8, -3, 10, false, random, STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 10, -3, 8, 10, -3, 10, false, random, STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 8, -3, 8, 8, -3, 10, false, random, stoneSelector());
++            this.generateBox(level, chunkBB, 10, -3, 8, 10, -3, 10, false, random, stoneSelector());
+             this.placeBlock(level, Blocks.MOSSY_COBBLESTONE.defaultBlockState(), 10, -2, 9, chunkBB);
+             this.placeBlock(level, redstoneWireNS, 8, -2, 9, chunkBB);
+             this.placeBlock(level, redstoneWireNS, 8, -2, 10, chunkBB);
+@@ -392,11 +399,11 @@ public class JungleTemplePiece extends ScatteredFeaturePiece {
+
+     private static class MossStoneSelector extends StructurePiece.BlockSelector {
+         @Override
+-        public BlockState next(final RandomSource random, final int worldX, final int worldY, final int worldZ, final boolean isEdge) {
++        public void next(final RandomSource random, final int worldX, final int worldY, final int worldZ, final boolean isEdge) {
+             if (random.nextFloat() < 0.4F) {
+-                return Blocks.COBBLESTONE.defaultBlockState();
++                this.next = Blocks.COBBLESTONE.defaultBlockState();
+             } else {
+-                return Blocks.MOSSY_COBBLESTONE.defaultBlockState();
++                this.next = Blocks.MOSSY_COBBLESTONE.defaultBlockState();
+             }
+         }
+     }
+diff --git a/net/minecraft/world/level/levelgen/structure/structures/StrongholdPieces.java b/net/minecraft/world/level/levelgen/structure/structures/StrongholdPieces.java
+index a4648518002feab94f5aa4a98cbdb09815c7e458..50a4f8f7aa21ca45d884c17f19877deb0f9340cf 100644
+--- a/net/minecraft/world/level/levelgen/structure/structures/StrongholdPieces.java
++++ b/net/minecraft/world/level/levelgen/structure/structures/StrongholdPieces.java
+@@ -67,6 +67,24 @@ public class StrongholdPieces {
+         }
+     };
+     private static final StrongholdPieces.SmoothStoneSelector SMOOTH_STONE_SELECTOR = new StrongholdPieces.SmoothStoneSelector();
++    private static final ThreadLocal<StrongholdPieces.SmoothStoneSelector> THREAD_LOCAL_SMOOTH_STONE_SELECTOR = ThreadLocal.withInitial(
++        StrongholdPieces.SmoothStoneSelector::new
++    );
++    private static final ThreadLocal<StrongholdPieces.AssemblyState> NEXT_ASSEMBLY_STATE = new ThreadLocal<>();
++
++    private static StrongholdPieces.SmoothStoneSelector smoothStoneSelector() {
++        return THREAD_LOCAL_SMOOTH_STONE_SELECTOR.get();
++    }
++
++    public static void resetPieces() {
++        NEXT_ASSEMBLY_STATE.set(new StrongholdPieces.AssemblyState());
++    }
++
++    private static StrongholdPieces.AssemblyState takeAssemblyState() {
++        StrongholdPieces.AssemblyState assemblyState = NEXT_ASSEMBLY_STATE.get();
++        NEXT_ASSEMBLY_STATE.remove();
++        return assemblyState != null ? assemblyState : new StrongholdPieces.AssemblyState();
++    }
+
+     private static StrongholdPieces.@Nullable StrongholdPiece findAndCreatePieceFactory(
+         final Class<? extends StrongholdPieces.StrongholdPiece> pieceClass,
+@@ -140,7 +158,7 @@ public class StrongholdPieces {
+             for (StrongholdPieces.PieceState piece : assemblyState.currentPieces) {
+                 weightSelection -= piece.definition.weight;
+                 if (weightSelection < 0) {
+-                    if (!piece.doPlace(depth) || piece == assemblyState.previousPiece) {
++                    if (!piece.doPlace(depth) || piece.definition == startPiece.previousPiece) {
+                         break;
+                     }
+
+@@ -149,7 +167,7 @@ public class StrongholdPieces {
+                     );
+                     if (strongholdPiece != null) {
+                         piece.placeCount++;
+-                        assemblyState.previousPiece = piece;
++                        startPiece.previousPiece = piece.definition;
+                         if (!piece.isValid()) {
+                             assemblyState.currentPieces.remove(piece);
+                         }
+@@ -244,7 +262,7 @@ public class StrongholdPieces {
+             final ChunkPos chunkPos,
+             final BlockPos referencePos
+         ) {
+-            this.generateBox(level, chunkBB, 0, 0, 0, 4, 4, 6, true, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 0, 0, 0, 4, 4, 6, true, random, StrongholdPieces.smoothStoneSelector());
+             this.generateSmallDoor(level, random, chunkBB, this.entryDoor, 1, 1, 0);
+             this.generateSmallDoor(level, random, chunkBB, StrongholdPieces.StrongholdPiece.SmallDoorType.OPENING, 1, 1, 6);
+             this.generateBox(level, chunkBB, 3, 1, 2, 3, 1, 4, Blocks.STONE_BRICKS.defaultBlockState(), Blocks.STONE_BRICKS.defaultBlockState(), false);
+@@ -434,7 +452,7 @@ public class StrongholdPieces {
+             final ChunkPos chunkPos,
+             final BlockPos referencePos
+         ) {
+-            this.generateBox(level, chunkBB, 0, 0, 0, 9, 8, 10, true, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 0, 0, 0, 9, 8, 10, true, random, StrongholdPieces.smoothStoneSelector());
+             this.generateSmallDoor(level, random, chunkBB, this.entryDoor, 4, 3, 0);
+             if (this.leftLow) {
+                 this.generateBox(level, chunkBB, 0, 3, 1, 0, 5, 3, CAVE_AIR, CAVE_AIR, false);
+@@ -453,18 +471,18 @@ public class StrongholdPieces {
+             }
+
+             this.generateBox(level, chunkBB, 5, 1, 10, 7, 3, 10, CAVE_AIR, CAVE_AIR, false);
+-            this.generateBox(level, chunkBB, 1, 2, 1, 8, 2, 6, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 4, 1, 5, 4, 4, 9, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 8, 1, 5, 8, 4, 9, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 1, 4, 7, 3, 4, 9, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 1, 3, 5, 3, 3, 6, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 1, 2, 1, 8, 2, 6, false, random, StrongholdPieces.smoothStoneSelector());
++            this.generateBox(level, chunkBB, 4, 1, 5, 4, 4, 9, false, random, StrongholdPieces.smoothStoneSelector());
++            this.generateBox(level, chunkBB, 8, 1, 5, 8, 4, 9, false, random, StrongholdPieces.smoothStoneSelector());
++            this.generateBox(level, chunkBB, 1, 4, 7, 3, 4, 9, false, random, StrongholdPieces.smoothStoneSelector());
++            this.generateBox(level, chunkBB, 1, 3, 5, 3, 3, 6, false, random, StrongholdPieces.smoothStoneSelector());
+             this.generateBox(
+                 level, chunkBB, 1, 3, 4, 3, 3, 4, Blocks.SMOOTH_STONE_SLAB.defaultBlockState(), Blocks.SMOOTH_STONE_SLAB.defaultBlockState(), false
+             );
+             this.generateBox(
+                 level, chunkBB, 1, 4, 6, 3, 4, 6, Blocks.SMOOTH_STONE_SLAB.defaultBlockState(), Blocks.SMOOTH_STONE_SLAB.defaultBlockState(), false
+             );
+-            this.generateBox(level, chunkBB, 5, 1, 7, 7, 1, 8, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 5, 1, 7, 7, 1, 8, false, random, StrongholdPieces.smoothStoneSelector());
+             this.generateBox(
+                 level, chunkBB, 5, 1, 9, 7, 1, 9, Blocks.SMOOTH_STONE_SLAB.defaultBlockState(), Blocks.SMOOTH_STONE_SLAB.defaultBlockState(), false
+             );
+@@ -540,7 +558,7 @@ public class StrongholdPieces {
+             final ChunkPos chunkPos,
+             final BlockPos referencePos
+         ) {
+-            this.generateBox(level, chunkBB, 0, 0, 0, 4, 4, 4, true, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 0, 0, 0, 4, 4, 4, true, random, StrongholdPieces.smoothStoneSelector());
+             this.generateSmallDoor(level, random, chunkBB, this.entryDoor, 1, 1, 0);
+             Direction orientation = this.getOrientation();
+             if (orientation != Direction.NORTH && orientation != Direction.EAST) {
+@@ -611,7 +629,7 @@ public class StrongholdPieces {
+                 currentHeight = 6;
+             }
+
+-            this.generateBox(level, chunkBB, 0, 0, 0, 13, currentHeight - 1, 14, true, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 0, 0, 0, 13, currentHeight - 1, 14, true, random, StrongholdPieces.smoothStoneSelector());
+             this.generateSmallDoor(level, random, chunkBB, this.entryDoor, 4, 1, 0);
+             this.generateMaybeBox(
+                 level, chunkBB, random, 0.07F, 2, 1, 1, 11, 4, 13, Blocks.COBWEB.defaultBlockState(), Blocks.COBWEB.defaultBlockState(), false, false
+@@ -762,7 +780,6 @@ public class StrongholdPieces {
+
+     private static final class AssemblyState {
+         private final List<StrongholdPieces.PieceState> currentPieces = Lists.newArrayList();
+-        private StrongholdPieces.@Nullable PieceState previousPiece;
+         private @Nullable Class<? extends StrongholdPieces.StrongholdPiece> imposedPiece;
+         private int totalWeight;
+
+@@ -839,18 +856,18 @@ public class StrongholdPieces {
+             final ChunkPos chunkPos,
+             final BlockPos referencePos
+         ) {
+-            this.generateBox(level, chunkBB, 0, 0, 0, 10, 7, 15, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 0, 0, 0, 10, 7, 15, false, random, StrongholdPieces.smoothStoneSelector());
+             this.generateSmallDoor(level, random, chunkBB, StrongholdPieces.StrongholdPiece.SmallDoorType.GRATES, 4, 1, 0);
+             int y = 6;
+-            this.generateBox(level, chunkBB, 1, 6, 1, 1, 6, 14, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 9, 6, 1, 9, 6, 14, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 2, 6, 1, 8, 6, 2, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 2, 6, 14, 8, 6, 14, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 1, 1, 1, 2, 1, 4, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 8, 1, 1, 9, 1, 4, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 1, 6, 1, 1, 6, 14, false, random, StrongholdPieces.smoothStoneSelector());
++            this.generateBox(level, chunkBB, 9, 6, 1, 9, 6, 14, false, random, StrongholdPieces.smoothStoneSelector());
++            this.generateBox(level, chunkBB, 2, 6, 1, 8, 6, 2, false, random, StrongholdPieces.smoothStoneSelector());
++            this.generateBox(level, chunkBB, 2, 6, 14, 8, 6, 14, false, random, StrongholdPieces.smoothStoneSelector());
++            this.generateBox(level, chunkBB, 1, 1, 1, 2, 1, 4, false, random, StrongholdPieces.smoothStoneSelector());
++            this.generateBox(level, chunkBB, 8, 1, 1, 9, 1, 4, false, random, StrongholdPieces.smoothStoneSelector());
+             this.generateBox(level, chunkBB, 1, 1, 1, 1, 1, 3, Blocks.LAVA.defaultBlockState(), Blocks.LAVA.defaultBlockState(), false);
+             this.generateBox(level, chunkBB, 9, 1, 1, 9, 1, 3, Blocks.LAVA.defaultBlockState(), Blocks.LAVA.defaultBlockState(), false);
+-            this.generateBox(level, chunkBB, 3, 1, 8, 7, 1, 12, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 3, 1, 8, 7, 1, 12, false, random, StrongholdPieces.smoothStoneSelector());
+             this.generateBox(level, chunkBB, 4, 1, 9, 6, 1, 11, Blocks.LAVA.defaultBlockState(), Blocks.LAVA.defaultBlockState(), false);
+             BlockState nsBars = Blocks.IRON_BARS.defaultBlockState().setValue(IronBarsBlock.NORTH, true).setValue(IronBarsBlock.SOUTH, true);
+             BlockState weBars = Blocks.IRON_BARS.defaultBlockState().setValue(IronBarsBlock.WEST, true).setValue(IronBarsBlock.EAST, true);
+@@ -865,9 +882,9 @@ public class StrongholdPieces {
+             }
+
+             BlockState blockState = Blocks.STONE_BRICK_STAIRS.defaultBlockState().setValue(StairBlock.FACING, Direction.NORTH);
+-            this.generateBox(level, chunkBB, 4, 1, 5, 6, 1, 7, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 4, 2, 6, 6, 2, 7, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 4, 3, 7, 6, 3, 7, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 4, 1, 5, 6, 1, 7, false, random, StrongholdPieces.smoothStoneSelector());
++            this.generateBox(level, chunkBB, 4, 2, 6, 6, 2, 7, false, random, StrongholdPieces.smoothStoneSelector());
++            this.generateBox(level, chunkBB, 4, 3, 7, 6, 3, 7, false, random, StrongholdPieces.smoothStoneSelector());
+
+             for (int x = 4; x <= 6; x++) {
+                 this.placeBlock(level, blockState, x, 1, 4, chunkBB);
+@@ -973,13 +990,13 @@ public class StrongholdPieces {
+             final ChunkPos chunkPos,
+             final BlockPos referencePos
+         ) {
+-            this.generateBox(level, chunkBB, 0, 0, 0, 8, 4, 10, true, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 0, 0, 0, 8, 4, 10, true, random, StrongholdPieces.smoothStoneSelector());
+             this.generateSmallDoor(level, random, chunkBB, this.entryDoor, 1, 1, 0);
+             this.generateBox(level, chunkBB, 1, 1, 10, 3, 3, 10, CAVE_AIR, CAVE_AIR, false);
+-            this.generateBox(level, chunkBB, 4, 1, 1, 4, 3, 1, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 4, 1, 3, 4, 3, 3, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 4, 1, 7, 4, 3, 7, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
+-            this.generateBox(level, chunkBB, 4, 1, 9, 4, 3, 9, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 4, 1, 1, 4, 3, 1, false, random, StrongholdPieces.smoothStoneSelector());
++            this.generateBox(level, chunkBB, 4, 1, 3, 4, 3, 3, false, random, StrongholdPieces.smoothStoneSelector());
++            this.generateBox(level, chunkBB, 4, 1, 7, 4, 3, 7, false, random, StrongholdPieces.smoothStoneSelector());
++            this.generateBox(level, chunkBB, 4, 1, 9, 4, 3, 9, false, random, StrongholdPieces.smoothStoneSelector());
+
+             for (int y = 1; y <= 3; y++) {
+                 this.placeBlock(
+@@ -1075,7 +1092,7 @@ public class StrongholdPieces {
+             final ChunkPos chunkPos,
+             final BlockPos referencePos
+         ) {
+-            this.generateBox(level, chunkBB, 0, 0, 0, 4, 4, 4, true, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 0, 0, 0, 4, 4, 4, true, random, StrongholdPieces.smoothStoneSelector());
+             this.generateSmallDoor(level, random, chunkBB, this.entryDoor, 1, 1, 0);
+             Direction orientation = this.getOrientation();
+             if (orientation != Direction.NORTH && orientation != Direction.EAST) {
+@@ -1142,7 +1159,7 @@ public class StrongholdPieces {
+             final ChunkPos chunkPos,
+             final BlockPos referencePos
+         ) {
+-            this.generateBox(level, chunkBB, 0, 0, 0, 10, 6, 10, true, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 0, 0, 0, 10, 6, 10, true, random, StrongholdPieces.smoothStoneSelector());
+             this.generateSmallDoor(level, random, chunkBB, this.entryDoor, 4, 1, 0);
+             this.generateBox(level, chunkBB, 4, 1, 10, 6, 3, 10, CAVE_AIR, CAVE_AIR, false);
+             this.generateBox(level, chunkBB, 0, 1, 4, 0, 3, 6, CAVE_AIR, CAVE_AIR, false);
+@@ -1231,20 +1248,20 @@ public class StrongholdPieces {
+
+     private static class SmoothStoneSelector extends StructurePiece.BlockSelector {
+         @Override
+-        public BlockState next(final RandomSource random, final int worldX, final int worldY, final int worldZ, final boolean isEdge) {
++        public void next(final RandomSource random, final int worldX, final int worldY, final int worldZ, final boolean isEdge) {
+             if (isEdge) {
+                 float selection = random.nextFloat();
+                 if (selection < 0.2F) {
+-                    return Blocks.CRACKED_STONE_BRICKS.defaultBlockState();
++                    this.next = Blocks.CRACKED_STONE_BRICKS.defaultBlockState();
+                 } else if (selection < 0.5F) {
+-                    return Blocks.MOSSY_STONE_BRICKS.defaultBlockState();
++                    this.next = Blocks.MOSSY_STONE_BRICKS.defaultBlockState();
+                 } else if (selection < 0.55F) {
+-                    return Blocks.INFESTED_STONE_BRICKS.defaultBlockState();
++                    this.next = Blocks.INFESTED_STONE_BRICKS.defaultBlockState();
+                 } else {
+-                    return Blocks.STONE_BRICKS.defaultBlockState();
++                    this.next = Blocks.STONE_BRICKS.defaultBlockState();
+                 }
+             } else {
+-                return Blocks.CAVE_AIR.defaultBlockState();
++                this.next = Blocks.CAVE_AIR.defaultBlockState();
+             }
+         }
+     }
+@@ -1318,7 +1335,7 @@ public class StrongholdPieces {
+             final ChunkPos chunkPos,
+             final BlockPos referencePos
+         ) {
+-            this.generateBox(level, chunkBB, 0, 0, 0, 4, 10, 4, true, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 0, 0, 0, 4, 10, 4, true, random, StrongholdPieces.smoothStoneSelector());
+             this.generateSmallDoor(level, random, chunkBB, this.entryDoor, 1, 7, 0);
+             this.generateSmallDoor(level, random, chunkBB, StrongholdPieces.StrongholdPiece.SmallDoorType.OPENING, 1, 1, 4);
+             this.placeBlock(level, Blocks.STONE_BRICKS.defaultBlockState(), 2, 6, 1, chunkBB);
+@@ -1342,16 +1359,19 @@ public class StrongholdPieces {
+     }
+
+     public static class StartPiece extends StrongholdPieces.StairsDown {
+-        private final StrongholdPieces.AssemblyState assemblyState = new StrongholdPieces.AssemblyState();
++        private final StrongholdPieces.AssemblyState assemblyState;
++        public StrongholdPieces.@Nullable PieceWeight previousPiece;
+         public StrongholdPieces.@Nullable PortalRoom portalRoomPiece;
+         public final List<StructurePiece> pendingChildren = Lists.newArrayList();
+
+         public StartPiece(final RandomSource random, final int west, final int north) {
+             super(StructurePieceType.STRONGHOLD_START, 0, west, north, getRandomHorizontalDirection(random));
++            this.assemblyState = takeAssemblyState();
+         }
+
+         public StartPiece(final CompoundTag tag) {
+             super(StructurePieceType.STRONGHOLD_START, tag);
++            this.assemblyState = new StrongholdPieces.AssemblyState();
+         }
+
+         @Override
+@@ -1425,7 +1445,7 @@ public class StrongholdPieces {
+             final ChunkPos chunkPos,
+             final BlockPos referencePos
+         ) {
+-            this.generateBox(level, chunkBB, 0, 0, 0, 4, 4, 6, true, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 0, 0, 0, 4, 4, 6, true, random, StrongholdPieces.smoothStoneSelector());
+             this.generateSmallDoor(level, random, chunkBB, this.entryDoor, 1, 1, 0);
+             this.generateSmallDoor(level, random, chunkBB, StrongholdPieces.StrongholdPiece.SmallDoorType.OPENING, 1, 1, 6);
+             BlockState eastTorch = Blocks.WALL_TORCH.defaultBlockState().setValue(WallTorchBlock.FACING, Direction.EAST);
+@@ -1489,7 +1509,7 @@ public class StrongholdPieces {
+             final ChunkPos chunkPos,
+             final BlockPos referencePos
+         ) {
+-            this.generateBox(level, chunkBB, 0, 0, 0, 4, 10, 7, true, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
++            this.generateBox(level, chunkBB, 0, 0, 0, 4, 10, 7, true, random, StrongholdPieces.smoothStoneSelector());
+             this.generateSmallDoor(level, random, chunkBB, this.entryDoor, 1, 7, 0);
+             this.generateSmallDoor(level, random, chunkBB, StrongholdPieces.StrongholdPiece.SmallDoorType.OPENING, 1, 1, 7);
+             BlockState stairs = Blocks.COBBLESTONE_STAIRS.defaultBlockState().setValue(StairBlock.FACING, Direction.SOUTH);
+diff --git a/net/minecraft/world/level/levelgen/structure/structures/StrongholdStructure.java b/net/minecraft/world/level/levelgen/structure/structures/StrongholdStructure.java
+index c9b8dc2f8d1fa436797b55591fd22e188fd996f8..9481cd8194d6fe53868c6351d75b6cd0b9c7756e 100644
+--- a/net/minecraft/world/level/levelgen/structure/structures/StrongholdStructure.java
++++ b/net/minecraft/world/level/levelgen/structure/structures/StrongholdStructure.java
+@@ -27,6 +27,7 @@ public class StrongholdStructure extends Structure {
+         do {
+             builder.clear();
+             context.random().setLargeFeatureSeed(context.seed() + tries++, context.chunkPos().x(), context.chunkPos().z());
++            StrongholdPieces.resetPieces();
+             startRoom = new StrongholdPieces.StartPiece(context.random(), context.chunkPos().getBlockX(2), context.chunkPos().getBlockZ(2));
+             builder.addPiece(startRoom);
+             startRoom.addChildren(startRoom, builder, context.random());
