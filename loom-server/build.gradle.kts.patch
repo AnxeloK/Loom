@@ -1,5 +1,16 @@
 --- a/paper-server/build.gradle.kts
 +++ b/paper-server/build.gradle.kts
+@@ -1,7 +_,10 @@
+ import io.papermc.fill.model.BuildChannel
+ import io.papermc.paperweight.attribute.DevBundleOutput
+ import io.papermc.paperweight.util.*
++import java.io.ByteArrayInputStream
++import java.io.DataInputStream
+ import java.time.Instant
++import java.util.jar.JarFile
+ 
+ plugins {
+     `java-library`
 @@ -20,8 +_,21 @@
  
  paperweight {
@@ -22,6 +33,224 @@
      updatingMinecraft {
          // oldPaperCommit = "d4fe85375af18bfa88f44d7c1e6a61904ae550cc"
      }
+@@ -40,6 +_,217 @@
+ }
+ val services = objects.newInstance<Services>()
+ 
++abstract class PaperAbiCheck : DefaultTask() {
++    @get:InputFile
++    @get:PathSensitive(PathSensitivity.NONE)
++    abstract val paperApiJar: RegularFileProperty
++
++    @get:InputFile
++    @get:PathSensitive(PathSensitivity.NONE)
++    abstract val paperServerJar: RegularFileProperty
++
++    @get:InputFile
++    @get:PathSensitive(PathSensitivity.NONE)
++    abstract val loomApiJar: RegularFileProperty
++
++    @get:InputFile
++    @get:PathSensitive(PathSensitivity.NONE)
++    abstract val loomServerJar: RegularFileProperty
++
++    @get:Input
++    abstract val paperCommit: Property<String>
++
++    @TaskAction
++    fun checkAbi() {
++        val expectedCommit = paperCommit.get().trim().lowercase()
++        JarFile(paperServerJar.get().asFile).use { jar ->
++            val actualCommit = jar.manifest?.mainAttributes?.getValue("Git-Commit")?.trim()?.lowercase()
++            if (actualCommit == null || actualCommit.length < 7 || !expectedCommit.startsWith(actualCommit)) {
++                throw GradleException(
++                    "Paper ABI baseline was not built from paperRef $expectedCommit " +
++                        "(jar reports ${actualCommit ?: "no commit"})"
++                )
++            }
++        }
++
++        val apiResult = compare("API", loadJar(paperApiJar.get().asFile), loadJar(loomApiJar.get().asFile))
++        val serverResult = compare("server", loadJar(paperServerJar.get().asFile), loadJar(loomServerJar.get().asFile))
++        val issues = apiResult.issues + serverResult.issues
++        if (issues.isNotEmpty()) {
++            val shown = issues.take(100).joinToString(separator = "\n  ", prefix = "  ")
++            val omitted = if (issues.size > 100) "\n  ... and ${issues.size - 100} more" else ""
++            throw GradleException("Paper compatibility ABI check found ${issues.size} break(s):\n$shown$omitted")
++        }
++
++        logger.lifecycle(
++            "Paper compatibility ABI verified: {} API classes and {} server classes",
++            apiResult.visibleClasses,
++            serverResult.visibleClasses
++        )
++    }
++
++    private fun loadJar(file: File): Map<String, ClassAbi> {
++        val classes = HashMap<String, ClassAbi>()
++        JarFile(file).use { jar ->
++            val entries = jar.entries()
++            while (entries.hasMoreElements()) {
++                val entry = entries.nextElement()
++                if (entry.isDirectory || !entry.name.endsWith(".class")) {
++                    continue
++                }
++                val parsed = jar.getInputStream(entry).use { parseClass(it.readBytes()) }
++                if (parsed != null) {
++                    classes[parsed.name] = parsed
++                }
++            }
++        }
++        return classes
++    }
++
++    private fun parseClass(bytes: ByteArray): ClassAbi? {
++        DataInputStream(ByteArrayInputStream(bytes)).use { input ->
++            if (input.readInt() != 0xCAFEBABEL.toInt()) {
++                return null
++            }
++            input.readUnsignedShort()
++            input.readUnsignedShort()
++
++            val constantPoolCount = input.readUnsignedShort()
++            val utf8 = arrayOfNulls<String>(constantPoolCount)
++            val classNameIndexes = IntArray(constantPoolCount)
++            var index = 1
++            while (index < constantPoolCount) {
++                when (val tag = input.readUnsignedByte()) {
++                    1 -> utf8[index] = input.readUTF()
++                    3, 4 -> input.skipNBytes(4)
++                    5, 6 -> {
++                        input.skipNBytes(8)
++                        index++
++                    }
++                    7 -> classNameIndexes[index] = input.readUnsignedShort()
++                    8, 16, 19, 20 -> input.skipNBytes(2)
++                    9, 10, 11, 12, 17, 18 -> input.skipNBytes(4)
++                    15 -> input.skipNBytes(3)
++                    else -> throw GradleException("Unsupported class-file constant tag $tag")
++                }
++                index++
++            }
++
++            val access = input.readUnsignedShort()
++            val thisClass = input.readUnsignedShort()
++            input.readUnsignedShort()
++            repeat(input.readUnsignedShort()) { input.readUnsignedShort() }
++            val fields = readMembers(input, utf8)
++            val methods = readMembers(input, utf8)
++            val name = utf8.getOrNull(classNameIndexes.getOrElse(thisClass) { 0 }) ?: return null
++            return ClassAbi(name, access, methods, fields)
++        }
++    }
++
++    private fun readMembers(input: DataInputStream, utf8: Array<String?>): Map<MemberKey, Int> {
++        val members = HashMap<MemberKey, Int>()
++        repeat(input.readUnsignedShort()) {
++            val access = input.readUnsignedShort()
++            val name = utf8[input.readUnsignedShort()] ?: throw GradleException("Invalid class member name")
++            val descriptor = utf8[input.readUnsignedShort()] ?: throw GradleException("Invalid class member descriptor")
++            repeat(input.readUnsignedShort()) {
++                input.readUnsignedShort()
++                input.skipNBytes(Integer.toUnsignedLong(input.readInt()))
++            }
++            members[MemberKey(name, descriptor)] = access
++        }
++        return members
++    }
++
++    private fun compare(label: String, paper: Map<String, ClassAbi>, loom: Map<String, ClassAbi>): Comparison {
++        val issues = ArrayList<String>()
++        var visibleClasses = 0
++        for ((name, paperClass) in paper.toSortedMap()) {
++            if (!visible(paperClass.access)) {
++                continue
++            }
++            visibleClasses++
++            val loomClass = loom[name]
++            if (loomClass == null) {
++                issues += "$label: missing class ${name.replace('/', '.')}"
++                continue
++            }
++            if (accessRank(loomClass.access) < accessRank(paperClass.access)) {
++                issues += "$label: narrowed class ${name.replace('/', '.')}"
++            }
++            if ((paperClass.access and ACC_INTERFACE) != (loomClass.access and ACC_INTERFACE)) {
++                issues += "$label: changed class kind ${name.replace('/', '.')}"
++            }
++            if (paperClass.access and ACC_FINAL == 0 && loomClass.access and ACC_FINAL != 0) {
++                issues += "$label: finalized class ${name.replace('/', '.')}"
++            }
++            compareMembers(label, name, "method", paperClass.methods, loomClass.methods, issues)
++            compareMembers(label, name, "field", paperClass.fields, loomClass.fields, issues)
++        }
++        return Comparison(visibleClasses, issues)
++    }
++
++    private fun compareMembers(
++        label: String,
++        className: String,
++        kind: String,
++        paper: Map<MemberKey, Int>,
++        loom: Map<MemberKey, Int>,
++        issues: MutableList<String>
++    ) {
++        for ((key, paperAccess) in paper) {
++            if (!visible(paperAccess) || paperAccess and ACC_SYNTHETIC != 0) {
++                continue
++            }
++            val display = "${className.replace('/', '.')}#${key.name}${key.descriptor}"
++            val loomAccess = loom[key]
++            if (loomAccess == null) {
++                issues += "$label: missing $kind $display"
++                continue
++            }
++            if (accessRank(loomAccess) < accessRank(paperAccess)) {
++                issues += "$label: narrowed $kind $display"
++            }
++            if ((paperAccess and ACC_STATIC) != (loomAccess and ACC_STATIC)) {
++                issues += "$label: changed static $kind $display"
++            }
++            if (paperAccess and ACC_FINAL == 0 && loomAccess and ACC_FINAL != 0) {
++                issues += "$label: finalized $kind $display"
++            }
++            if (kind == "method" && paperAccess and ACC_ABSTRACT == 0 && loomAccess and ACC_ABSTRACT != 0) {
++                issues += "$label: made method abstract $display"
++            }
++        }
++    }
++
++    private fun visible(access: Int): Boolean = access and (ACC_PUBLIC or ACC_PROTECTED) != 0
++
++    private fun accessRank(access: Int): Int = when {
++        access and ACC_PUBLIC != 0 -> 2
++        access and ACC_PROTECTED != 0 -> 1
++        else -> 0
++    }
++
++    private data class MemberKey(val name: String, val descriptor: String)
++    private data class ClassAbi(
++        val name: String,
++        val access: Int,
++        val methods: Map<MemberKey, Int>,
++        val fields: Map<MemberKey, Int>
++    )
++    private data class Comparison(val visibleClasses: Int, val issues: List<String>)
++
++    companion object {
++        private const val ACC_PUBLIC = 0x0001
++        private const val ACC_PROTECTED = 0x0004
++        private const val ACC_STATIC = 0x0008
++        private const val ACC_FINAL = 0x0010
++        private const val ACC_INTERFACE = 0x0200
++        private const val ACC_ABSTRACT = 0x0400
++        private const val ACC_SYNTHETIC = 0x1000
++    }
++}
++
+ if (project.providers.gradleProperty("publishDevBundle").isPresent) {
+     val devBundleComponent = publishing.softwareComponentFactory.adhoc("devBundle")
+     components.add(devBundleComponent)
 @@ -86,7 +_,19 @@
      }
  }
@@ -72,7 +301,7 @@
              "Build-Number" to (build ?: ""),
              "Build-Time" to buildTime.toString(),
              "Git-Branch" to gitBranch,
-@@ -197,9 +_,16 @@
+@@ -206,16 +_,40 @@
  
  // Bump compile tasks to 1GB memory to avoid OOMs
  tasks.withType<JavaCompile>().configureEach {
@@ -89,7 +318,32 @@
  val scanJarForBadCalls by tasks.registering(io.papermc.paperweight.tasks.ScanJarForBadCalls::class) {
      badAnnotations.add("Lio/papermc/paper/annotation/DoNotUse;")
      jarToScan.set(tasks.jar.flatMap { it.archiveFile })
-@@ -316,7 +_,7 @@
+     classpath.from(configurations.compileClasspath)
+ }
++val checkPaperCompatibilityAbi by tasks.registering(PaperAbiCheck::class) {
++    group = LifecycleBasePlugin.VERIFICATION_GROUP
++    description = "Checks the public and protected API, CraftBukkit, and NMS ABI against pinned Paper"
++
++    val mcVersion = providers.gradleProperty("mcVersion").get().trim()
++    val baselineRoot = rootProject.file(
++        rootProject.providers.gradleProperty("paperAbiBaselineDir").getOrElse(".gradle/caches/paperweight/upstreams/paper")
++    )
++    paperApiJar.set(baselineRoot.resolve("paper-api/build/libs/paper-api-$mcVersion.local-SNAPSHOT.jar"))
++    paperServerJar.set(baselineRoot.resolve("paper-server/build/libs/paper-server-$mcVersion.local-SNAPSHOT.jar"))
++
++    val loomApiJarTask = project(":loom-api").tasks.named<Jar>("jar")
++    loomApiJar.set(loomApiJarTask.flatMap { it.archiveFile })
++    loomServerJar.set(tasks.jar.flatMap { it.archiveFile })
++    paperCommit.set(rootProject.providers.gradleProperty("paperRef").map(String::trim))
++    dependsOn(loomApiJarTask, tasks.jar)
++}
+ tasks.check {
+-    dependsOn(scanJarForBadCalls)
++    dependsOn(scanJarForBadCalls, checkPaperCompatibilityAbi)
+ }
+ 
+ // Use TCA for console improvements
+@@ -326,7 +_,7 @@
  }
  
  fill {

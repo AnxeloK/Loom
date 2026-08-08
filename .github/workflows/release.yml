@@ -57,6 +57,9 @@ jobs:
         run: git config --global user.email "actions@github.com" && git config --global user.name "GitHub Actions"
       - name: Apply Patches
         run: ./gradlew applyAllPatches --stacktrace --no-daemon --max-workers=2
+      - name: Build Paper ABI Baseline
+        working-directory: .gradle/caches/paperweight/upstreams/paper
+        run: ./gradlew :paper-api:jar :paper-server:jar --stacktrace --no-daemon --max-workers=2
       - name: Build
         run: ./gradlew build :loom-server:createPaperclipJar --stacktrace --no-daemon --max-workers=2
       - name: Package Jar
