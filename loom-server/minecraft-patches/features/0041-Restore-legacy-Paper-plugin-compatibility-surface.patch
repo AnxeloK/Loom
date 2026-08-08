@@ -12,8 +12,23 @@ the global Server thread while no scoped LevelCaptureContext frame is
 active, preserving Paper's single-threaded contract without exposing
 region workers to the shared maps.
 
+diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
+index 8aa2e8938f4cfc22cb185566e2c143f33dab35e2..d8d713711fac2938a3d48ad55701024ef1706ec1 100644
+--- a/net/minecraft/network/PacketProcessor.java
++++ b/net/minecraft/network/PacketProcessor.java
+@@ -35,6 +35,10 @@ public class PacketProcessor implements AutoCloseable {
+     }
+     // Paper end - improve tick loop
+
++    public boolean isSameThread() {
++        return Thread.currentThread() == this.runningThread;
++    }
++
+     public boolean hasPendingPackets() {
+         return !this.packetsToBeHandled.isEmpty();
+     }
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 08157a2715fde6887043ff7f55e5f5bf6b233a58..358f34322e05d5ec72a6b0c29b6f2fbd58479be6 100644
+index 08157a2715fde6887043ff7f55e5f5bf6b233a58..0e75a2b58126505b71ef320f1470397fc834136b 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -356,6 +356,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
@@ -29,14 +44,295 @@ index 08157a2715fde6887043ff7f55e5f5bf6b233a58..358f34322e05d5ec72a6b0c29b6f2fbd
      public java.util.Queue<Runnable> processQueue = new java.util.concurrent.ConcurrentLinkedQueue<Runnable>();
      public int autosavePeriod;
      // Paper - don't store the vanilla dispatcher
-@@ -1675,6 +1681,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -787,9 +793,14 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             );
+         }
+         this.addLevel(serverLevel);
+-        this.initWorld(serverLevel);
++        this.initWorld(serverLevel, null);
+     }
+-    public void initWorld(ServerLevel overworld) {
++
++    public void initWorld(final ServerLevel overworld) {
++        this.initWorld(overworld, null);
++    }
++
++    public void initWorld(final ServerLevel overworld, final org.bukkit.@Nullable WorldCreator worldCreator) {
+         final net.minecraft.world.level.storage.ServerLevelData levelData = overworld.serverLevelData;
+         final WorldOptions worldOptions = overworld.worldGenSettings.options();
+         final boolean isDebug = this.worldData.isDebugWorld();
+@@ -805,7 +816,18 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+           net.minecraft.server.threading.runtime.ThreadedRegionsBlockingBarrier.beginWorldInit(); // Loom - permit the world-init spawn preload to block on this world's chunk, like startup
+           try {
+             try {
+-                setInitialSpawn(overworld, levelData, worldOptions.generateBonusChest(), isDebug, overworld.levelLoadListener); // Paper - per world level load listener
++                // Paper start - Allow direct setting spawn location
++                if (worldCreator != null && worldCreator.forcedSpawnPosition() != null) {
++                    levelData.setSpawn(LevelData.RespawnData.of(
++                        overworld.dimension(),
++                        io.papermc.paper.util.MCUtil.toBlockPos(worldCreator.forcedSpawnPosition()),
++                        Objects.requireNonNullElse(worldCreator.forcedSpawnYaw(), LevelData.RespawnData.DEFAULT.yaw()),
++                        Objects.requireNonNullElse(worldCreator.forcedSpawnPitch(), LevelData.RespawnData.DEFAULT.pitch())
++                    ));
++                } else {
++                    setInitialSpawn(overworld, levelData, worldOptions.generateBonusChest(), isDebug, overworld.levelLoadListener); // Paper - per world level load listener
++                }
++                // Paper end - Allow direct setting spawn location
+                 levelData.setInitialized(true);
+                 if (isDebug) {
+                     this.setupDebugLevel(this.worldData, overworld); // Paper - per-level GameRules
+@@ -1675,6 +1697,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
                  this.lastOverloadWarningNanos = this.nextTickTimeNanos;
- 
+
                  this.currentTickStart = tickStart;
 +                ++MinecraftServer.currentTick; // Loom - legacy Paper compatibility - see field declaration
                  // Paper end - improve tick loop
- 
+
                  boolean sprinting = thisTickNanos == 0L;
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index 6796ef6ec20b5b707ca369aa3a55eaecd86e4043..0120979a74bedce50ff351b7ff912e7a1c344f4c 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -1366,12 +1366,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+     }
+
+     // Paper start
+-    public record RespawnResult(
+-        TeleportTransition transition,
+-        boolean isBedSpawn,
+-        boolean isAnchorSpawn,
+-        @Nullable BlockPos respawnBlockPosition
+-    ) {
++    public record RespawnResult(TeleportTransition transition, boolean isBedSpawn, boolean isAnchorSpawn) {
+     }
+
+     public @Nullable TeleportTransition findRespawnPositionAndUseSpawnBlock(
+@@ -1390,7 +1385,6 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+         boolean isBedSpawn = false;
+         boolean isAnchorSpawn = false;
+         Runnable consumeAnchorCharge = null;
+-        BlockPos respawnBlockPosition = null;
+         // Paper end
+         ServerPlayer.RespawnConfig respawnConfig = this.getRespawnConfig();
+         ServerLevel respawnLevel = this.server.getLevel(ServerPlayer.RespawnConfig.getDimensionOrDefault(respawnConfig));
+@@ -1402,7 +1396,6 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+                 isBedSpawn = respawnPosAngle.isBedSpawn();
+                 isAnchorSpawn = respawnPosAngle.isAnchorSpawn();
+                 consumeAnchorCharge = respawnPosAngle.consumeAnchorCharge();
+-                respawnBlockPosition = respawnConfig.respawnData().pos();
+                 teleportTransition = new TeleportTransition(
+                     respawnLevel, respawnPosAngle.position(), Vec3.ZERO, respawnPosAngle.yaw(), respawnPosAngle.pitch(), postTeleportTransition
+                 );
+@@ -1420,7 +1413,6 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+             isBedSpawn,
+             isAnchorSpawn,
+             consumeAnchorCharge,
+-            respawnBlockPosition,
+             respawnReason
+         );
+         // CraftBukkit end
+@@ -1496,7 +1488,6 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+                     respawnPosAngle.isBedSpawn(),
+                     respawnPosAngle.isAnchorSpawn(),
+                     respawnPosAngle.consumeAnchorCharge(),
+-                    respawnBlockPosition,
+                     respawnReason
+                 )
+             );
+@@ -1526,7 +1517,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+                     postTeleportTransition
+                 );
+                 return this.completeRespawnResult(
+-                    transition, false, false, null, null, respawnReason
++                    transition, false, false, null, respawnReason
+                 );
+             });
+         });
+@@ -1537,7 +1528,6 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+         final boolean isBedSpawn,
+         final boolean isAnchorSpawn,
+         final @Nullable Runnable consumeAnchorCharge,
+-        final @Nullable BlockPos respawnBlockPosition,
+         final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason
+     ) {
+         org.bukkit.entity.Player respawnPlayer = this.getBukkitEntity();
+@@ -1586,8 +1576,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+                 teleportTransition.cause()
+             ),
+             isBedSpawn,
+-            isAnchorSpawn,
+-            respawnBlockPosition
++            isAnchorSpawn
+         );
+     }
+
+diff --git a/net/minecraft/server/network/ServerLoginPacketListenerImpl.java b/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
+index 8b6c2ca84f62a95c9b27edee2a45cd4138ad630b..237298087047ae1e9eccc24dc7ff48a3f6247864 100644
+--- a/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
+@@ -108,9 +108,9 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+         this.tickTimeout();
+     }
+     public void tickTimeout() {
+-    // Paper end - login cookie API
++        // Paper end - login cookie API
+         if (this.tick++ == MAX_TICKS_BEFORE_LOGIN) {
+-            this.disconnect(Component.translatable("multiplayer.disconnect.slow_login"));
++            this.disconnectAsync(Component.translatable("multiplayer.disconnect.slow_login"));
+         }
+     }
+
+@@ -137,6 +137,22 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+         }
+     }
+
++    // Paper start
++    public void disconnectAsync(final Component reason) {
++        try {
++            LOGGER.info("Disconnecting {}: {}", this.getUserName(), reason.getString());
++            this.disconnecting = true;
++            this.connection.send(
++                new ClientboundLoginDisconnectPacket(reason),
++                PacketSendListener.thenRun(() -> this.connection.disconnect(reason))
++            );
++            this.connection.handleConnectionDisconnectOnNextTick = true;
++        } catch (Exception exception) {
++            LOGGER.error("Error whilst disconnecting player", exception);
++        }
++    }
++    // Paper end
++
+     private boolean isPlayerAlreadyInWorld(final GameProfile gameProfile) {
+         return this.server.getPlayerList().getPlayer(gameProfile.id()) != null;
+     }
+@@ -220,9 +236,9 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+         PlayerList playerList = this.server.getPlayerList();
+         Component error = org.bukkit.craftbukkit.event.CraftEventFactory.handleLoginResult(playerList.canPlayerLogin(this.connection.getRemoteAddress(), new NameAndId(profile)), this.paperLoginConnection, this.connection, profile, this.server, true); // Paper
+         if (error != null) {
+-            this.disconnect(error);
++            this.disconnectAsync(error);
+         } else if (this.connection.getIntendedProfileId() != null && !profile.id().equals(this.connection.getIntendedProfileId())) {
+-            this.disconnect(CommonComponents.CONNECT_FAILED);
++            this.disconnectAsync(CommonComponents.CONNECT_FAILED);
+         } else {
+             if (this.server.getCompressionThreshold() >= 0 && !this.connection.isMemoryConnection()) {
+                 this.connection
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 23058ff83012f0d1d6c80abdac76ca71db1f0f03..5c72a5eef20dea4cb2f8ccd2dbd63c53bf0152ec 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -809,6 +809,7 @@ public abstract class PlayerList {
+         final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason
+     ) {
+         final CompletableFuture<ServerPlayer> resultFuture = new CompletableFuture<>();
++        final ServerPlayer.RespawnConfig respawnConfig = serverPlayer.getRespawnConfig();
+         serverPlayer.findRespawnPositionAndUseSpawnBlockAsync(
+             !keepAllPlayerData, TeleportTransition.DO_NOTHING, respawnReason
+         ).whenComplete((result, throwable) -> {
+@@ -852,7 +853,7 @@ public abstract class PlayerList {
+
+                             runWithRespawnOwnerContexts(serverPlayer, transition, () -> {
+                                 final ServerPlayer respawned = this.respawnWithResult(
+-                                    serverPlayer, keepAllPlayerData, removalReason, respawnReason, result
++                                    serverPlayer, keepAllPlayerData, removalReason, respawnReason, result, respawnConfig
+                                 );
+                                 resultFuture.complete(respawned);
+                             });
+@@ -873,11 +874,12 @@ public abstract class PlayerList {
+     }
+
+     public ServerPlayer respawn(final ServerPlayer serverPlayer, final boolean keepAllPlayerData, final Entity.RemovalReason removalReason, final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason) {
++        final ServerPlayer.RespawnConfig respawnConfig = serverPlayer.getRespawnConfig();
+         ServerPlayer.RespawnResult result = serverPlayer.findRespawnPositionAndUseSpawnBlock0(!keepAllPlayerData, TeleportTransition.DO_NOTHING, respawnReason);
+         if (result == null) { // disconnected player during the respawn event
+             return serverPlayer;
+         }
+-        return this.respawnWithResult(serverPlayer, keepAllPlayerData, removalReason, respawnReason, result);
++        return this.respawnWithResult(serverPlayer, keepAllPlayerData, removalReason, respawnReason, result, respawnConfig);
+     }
+
+     private ServerPlayer respawnWithResult(
+@@ -885,7 +887,8 @@ public abstract class PlayerList {
+         final boolean keepAllPlayerData,
+         final Entity.RemovalReason removalReason,
+         final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason,
+-        final ServerPlayer.RespawnResult result
++        final ServerPlayer.RespawnResult result,
++        final ServerPlayer.@Nullable RespawnConfig respawnConfig
+     ) {
+         net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "player-respawn-transfer");
+         TeleportTransition respawnInfo = result.transition();
+@@ -945,7 +948,7 @@ public abstract class PlayerList {
+         this.sendAllPlayerInfo(serverPlayer); // Update health
+         serverPlayer.onUpdateAbilities(); // Update inventory, etc
+         // Paper end
+-        final BlockPos respawnBlockPosition = result.respawnBlockPosition();
++        final BlockPos respawnBlockPosition = respawnConfig == null ? null : respawnConfig.respawnData().pos();
+         if (!keepAllPlayerData && result.isAnchorSpawn() && respawnBlockPosition != null) {
+             player.connection
+                 .send(
+diff --git a/net/minecraft/world/entity/PortalProcessor.java b/net/minecraft/world/entity/PortalProcessor.java
+index e697cd58f93e4799ceec0843fe8fe589ee00e093..25a343230231234b728469e335f0586c00950f4c 100644
+--- a/net/minecraft/world/entity/PortalProcessor.java
++++ b/net/minecraft/world/entity/PortalProcessor.java
+@@ -26,11 +26,16 @@ public class PortalProcessor {
+     private double sourceFallDistance;
+     private int sourceFireTicks;
+     private long sourcePositionSyncGameTime = Long.MIN_VALUE;
++    private boolean sourceStateCaptured;
+
+-    public PortalProcessor(final Portal portal, final BlockPos portalEntryPosition, final Entity entity) {
++    public PortalProcessor(final Portal portal, final BlockPos portalEntryPosition) {
+         this.portal = portal;
+         this.entryPosition = portalEntryPosition;
+         this.insidePortalThisTick = true;
++    }
++
++    public PortalProcessor(final Portal portal, final BlockPos portalEntryPosition, final Entity entity) {
++        this(portal, portalEntryPosition);
+         this.captureSourceState(entity);
+     }
+
+@@ -48,6 +53,7 @@ public class PortalProcessor {
+     }
+
+     public @Nullable TeleportTransition getPortalDestination(final ServerLevel serverLevel, final Entity entity) {
++        this.ensureSourceStateCaptured(entity);
+         this.destinationPending = false;
+         if (this.pendingDestination != null) {
+             if (!this.pendingDestination.isDone()) {
+@@ -114,9 +120,11 @@ public class PortalProcessor {
+         this.sourceFallDistance = entity.fallDistance;
+         this.sourceFireTicks = entity.getRemainingFireTicks();
+         this.sourcePositionSyncGameTime = Long.MIN_VALUE;
++        this.sourceStateCaptured = true;
+     }
+
+     public void holdSourceState(final Entity entity) {
++        this.ensureSourceStateCaptured(entity);
+         entity.absSnapTo(this.sourcePosition.x(), this.sourcePosition.y(), this.sourcePosition.z(), entity.getYRot(), entity.getXRot());
+         entity.setDeltaMovement(Vec3.ZERO);
+         entity.fallDistance = this.sourceFallDistance;
+@@ -135,12 +143,19 @@ public class PortalProcessor {
+     }
+
+     private void restoreSourceState(final Entity entity) {
++        this.ensureSourceStateCaptured(entity);
+         entity.absSnapTo(this.sourcePosition.x(), this.sourcePosition.y(), this.sourcePosition.z(), entity.getYRot(), entity.getXRot());
+         entity.setDeltaMovement(this.sourceDeltaMovement);
+         entity.fallDistance = this.sourceFallDistance;
+         entity.setRemainingFireTicks(this.sourceFireTicks);
+     }
+
++    private void ensureSourceStateCaptured(final Entity entity) {
++        if (!this.sourceStateCaptured) {
++            this.captureSourceState(entity);
++        }
++    }
++
+     private @Nullable TeleportTransition ensureDestinationChunksReady(final Entity entity, final TeleportTransition transition) {
+         final ServerLevel destinationLevel = transition.newLevel();
+         final net.minecraft.world.phys.Vec3 destinationPos = transition.position();
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
 index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db058e9ec4a 100644
 --- a/net/minecraft/world/level/Level.java
@@ -44,7 +340,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
 @@ -150,6 +150,32 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      private final CraftWorld world;
      public org.bukkit.generator.@Nullable ChunkGenerator generator;
- 
+
 +    // Loom start - legacy Paper capture-field compatibility
 +    // Upstream Paper exposed these mutable public fields as the de facto NMS plugin API for world
 +    // mutation capture (FAWE and others link against them directly); LevelCaptureContext replaced them
@@ -75,7 +371,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
      // Paper start - EAR 2
      public final java.util.concurrent.atomic.AtomicInteger wakeupInactiveRemainingAnimals = new java.util.concurrent.atomic.AtomicInteger();
 @@ -190,7 +216,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
- 
+
      public final boolean isCaptureModeActive(final int mode) {
          final LevelCaptureContext.Frame context = this.currentCaptureContext();
 -        return context != null && context.hasMode(mode);
@@ -84,7 +380,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
 +        }
 +        return this.legacyCaptureActive(mode); // Loom - legacy Paper capture-field compatibility
      }
- 
+
      public final void setCapturedTreeType(final org.bukkit.TreeType treeType) {
 @@ -210,6 +239,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      public final boolean captureItemDrop(final net.minecraft.world.entity.item.ItemEntity item) {
@@ -163,7 +459,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
              return false;
 @@ -1177,7 +1245,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
          */ // CraftBukkit
- 
+
          // CraftBukkit start
 -        if (captureContext == null || !captureContext.hasMode(LevelCaptureContext.BLOCK_STATES)) { // Don't notify clients or update physics while capturing blockstates
 +                if ((captureContext == null || !captureContext.hasMode(LevelCaptureContext.BLOCK_STATES)) && !this.legacyCaptureActive(LevelCaptureContext.BLOCK_STATES)) { // Don't notify clients or update physics while capturing blockstates // Loom - legacy Paper capture-field compatibility
