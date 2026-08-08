@@ -357,23 +357,36 @@ index a5ea91906abebf44cfbfa120c535b8c391ab1acd..85657793c21bcb8bae589d47f8447379
                  event.getPlayer().sendActionBar(event.getLockedMessage());
              }
 diff --git a/src/main/java/org/spigotmc/SpigotWorldConfig.java b/src/main/java/org/spigotmc/SpigotWorldConfig.java
-index 339832e312578ee385bbf3c9d5c131435abe7d7a..645788445a1da7df09340bd066e08774d12eb609 100644
+index 339832e312578ee385bbf3c9d5c131435abe7d7a..0210dda22d3519b4a50548c80b32606000874184 100644
 --- a/src/main/java/org/spigotmc/SpigotWorldConfig.java
 +++ b/src/main/java/org/spigotmc/SpigotWorldConfig.java
-@@ -1,6 +1,7 @@
+@@ -1,5 +1,7 @@
  package org.spigotmc;
  
++import java.lang.invoke.MethodHandles;
++import java.lang.invoke.VarHandle;
  import java.util.List;
-+import java.util.concurrent.atomic.AtomicInteger;
  
  import net.kyori.adventure.key.Key;
- import org.bukkit.Bukkit;
-@@ -406,8 +407,26 @@ public class SpigotWorldConfig {
-         this.otherMultiplier = (float) this.getDouble("hunger.other-multiplier", 0.0);
-     }
+@@ -8,6 +10,15 @@ import org.bukkit.configuration.ConfigurationSection;
+ import org.bukkit.configuration.file.YamlConfiguration;
  
--    public int currentPrimedTnt = 0;
-+    public final AtomicInteger currentPrimedTnt = new AtomicInteger();
+ public class SpigotWorldConfig {
++    private static final VarHandle CURRENT_PRIMED_TNT = currentPrimedTntHandle();
++
++    private static VarHandle currentPrimedTntHandle() {
++        try {
++            return MethodHandles.lookup().findVarHandle(SpigotWorldConfig.class, "currentPrimedTnt", int.class);
++        } catch (final ReflectiveOperationException ex) {
++            throw new ExceptionInInitializerError(ex);
++        }
++    }
+ 
+     private final String legacyWorldName;
+     private String worldName;
+@@ -408,6 +419,28 @@ public class SpigotWorldConfig {
+ 
+     public int currentPrimedTnt = 0;
      public int maxTntTicksPerTick;
 +
 +    // Loom - the TNT budget is consumed concurrently by region-owned entity ticks. Saturating at the limit
@@ -385,12 +398,16 @@ index 339832e312578ee385bbf3c9d5c131435abe7d7a..645788445a1da7df09340bd066e08774
 +        }
 +
 +        int used;
-+        while ((used = this.currentPrimedTnt.get()) < limit) {
-+            if (this.currentPrimedTnt.compareAndSet(used, used + 1)) {
++        while ((used = (int) CURRENT_PRIMED_TNT.getVolatile(this)) < limit) {
++            if (CURRENT_PRIMED_TNT.compareAndSet(this, used, used + 1)) {
 +                return true;
 +            }
 +        }
 +        return false;
++    }
++
++    public void resetPrimedTntTicks() {
++        CURRENT_PRIMED_TNT.setVolatile(this, 0);
 +    }
 +
      private void maxTntPerTick() {

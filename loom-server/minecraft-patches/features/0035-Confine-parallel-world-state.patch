@@ -148,7 +148,7 @@ index 00695adb4abeb8e80652b7ecfdaca69c5150ddf1..7d926bb271766cf00b9991e7b798989a
              }
              profiler.pop();
 -            this.spigotConfig.currentPrimedTnt = 0; // Spigot
-+            this.spigotConfig.currentPrimedTnt.set(0); // Spigot; Loom - reset after all parallel entity workers join
++            this.spigotConfig.resetPrimedTntTicks(); // Spigot; Loom - reset after all parallel entity workers join
          }
  
          loomSectionStart = loomDiagnostics == null ? 0L : System.nanoTime();
