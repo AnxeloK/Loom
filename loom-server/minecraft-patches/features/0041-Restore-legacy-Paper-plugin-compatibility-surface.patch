@@ -12,6 +12,111 @@ the global Server thread while no scoped LevelCaptureContext frame is
 active, preserving Paper's single-threaded contract without exposing
 region workers to the shared maps.
 
+diff --git a/io/papermc/paper/entity/activation/ActivationRange.java b/io/papermc/paper/entity/activation/ActivationRange.java
+index 58e67d0663a9528b5a651666876700878d5b67c5..7512ae34ba1fb47170a0bdba96bca36c0d7e8ae1 100644
+--- a/io/papermc/paper/entity/activation/ActivationRange.java
++++ b/io/papermc/paper/entity/activation/ActivationRange.java
+@@ -1,5 +1,7 @@
+ package io.papermc.paper.entity.activation;
+
++import java.lang.invoke.MethodHandles;
++import java.lang.invoke.VarHandle;
+ import net.minecraft.core.BlockPos;
+ import net.minecraft.server.threading.runtime.DomainClock;
+ import net.minecraft.world.entity.Entity;
+@@ -40,9 +42,12 @@ import net.minecraft.world.phys.AABB;
+ import org.spigotmc.SpigotWorldConfig;
+ import java.util.List;
+ import java.util.Set;
+-import java.util.concurrent.atomic.AtomicInteger;
+
+ public final class ActivationRange {
++    private static final VarHandle WAKEUP_INACTIVE_REMAINING_ANIMALS = wakeupCounter("wakeupInactiveRemainingAnimals");
++    private static final VarHandle WAKEUP_INACTIVE_REMAINING_FLYING = wakeupCounter("wakeupInactiveRemainingFlying");
++    private static final VarHandle WAKEUP_INACTIVE_REMAINING_MONSTERS = wakeupCounter("wakeupInactiveRemainingMonsters");
++    private static final VarHandle WAKEUP_INACTIVE_REMAINING_VILLAGERS = wakeupCounter("wakeupInactiveRemainingVillagers");
+
+     private ActivationRange() {
+     }
+@@ -67,45 +72,53 @@ public final class ActivationRange {
+         final SpigotWorldConfig config = world.spigotConfig;
+         final long inactiveFor = currentTick(entity) - entity.activatedTick;
+         if (entity.activationType == ActivationType.VILLAGER) {
+-            if (inactiveFor > config.wakeUpInactiveVillagersEvery && consumeWakeup(world.wakeupInactiveRemainingVillagers)) {
++            if (inactiveFor > config.wakeUpInactiveVillagersEvery && consumeWakeup(world, WAKEUP_INACTIVE_REMAINING_VILLAGERS)) {
+                 return config.wakeUpInactiveVillagersFor;
+             }
+         } else if (entity.activationType == ActivationType.ANIMAL) {
+-            if (inactiveFor > config.wakeUpInactiveAnimalsEvery && consumeWakeup(world.wakeupInactiveRemainingAnimals)) {
++            if (inactiveFor > config.wakeUpInactiveAnimalsEvery && consumeWakeup(world, WAKEUP_INACTIVE_REMAINING_ANIMALS)) {
+                 return config.wakeUpInactiveAnimalsFor;
+             }
+         } else if (entity.activationType == ActivationType.FLYING_MONSTER) {
+-            if (inactiveFor > config.wakeUpInactiveFlyingEvery && consumeWakeup(world.wakeupInactiveRemainingFlying)) {
++            if (inactiveFor > config.wakeUpInactiveFlyingEvery && consumeWakeup(world, WAKEUP_INACTIVE_REMAINING_FLYING)) {
+                 return config.wakeUpInactiveFlyingFor;
+             }
+         } else if (entity.activationType == ActivationType.MONSTER || entity.activationType == ActivationType.RAIDER) {
+-            if (inactiveFor > config.wakeUpInactiveMonstersEvery && consumeWakeup(world.wakeupInactiveRemainingMonsters)) {
++            if (inactiveFor > config.wakeUpInactiveMonstersEvery && consumeWakeup(world, WAKEUP_INACTIVE_REMAINING_MONSTERS)) {
+                 return config.wakeUpInactiveMonstersFor;
+             }
+         }
+         return -1;
+     }
+
+-    private static boolean consumeWakeup(final AtomicInteger remaining) {
++    private static VarHandle wakeupCounter(final String name) {
++        try {
++            return MethodHandles.lookup().findVarHandle(Level.class, name, int.class);
++        } catch (ReflectiveOperationException exception) {
++            throw new ExceptionInInitializerError(exception);
++        }
++    }
++
++    private static boolean consumeWakeup(final Level world, final VarHandle remaining) {
+         int available;
+-        while ((available = remaining.get()) > 0) {
+-            if (remaining.compareAndSet(available, available - 1)) {
++        while ((available = (int) remaining.getVolatile(world)) > 0) {
++            if (remaining.compareAndSet(world, available, available - 1)) {
+                 return true;
+             }
+         }
+         return false;
+     }
+
+-    private static void replenishWakeups(final AtomicInteger remaining, final int maximum) {
++    private static void replenishWakeups(final Level world, final VarHandle remaining, final int maximum) {
+         int current;
+         int replenished;
+         do {
+-            current = remaining.get();
++            current = (int) remaining.getVolatile(world);
+             replenished = Math.min(current + 1, maximum);
+             if (replenished == current) {
+                 return;
+             }
+-        } while (!remaining.compareAndSet(current, replenished));
++        } while (!remaining.compareAndSet(world, current, replenished));
+     }
+
+     /**
+@@ -154,10 +167,10 @@ public final class ActivationRange {
+         final int waterActivationRange = world.spigotConfig.waterActivationRange;
+         final int flyingActivationRange = world.spigotConfig.flyingMonsterActivationRange;
+         final int villagerActivationRange = world.spigotConfig.villagerActivationRange;
+-        replenishWakeups(world.wakeupInactiveRemainingAnimals, world.spigotConfig.wakeUpInactiveAnimals);
+-        replenishWakeups(world.wakeupInactiveRemainingVillagers, world.spigotConfig.wakeUpInactiveVillagers);
+-        replenishWakeups(world.wakeupInactiveRemainingMonsters, world.spigotConfig.wakeUpInactiveMonsters);
+-        replenishWakeups(world.wakeupInactiveRemainingFlying, world.spigotConfig.wakeUpInactiveFlying);
++        replenishWakeups(world, WAKEUP_INACTIVE_REMAINING_ANIMALS, world.spigotConfig.wakeUpInactiveAnimals);
++        replenishWakeups(world, WAKEUP_INACTIVE_REMAINING_VILLAGERS, world.spigotConfig.wakeUpInactiveVillagers);
++        replenishWakeups(world, WAKEUP_INACTIVE_REMAINING_MONSTERS, world.spigotConfig.wakeUpInactiveMonsters);
++        replenishWakeups(world, WAKEUP_INACTIVE_REMAINING_FLYING, world.spigotConfig.wakeUpInactiveFlying);
+
+         int maxRange = Math.max(monsterActivationRange, animalActivationRange);
+         maxRange = Math.max(maxRange, raiderActivationRange);
 diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
 index 8aa2e8938f4cfc22cb185566e2c143f33dab35e2..d8d713711fac2938a3d48ad55701024ef1706ec1 100644
 --- a/net/minecraft/network/PacketProcessor.java
@@ -28,7 +133,7 @@ index 8aa2e8938f4cfc22cb185566e2c143f33dab35e2..d8d713711fac2938a3d48ad55701024e
          return !this.packetsToBeHandled.isEmpty();
      }
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 08157a2715fde6887043ff7f55e5f5bf6b233a58..0e75a2b58126505b71ef320f1470397fc834136b 100644
+index 08157a2715fde6887043ff7f55e5f5bf6b233a58..e31e21c33f1d6e160530a4572f2d4cf13c2cff78 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -356,6 +356,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
@@ -89,6 +194,14 @@ index 08157a2715fde6887043ff7f55e5f5bf6b233a58..0e75a2b58126505b71ef320f1470397f
                  // Paper end - improve tick loop
 
                  boolean sprinting = thisTickNanos == 0L;
+@@ -2162,6 +2185,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             level.hasEntityMoveEvent = io.papermc.paper.event.entity.EntityMoveEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - Add EntityMoveEvent
+             level.updateLagCompensationTick(); // Paper - lag compensation
+             level.skipHopperEvents = level.paperConfig().hopper.disableMoveEvent || org.bukkit.event.inventory.InventoryMoveItemEvent.getHandlerList().getRegisteredListeners().length == 0; // Paper - Perf: Optimize Hoppers; Loom - per-world
++            net.minecraft.world.level.block.entity.HopperBlockEntity.skipHopperEvents = level.skipHopperEvents; // Paper - retain public compatibility field
+             parallelLevels.add(level);
+         }
+         net.minecraft.server.threading.TickRegions.tickWorldsInParallel(parallelLevels, level -> {
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
 index 6796ef6ec20b5b707ca369aa3a55eaecd86e4043..0120979a74bedce50ff351b7ff912e7a1c344f4c 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
@@ -334,10 +447,10 @@ index e697cd58f93e4799ceec0843fe8fe589ee00e093..25a343230231234b728469e335f0586c
          final ServerLevel destinationLevel = transition.newLevel();
          final net.minecraft.world.phys.Vec3 destinationPos = transition.position();
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db058e9ec4a 100644
+index 428a9b90b218431bcdb9ed18316865654ca9bd75..23a570035161338a223b210284b9fe706df58884 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
-@@ -150,6 +150,32 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -150,12 +150,38 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      private final CraftWorld world;
      public org.bukkit.generator.@Nullable ChunkGenerator generator;
 
@@ -369,8 +482,18 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
 +
      public final it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<SpawnCategory> ticksPerSpawnCategory = new it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<>();
      // Paper start - EAR 2
-     public final java.util.concurrent.atomic.AtomicInteger wakeupInactiveRemainingAnimals = new java.util.concurrent.atomic.AtomicInteger();
-@@ -190,7 +216,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+-    public final java.util.concurrent.atomic.AtomicInteger wakeupInactiveRemainingAnimals = new java.util.concurrent.atomic.AtomicInteger();
+-    public final java.util.concurrent.atomic.AtomicInteger wakeupInactiveRemainingFlying = new java.util.concurrent.atomic.AtomicInteger();
+-    public final java.util.concurrent.atomic.AtomicInteger wakeupInactiveRemainingMonsters = new java.util.concurrent.atomic.AtomicInteger();
+-    public final java.util.concurrent.atomic.AtomicInteger wakeupInactiveRemainingVillagers = new java.util.concurrent.atomic.AtomicInteger();
++    public int wakeupInactiveRemainingAnimals;
++    public int wakeupInactiveRemainingFlying;
++    public int wakeupInactiveRemainingMonsters;
++    public int wakeupInactiveRemainingVillagers;
+     // Paper end - EAR 2
+     public boolean populating;
+     public final org.spigotmc.SpigotWorldConfig spigotConfig; // Spigot
+@@ -190,13 +216,18 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
 
      public final boolean isCaptureModeActive(final int mode) {
          final LevelCaptureContext.Frame context = this.currentCaptureContext();
@@ -382,7 +505,15 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
      }
 
      public final void setCapturedTreeType(final org.bukkit.TreeType treeType) {
-@@ -210,6 +239,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+         final LevelCaptureContext.Frame context = this.currentCaptureContext();
+         if (context != null && context.hasMode(LevelCaptureContext.TREE)) {
+             context.setTreeType(treeType);
++        } else if (this.legacyCaptureActive(LevelCaptureContext.TREE)) {
++            net.minecraft.world.level.block.SaplingBlock.treeType = treeType;
+         }
+     }
+
+@@ -210,6 +241,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      public final boolean captureItemDrop(final net.minecraft.world.entity.item.ItemEntity item) {
          final LevelCaptureContext.Frame context = this.currentCaptureContext();
          if (context == null || !context.hasMode(LevelCaptureContext.DROPS)) {
@@ -395,7 +526,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
              return false;
          }
          context.captureDrop(item);
-@@ -1031,6 +1066,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1031,6 +1068,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
              if (previous != null) {
                  return previous.getHandle();
              }
@@ -407,7 +538,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
          }
          // CraftBukkit end
          if (this.isOutsideBuildHeight(pos)) {
-@@ -1106,6 +1146,22 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1106,6 +1148,22 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
              blockstate.setFlags(updateFlags);
              return true;
          }
@@ -430,7 +561,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
          // CraftBukkit end
          // Loom - during parallel chunk ticking, buffer the write and apply it serially after the parallel
          // phase instead of mutating another region's chunk / shared world state off-thread.
-@@ -1132,7 +1188,17 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1132,7 +1190,17 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
                  captured = true;
              }
              snapshot.setFlags(updateFlags); // Paper - always set the flag of the most recent call to mitigate issues with multiple update at the same pos with different flags
@@ -448,7 +579,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
          // CraftBukkit end - capture blockstates
          BlockState oldState = chunk.setBlockState(pos, blockState, updateFlags);
          this.chunkPacketBlockController.onBlockChange(this, pos, blockState, oldState, updateFlags, updateLimit); // Paper - Anti-Xray
-@@ -1140,6 +1206,8 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1140,6 +1208,8 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
              // CraftBukkit start - remove blockstate if failed (or the same)
              if (captureContext != null && captureContext.hasMode(LevelCaptureContext.BLOCK_STATES) && captured) {
                  captureContext.removeCapturedBlockState(pos);
@@ -457,7 +588,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
              }
              // CraftBukkit end
              return false;
-@@ -1177,7 +1245,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1177,7 +1247,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
          */ // CraftBukkit
 
          // CraftBukkit start
@@ -466,7 +597,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
              // Modularize client and physic updates
              // Spigot start
              try {
-@@ -1355,6 +1423,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1355,6 +1425,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
              if (previous != null) {
                  return previous.getHandle();
              }
@@ -478,7 +609,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
          }
          // CraftBukkit end
          if (!this.isInValidBounds(pos)) {
-@@ -1786,6 +1859,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1786,6 +1861,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
              if (captured != null) {
                  return captured;
              }
@@ -490,7 +621,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
          }
          // Paper end - Perf: Optimize captured block entity lookup
          if (!this.isInValidBounds(pos)) {
-@@ -1806,6 +1884,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1806,6 +1886,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
                  captureContext.putCapturedBlockEntity(pos, blockEntity);
                  return;
              }
@@ -503,6 +634,31 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..c8bed7a9782c84ea1cb174ae12e86db0
              // CraftBukkit end
              this.getChunkAt(pos).addAndRegisterBlockEntity(blockEntity);
          }
+diff --git a/net/minecraft/world/level/block/SaplingBlock.java b/net/minecraft/world/level/block/SaplingBlock.java
+index e3398cfef77c306f03a16f03e1234489e10a33b7..d7f44d2168faa6b2116408bb769fd0a9179bc1c8 100644
+--- a/net/minecraft/world/level/block/SaplingBlock.java
++++ b/net/minecraft/world/level/block/SaplingBlock.java
+@@ -24,6 +24,7 @@ public class SaplingBlock extends VegetationBlock implements BonemealableBlock {
+     public static final IntegerProperty STAGE = BlockStateProperties.STAGE;
+     private static final VoxelShape SHAPE = Block.column(12.0, 0.0, 12.0);
+     protected final TreeGrower treeGrower;
++    public static org.bukkit.@org.jspecify.annotations.Nullable TreeType treeType; // CraftBukkit
+
+     @Override
+     public MapCodec<? extends SaplingBlock> codec() {
+diff --git a/net/minecraft/world/level/block/entity/HopperBlockEntity.java b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+index 4b87eb54828f422b627e59a2714179e58c8617e8..4f1a8d6f8e5fe8abf624ca212d1c8074269be056 100644
+--- a/net/minecraft/world/level/block/entity/HopperBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+@@ -219,6 +219,8 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+     }
+
+     // Paper start - Perf: Optimize Hoppers
++    public static boolean skipHopperEvents;
++
+     private static boolean hopperPush(final Level level, final Container destination, final Direction direction, final HopperBlockEntity hopper) {
+         final TickThread tickThread = TickThread.getCurrentTickThread();
+         final boolean previousSkipPush = tickThread.skipHopperPushEvents;
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
 index 1fe13a08b0b4c95cf7b34c654915dae213bd68e2..08d381c4f23b471bc1c7aea46546b673b670b22e 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
