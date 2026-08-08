@@ -133,7 +133,7 @@ index 8aa2e8938f4cfc22cb185566e2c143f33dab35e2..d8d713711fac2938a3d48ad55701024e
          return !this.packetsToBeHandled.isEmpty();
      }
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 08157a2715fde6887043ff7f55e5f5bf6b233a58..e31e21c33f1d6e160530a4572f2d4cf13c2cff78 100644
+index 08157a2715fde6887043ff7f55e5f5bf6b233a58..598afbf5c2dd2b0afa5c8fd3cf5d05cbf4e8722c 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -356,6 +356,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
@@ -194,7 +194,36 @@ index 08157a2715fde6887043ff7f55e5f5bf6b233a58..e31e21c33f1d6e160530a4572f2d4cf1
                  // Paper end - improve tick loop
 
                  boolean sprinting = thisTickNanos == 0L;
-@@ -2162,6 +2185,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2127,18 +2150,20 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         profiler.pop();
+         if (this.tickRateManager.runsNormally()) {
+             profiler.push("clocks");
+-            this.clockManager.tick();
++            // Paper start - per-world time
++            if (io.papermc.paper.configuration.GlobalConfiguration.get().time.affectsAllWorlds) {
++                this.clockManager.tick();
++            } else {
++                for (ServerLevel level : this.getAllLevels()) {
++                    level.clockManager().tick();
++                }
++            }
++            // Paper end - per-world time
+             profiler.pop();
+         }
+
+         if (this.tickCount % 20 == 0) {
+-            profiler.push("timeSync");
+-            // Paper start - per-world game time
+-            for (final ServerLevel level : this.getAllLevels()) {
+-                this.playerList.broadcastAll(new ClientboundSetTimePacket(level.getGameTime(), Map.of()), level);
+-            }
+-            // Paper end - per-world game time
+-            profiler.pop();
++            this.forceGameTimeSynchronization();
+         }
+
+         // CraftBukkit start
+@@ -2162,6 +2187,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              level.hasEntityMoveEvent = io.papermc.paper.event.entity.EntityMoveEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - Add EntityMoveEvent
              level.updateLagCompensationTick(); // Paper - lag compensation
              level.skipHopperEvents = level.paperConfig().hopper.disableMoveEvent || org.bukkit.event.inventory.InventoryMoveItemEvent.getHandlerList().getRegisteredListeners().length == 0; // Paper - Perf: Optimize Hoppers; Loom - per-world
@@ -202,6 +231,83 @@ index 08157a2715fde6887043ff7f55e5f5bf6b233a58..e31e21c33f1d6e160530a4572f2d4cf1
              parallelLevels.add(level);
          }
          net.minecraft.server.threading.TickRegions.tickWorldsInParallel(parallelLevels, level -> {
+@@ -2238,7 +2264,11 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     public void forceGameTimeSynchronization() {
+         ProfilerFiller profiler = Profiler.get();
+         profiler.push("timeSync");
+-        this.playerList.broadcastAll(new ClientboundSetTimePacket(this.overworld().getGameTime(), Map.of()));
++        // Paper start - per-world time
++        for (ServerLevel level : this.getAllLevels()) {
++            this.playerList.broadcastAll(new ClientboundSetTimePacket(level.getGameTime(), Map.of()), level);
++        }
++        // Paper end - per-world time
+         profiler.pop();
+     }
+
+@@ -3314,8 +3344,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         } else if (rule == GameRules.SPAWN_MONSTERS) {
+             level.setSpawnSettings(level.isSpawningMonsters()); // Paper - per-world game rules
+         } else if (rule == GameRules.ADVANCE_TIME) {
+-            // TODO: switch this back to per-player time sync once that path is stable on 26.1.
+-            this.getPlayerList().broadcastAll(this.clockManager().createFullSyncPacket());
++            level.players().forEach(player -> player.connection.send(level.clockManager().createFullSyncPacket(player))); // Paper - per-world time; per-player time
+         }
+     }
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index ad53de932963acbcda3267bd18879034ae90ccc3..066c808c62f990e6f380241a9b314a353f3e4311 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -234,6 +234,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     private final WeatherData weatherData;
+     public final net.minecraft.world.level.timers.TimerQueue<net.minecraft.server.MinecraftServer> scheduledEvents;
+     public final WorldGenSettings worldGenSettings;
++    private @Nullable ServerClockManager clockManager;
+     public boolean hasPhysicsEvent = true; // Paper - BlockPhysicsEvent
+     public boolean hasEntityMoveEvent; // Paper - Add EntityMoveEvent
+     private static final org.bukkit.craftbukkit.persistence.CraftPersistentDataTypeRegistry DATA_TYPE_REGISTRY = new org.bukkit.craftbukkit.persistence.CraftPersistentDataTypeRegistry();
+@@ -655,6 +656,12 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         this.serverLevelData = levelData;
+         ChunkGenerator generator = levelStem.generator();
+         // CraftBukkit start
++        // Paper start - per-world time
++        if (!io.papermc.paper.configuration.GlobalConfiguration.get().time.affectsAllWorlds) {
++            this.clockManager = savedDataStorage.computeIfAbsent(ServerClockManager.TYPE);
++            this.clockManager.init(server, this);
++        }
++        // Paper end - per-world time
+         if (loadedWorldData.pdc() != null) {
+             this.persistentDataContainer.putAll(loadedWorldData.pdc().persistentData().toTagCompound());
+         }
+@@ -778,7 +785,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+
+     @Override
+     public ServerClockManager clockManager() {
+-        return this.server.clockManager();
++        return io.papermc.paper.configuration.GlobalConfiguration.get().time.affectsAllWorlds ? this.server.clockManager() : this.clockManager; // Paper - per-world time
+     }
+
+     @Override
+@@ -827,8 +834,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             boolean timeSkipDispatched = false;
+             if (this.getGameRules().get(GameRules.ADVANCE_TIME) && defaultClock.isPresent()) {
+                 // Paper start - time skip event
+-                long currentTime = this.server.clockManager().getTotalTicks(defaultClock.get());
+-                long delta = this.server.clockManager().getTotalTicksToTimeMarker(defaultClock.get(), ClockTimeMarkers.WAKE_UP_FROM_SLEEP).orElse(0L) - currentTime;
++                long currentTime = this.clockManager().getTotalTicks(defaultClock.get());
++                long delta = this.clockManager().getTotalTicksToTimeMarker(defaultClock.get(), ClockTimeMarkers.WAKE_UP_FROM_SLEEP).orElse(0L) - currentTime;
+                 event = new org.bukkit.event.world.TimeSkipEvent(
+                     this.getWorld(),
+                     org.bukkit.event.world.TimeSkipEvent.SkipReason.NIGHT_SKIP,
+@@ -1013,7 +1020,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         this.sleepTimeSkipPending = true;
+         try {
+             net.minecraft.server.threading.runtime.OwnershipRouter.dispatchToServer(this.server, () -> {
+-                this.server.clockManager().setTotalTicks(clock, totalTicks);
++                this.clockManager().setTotalTicks(clock, totalTicks);
+                 net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
+                     net.minecraft.server.threading.runtime.OwnerDomainExecutor.region(
+                         this,
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
 index 6796ef6ec20b5b707ca369aa3a55eaecd86e4043..0120979a74bedce50ff351b7ff912e7a1c344f4c 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
@@ -331,7 +437,7 @@ index 8b6c2ca84f62a95c9b27edee2a45cd4138ad630b..237298087047ae1e9eccc24dc7ff48a3
              if (this.server.getCompressionThreshold() >= 0 && !this.connection.isMemoryConnection()) {
                  this.connection
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index 23058ff83012f0d1d6c80abdac76ca71db1f0f03..5c72a5eef20dea4cb2f8ccd2dbd63c53bf0152ec 100644
+index 23058ff83012f0d1d6c80abdac76ca71db1f0f03..84863b0974d1511f83cbfb81abf62eed9f374429 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
 @@ -809,6 +809,7 @@ public abstract class PlayerList {
@@ -384,6 +490,145 @@ index 23058ff83012f0d1d6c80abdac76ca71db1f0f03..5c72a5eef20dea4cb2f8ccd2dbd63c53
          if (!keepAllPlayerData && result.isAnchorSpawn() && respawnBlockPosition != null) {
              player.connection
                  .send(
+@@ -1297,7 +1300,7 @@ public abstract class PlayerList {
+     public void sendLevelInfo(final ServerPlayer player, final ServerLevel level) {
+         WorldBorder worldBorder = level.getWorldBorder();
+         player.connection.send(new ClientboundInitializeBorderPacket(worldBorder));
+-        player.connection.send(this.server.clockManager().createFullSyncPacket());
++        player.connection.send(level.clockManager().createFullSyncPacket(player)); // Paper - per-world time; per-player time
+         player.connection.send(new ClientboundSetDefaultSpawnPositionPacket(level.getRespawnData()));
+         // Paper start - view distances
+         //player.connection.send(new ClientboundSetChunkCacheRadiusPacket(io.papermc.paper.FeatureHooks.getViewDistance(level))); // Paper - rewrite chunk system
+diff --git a/net/minecraft/world/clock/ServerClockManager.java b/net/minecraft/world/clock/ServerClockManager.java
+index c6bdff28889a68dd96e7e810cf6b8276642a3e2c..6f225fe85adcc53971c576395296e2963876fe30 100644
+--- a/net/minecraft/world/clock/ServerClockManager.java
++++ b/net/minecraft/world/clock/ServerClockManager.java
+@@ -30,6 +30,7 @@ public class ServerClockManager extends SavedData implements ClockManager {
+     );
+     private final PackedClockStates packedClockStates;
+     private MinecraftServer server;
++    private @org.jspecify.annotations.Nullable ServerLevel level; // Paper - per-world time
+     private final Map<Holder<WorldClock>, ServerClockManager.ClockInstance> clocks = new HashMap<>();
+
+     private ServerClockManager(final PackedClockStates packedClockStates) {
+@@ -37,6 +38,13 @@ public class ServerClockManager extends SavedData implements ClockManager {
+     }
+
+     public void init(final MinecraftServer server) {
++        // Paper start - per-world time
++        this.init(server, null);
++    }
++
++    public void init(final MinecraftServer server, @org.jspecify.annotations.Nullable final ServerLevel level) {
++        this.level = level;
++        // Paper end - per-world time
+         this.server = server;
+         server.registryAccess()
+             .lookupOrThrow(Registries.WORLD_CLOCK)
+@@ -62,7 +70,7 @@ public class ServerClockManager extends SavedData implements ClockManager {
+
+     public void tick() {
+         this.ensureGlobalOwner("tick");
+-        boolean advanceTime = this.server.getGlobalGameRules().get(GameRules.ADVANCE_TIME);
++        boolean advanceTime = this.advanceTime(); // Paper - per-world time
+         if (advanceTime) {
+             this.clocks.values().forEach(ServerClockManager.ClockInstance::tick);
+             this.setDirty();
+@@ -123,13 +131,18 @@ public class ServerClockManager extends SavedData implements ClockManager {
+         this.ensureGlobalOwner("modify");
+         ServerClockManager.ClockInstance instance = this.getInstance(clock);
+         action.accept(instance);
+-        Map<Holder<WorldClock>, ClockNetworkState> updates = Map.of(clock, instance.packNetworkState(this.server));
+-        this.server.getPlayerList().broadcastAll(new ClientboundSetTimePacket(this.getGameTime(), updates)); // TODO 26.1 per-player time
++        // Paper start - per-world time
++        this.broadcastUpdates(clock, instance);
+         this.setDirty();
+
++        if (this.level != null) {
++            this.level.environmentAttributes().invalidateTickCache();
++        } else {
+         for (ServerLevel level : this.server.getAllLevels()) {
+             level.environmentAttributes().invalidateTickCache();
+         }
++        }
++        // Paper end - per-world time
+     }
+
+     @Override
+@@ -153,13 +166,22 @@ public class ServerClockManager extends SavedData implements ClockManager {
+     // Paper end
+
+     public ClientboundSetTimePacket createFullSyncPacket() {
+-        // TODO: restore per-player time sync for 26.1.
+-        return new ClientboundSetTimePacket(this.getGameTime(), Util.mapValues(this.clocks, clock -> clock.packNetworkState(this.server)));
++        // Paper start - per-player time
++        return this.createFullSyncPacket(null);
++    }
++
++    public ClientboundSetTimePacket createFullSyncPacket(final net.minecraft.server.level.ServerPlayer player) {
++        final Map<Holder<WorldClock>, ClockNetworkState> updates = new HashMap<>(this.clocks.size());
++        this.clocks.forEach((clock, instance) -> updates.put(clock, this.packNetworkState(clock, instance, player)));
++        return new ClientboundSetTimePacket(this.getGameTime(), updates);
++        // Paper end - per-player time
+     }
+
+     public void broadcastFullSyncPacket() {
+         this.ensureGlobalOwner("broadcast full sync packet");
+-        this.server.getPlayerList().broadcastAll(this.createFullSyncPacket());
++        for (final net.minecraft.server.level.ServerPlayer player : this.level != null ? this.level.players() : this.server.getPlayerList().getPlayers()) {
++            player.connection.send(this.createFullSyncPacket(player));
++        }
+     }
+
+     private void ensureGlobalOwner(final String operation) {
+@@ -170,8 +192,36 @@ public class ServerClockManager extends SavedData implements ClockManager {
+     }
+
+     private long getGameTime() {
+-        return this.server.overworld().getGameTime();
++        return this.level != null ? this.level.getGameTime() : this.server.overworld().getGameTime(); // Paper - per-world time
++    }
++
++    // Paper start - per-world time; per-player time
++    private void broadcastUpdates(final Holder<WorldClock> clock, final ServerClockManager.ClockInstance instance) {
++        for (final net.minecraft.server.level.ServerPlayer player : this.level != null ? this.level.players() : this.server.getPlayerList().getPlayers()) {
++            final var packet = new ClientboundSetTimePacket(
++                this.getGameTime(),
++                Map.of(clock, this.packNetworkState(clock, instance, player))
++            );
++            player.connection.send(packet);
++        }
++    }
++
++    private ClockNetworkState packNetworkState(
++        final Holder<WorldClock> clock,
++        final ServerClockManager.ClockInstance instance,
++        final net.minecraft.server.level.ServerPlayer player
++    ) {
++        if (player != null && player.level().dimensionType().defaultClock().filter(clock::equals).isPresent()) {
++            final boolean paused = !player.relativeTime || instance.paused || !this.advanceTime();
++            return new ClockNetworkState(player.getPlayerTime(), instance.partialTick, paused ? 0.0F : instance.rate);
++        }
++        return instance.packNetworkState(this.advanceTime());
++    }
++
++    private boolean advanceTime() {
++        return this.level != null ? this.level.getGameRules().get(GameRules.ADVANCE_TIME) : this.server.getGlobalGameRules().get(GameRules.ADVANCE_TIME);
+     }
++    // Paper end - per-world time; per-player time
+
+     public boolean isAtTimeMarker(final Holder<WorldClock> clock, final ResourceKey<ClockTimeMarker> timeMarkerId) {
+         ServerClockManager.ClockInstance clockInstance = this.getInstance(clock);
+@@ -210,8 +260,7 @@ public class ServerClockManager extends SavedData implements ClockManager {
+             return new ClockState(this.totalTicks, this.partialTick, this.rate, this.paused);
+         }
+
+-        public ClockNetworkState packNetworkState(final MinecraftServer server) {
+-            boolean advanceTime = server.getGlobalGameRules().get(GameRules.ADVANCE_TIME);
++        public ClockNetworkState packNetworkState(final boolean advanceTime) { // Paper - per-world time
+             boolean paused = this.paused || !advanceTime;
+             return new ClockNetworkState(this.totalTicks, this.partialTick, paused ? 0.0F : this.rate);
+         }
 diff --git a/net/minecraft/world/entity/PortalProcessor.java b/net/minecraft/world/entity/PortalProcessor.java
 index e697cd58f93e4799ceec0843fe8fe589ee00e093..25a343230231234b728469e335f0586c00950f4c 100644
 --- a/net/minecraft/world/entity/PortalProcessor.java
