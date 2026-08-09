@@ -41,10 +41,10 @@ index 42a55c30dc3f533a4319410e9948b6086c004124..2c47773441282e1c8e4ed762b4f55497
          try {
              return BATCH_CONSTRUCTOR.newInstance(count, action, "cooperative-dispatch-test", false);
 diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
-index 8b746a2bb14ef9a1f64b75c3d9cc1a57996f816d..231ae4e86e4dc5618d201f2375733052886106f2 100644
+index 8b746a2bb14ef9a1f64b75c3d9cc1a57996f816d..4322a7f69ba03f2b46aba2f100608fe1511c1bb5 100644
 --- a/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
 +++ b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
-@@ -6,6 +6,7 @@ import java.util.List;
+@@ -6,12 +6,14 @@ import java.util.List;
  import java.util.Queue;
  import java.util.concurrent.CompletableFuture;
  import java.util.concurrent.ConcurrentLinkedQueue;
@@ -52,7 +52,72 @@ index 8b746a2bb14ef9a1f64b75c3d9cc1a57996f816d..231ae4e86e4dc5618d201f2375733052
  import java.util.concurrent.TimeUnit;
  import java.util.concurrent.atomic.AtomicInteger;
  import java.util.concurrent.atomic.AtomicReference;
-@@ -205,6 +206,212 @@ class OwnerDomainExecutorCooperativeWaitTest {
+ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.server.threading.TickRegions;
++import net.minecraft.util.thread.BlockableEventLoop;
+ import net.minecraft.world.level.Level;
+ import org.bukkit.support.environment.Normal;
+ import org.junit.jupiter.api.Assertions;
+@@ -94,7 +96,7 @@ class OwnerDomainExecutorCooperativeWaitTest {
+     }
+
+     @Test
+-    void cooperativeWaitPrioritizesTaskCompletingAwaitedFuture() throws InterruptedException {
++    void cooperativeWaitPreservesEarlierSameOwnerTask() throws InterruptedException {
+         final MinecraftServer server = Mockito.mock(MinecraftServer.class);
+         final Queue<Runnable> queuedOwnerTasks = new ConcurrentLinkedQueue<>();
+         Mockito.when(server.enqueueGlobalOwnerTask(Mockito.any(Runnable.class))).thenAnswer(invocation -> {
+@@ -103,13 +105,7 @@ class OwnerDomainExecutorCooperativeWaitTest {
+         });
+         Mockito.when(server.runQueuedGlobalOwnerTask(Mockito.any())).thenAnswer(invocation -> {
+             final java.util.function.Predicate<Runnable> predicate = invocation.getArgument(0);
+-            for (final Runnable candidate : queuedOwnerTasks) {
+-                if (predicate.test(candidate) && queuedOwnerTasks.remove(candidate)) {
+-                    candidate.run();
+-                    return true;
+-                }
+-            }
+-            return false;
++            return runOrderedMatchingTask(queuedOwnerTasks, predicate);
+         });
+         final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.global(server, "prioritized-owner-task");
+         final List<String> order = new ArrayList<>();
+@@ -139,9 +135,30 @@ class OwnerDomainExecutorCooperativeWaitTest {
+         Assertions.assertFalse(ownerThread.isAlive(), "prioritized owner task did not complete");
+         Assertions.assertNull(failure.get());
+         Assertions.assertEquals("awaited", result.get());
+-        Assertions.assertEquals(List.of("awaited"), order);
+-        Assertions.assertFalse(unrelated.isDone());
+-        Assertions.assertEquals(1, queuedOwnerTasks.size());
++        Assertions.assertEquals(List.of("unrelated", "awaited"), order);
++        Assertions.assertTrue(unrelated.isDone());
++        Assertions.assertTrue(queuedOwnerTasks.isEmpty());
++    }
++
++    @Test
++    void matchingQueueRunsRequiredPredecessorBeforeTarget() {
++        final TestEventLoop eventLoop = new TestEventLoop();
++        final List<String> order = new ArrayList<>();
++        final Runnable predecessor = () -> order.add("predecessor");
++        final Runnable target = () -> order.add("target");
++        eventLoop.schedule(predecessor);
++        eventLoop.schedule(target);
++
++        Assertions.assertTrue(eventLoop.runQueuedTaskMatching(
++            candidate -> candidate == target,
++            (candidate, matched) -> candidate == predecessor && matched == target
++        ));
++        Assertions.assertEquals(List.of("predecessor"), order);
++        Assertions.assertEquals(1, eventLoop.getPendingTasksCount());
++
++        Assertions.assertTrue(eventLoop.runQueuedTaskMatching(candidate -> candidate == target));
++        Assertions.assertEquals(List.of("predecessor", "target"), order);
++        Assertions.assertEquals(0, eventLoop.getPendingTasksCount());
+     }
+
+     @Test
+@@ -205,6 +222,272 @@ class OwnerDomainExecutorCooperativeWaitTest {
          Assertions.assertEquals(0, OwnerDomainExecutor.activeCooperativeWaits());
      }
 
@@ -260,6 +325,66 @@ index 8b746a2bb14ef9a1f64b75c3d9cc1a57996f816d..231ae4e86e4dc5618d201f2375733052
 +        Assertions.assertNull(holderFailure.get());
 +        Assertions.assertEquals("held-region", result.get());
 +        Assertions.assertSame(remoteThread, ranOn.get(), "a live region owner's task was stolen by the waiter");
++    }
++
++    private static boolean runOrderedMatchingTask(
++        final Queue<Runnable> queue,
++        final java.util.function.Predicate<Runnable> predicate
++    ) {
++        Runnable target = null;
++        for (final Runnable candidate : queue) {
++            if (predicate.test(candidate)) {
++                target = candidate;
++                break;
++            }
++        }
++        if (target == null) {
++            return false;
++        }
++
++        Runnable predecessor = null;
++        for (final Runnable candidate : queue) {
++            if (candidate == target) {
++                break;
++            }
++            if (predecessor == null && OwnerDomainExecutor.mustRunBefore(candidate, target)) {
++                predecessor = candidate;
++            }
++        }
++
++        final Runnable selected = predecessor == null ? target : predecessor;
++        for (final java.util.Iterator<Runnable> iterator = queue.iterator(); iterator.hasNext(); ) {
++            if (iterator.next() == selected) {
++                iterator.remove();
++                selected.run();
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private static final class TestEventLoop extends BlockableEventLoop<Runnable> {
++        private final Thread runningThread;
++
++        private TestEventLoop() {
++            super("ordered-owner-task-test", false);
++            this.runningThread = Thread.currentThread();
++        }
++
++        @Override
++        protected boolean shouldRun(final Runnable task) {
++            return true;
++        }
++
++        @Override
++        protected Thread getRunningThread() {
++            return this.runningThread;
++        }
++
++        @Override
++        public Runnable wrapRunnable(final Runnable runnable) {
++            return runnable;
++        }
 +    }
 +
      private static CompletableFuture<String> nestedWait(final int remaining) {

@@ -5,15 +5,21 @@ Subject: [PATCH] Service owner callbacks during serialized waits
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 358f34322e05d5ec72a6b0c29b6f2fbd58479be6..940e80117e945385863cf8c82b5c64cb5d47162e 100644
+index 598afbf5c2dd2b0afa5c8fd3cf5d05cbf4e8722c..03953a7e19d9fc286d8f085aa2ed89ef049a71d1 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2610,6 +2610,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2633,6 +2633,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          return true;
      }
  
 +    public boolean runQueuedGlobalOwnerTask(final java.util.function.Predicate<Runnable> predicate) {
-+        return this.runQueuedTaskMatching(task -> predicate.test(task.runnable()));
++        return this.runQueuedTaskMatching(
++            task -> predicate.test(task.runnable()),
++            (candidate, target) -> net.minecraft.server.threading.runtime.OwnerDomainExecutor.mustRunBefore(
++                candidate.runnable(),
++                target.runnable()
++            )
++        );
 +    }
 +
      @Override
@@ -610,22 +616,75 @@ index 0b4f17076ea84112c6ae5b93865f08259f98f078..d21de16dbf859cd0475852a46f60cccc
          private final @Nullable OwnerContext previous;
          private final boolean requireEmptyOnClose;
 diff --git a/net/minecraft/util/thread/BlockableEventLoop.java b/net/minecraft/util/thread/BlockableEventLoop.java
-index c65c7541dab5b9d92715fde50c17a83c7869e81a..1e16a40e21a21dcca4080c231dac5fa281df1b05 100644
+index c65c7541dab5b9d92715fde50c17a83c7869e81a..96411b3cebe995171ac2d9e47aeec52cfbe8e343 100644
 --- a/net/minecraft/util/thread/BlockableEventLoop.java
 +++ b/net/minecraft/util/thread/BlockableEventLoop.java
-@@ -79,6 +79,20 @@ public abstract class BlockableEventLoop<R extends Runnable> implements Executor
+@@ -5,11 +5,13 @@ import com.google.common.collect.Queues;
+ import com.mojang.jtracy.TracyClient;
+ import com.mojang.jtracy.Zone;
+ import com.mojang.logging.LogUtils;
++import java.util.Iterator;
+ import java.util.List;
+ import java.util.Queue;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.Executor;
+ import java.util.concurrent.locks.LockSupport;
++import java.util.function.BiPredicate;
+ import java.util.function.BooleanSupplier;
+ import java.util.function.Supplier;
+ import javax.annotation.CheckReturnValue;
+@@ -79,6 +81,59 @@ public abstract class BlockableEventLoop<R extends Runnable> implements Executor
  
          return true;
      }
 +
 +    public boolean runQueuedTaskMatching(final java.util.function.Predicate<? super R> predicate) {
++        return this.runQueuedTaskMatching(predicate, null);
++    }
++
++    public boolean runQueuedTaskMatching(
++        final java.util.function.Predicate<? super R> predicate,
++        final @Nullable BiPredicate<? super R, ? super R> mustRunBefore
++    ) {
 +        if (!this.isSameThread()) {
 +            throw new IllegalStateException();
 +        }
 +
++        R target = null;
 +        for (final R run : this.pendingRunnables) {
-+            if ((predicate == null || predicate.test(run)) && this.pendingRunnables.remove(run)) {
-+                this.doRunTask(run);
++            if (predicate == null || predicate.test(run)) {
++                target = run;
++                break;
++            }
++        }
++        if (target == null) {
++            return false;
++        }
++
++        R predecessor = null;
++        boolean targetStillQueued = false;
++        if (mustRunBefore != null) {
++            for (final R candidate : this.pendingRunnables) {
++                if (candidate == target) {
++                    targetStillQueued = true;
++                    break;
++                }
++                if (predecessor == null && mustRunBefore.test(candidate, target)) {
++                    predecessor = candidate;
++                }
++            }
++        } else {
++            targetStillQueued = true;
++        }
++        if (!targetStillQueued) {
++            return false;
++        }
++
++        final R selected = predecessor == null ? target : predecessor;
++        for (final Iterator<R> iterator = this.pendingRunnables.iterator(); iterator.hasNext(); ) {
++            if (iterator.next() == selected) {
++                iterator.remove();
++                this.doRunTask(selected);
 +                return true;
 +            }
 +        }
