@@ -125,7 +125,7 @@ index fdcbc63f30326f981703a36edec7c06e639f7193..fd66ecfe6bc0d29cf55a679bc31b2daa
                  this.lock.unlock();
              }
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
-index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..fac4b0e0ec40d2e1f71b60b8d762887a7bef3bdd 100644
+index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde6ac9a3d4 100644
 --- a/net/minecraft/server/threading/TickRegions.java
 +++ b/net/minecraft/server/threading/TickRegions.java
 @@ -2,6 +2,7 @@ package net.minecraft.server.threading;
@@ -274,27 +274,42 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..fac4b0e0ec40d2e1f71b60b8d762887a
      public static long getOwnershipCheckCount() {
          return OWNERSHIP_CHECKS.sum();
      }
-@@ -787,6 +859,8 @@ public class TickRegions {
+@@ -787,6 +859,7 @@ public class TickRegions {
          boolean interrupted = Thread.interrupted();
          int idleSpins = 0;
          final boolean alreadyTickingWorld = RUNNING_WORLD_TICK.get();
 +        final MinecraftServer server = MinecraftServer.getServer();
-+        final boolean canServiceGlobalWaits = server != null && Thread.currentThread() == server.getRunningThread();
          batch.waiter = Thread.currentThread();
          try (OwnerDomainExecutor.Scope ignored = currentOwner == null
              ? null
-@@ -798,7 +872,9 @@ public class TickRegions {
+@@ -798,7 +871,9 @@ public class TickRegions {
                  // Preserve an acyclic progress rule: a coordinator always claims its own available
                  // work before entering an unrelated batch. Cross-batch helping is only needed once
                  // every local index is already claimed by an active helper.
 -                if (batch.runOne() || runQueuedCooperativeTask(alreadyTickingWorld)) {
 +                if (batch.runOne()
 +                    || runQueuedCooperativeTask(alreadyTickingWorld)
-+                    || (canServiceGlobalWaits && OwnerDomainExecutor.runGlobalTaskCompletingActiveWait(server))) {
++                    || runQueuedGlobalWaitTask(server)) {
                      idleSpins = 0;
                      continue;
                  }
-@@ -1236,7 +1312,7 @@ public class TickRegions {
+@@ -830,6 +905,15 @@ public class TickRegions {
+         return interrupted;
+     }
+
++    static boolean runQueuedGlobalWaitTask(final @Nullable MinecraftServer server) {
++        if (server == null || Thread.currentThread() != server.getRunningThread()) {
++            return false;
++        }
++        try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enterGlobal(server, "cooperative-global-wait")) {
++            return OwnerDomainExecutor.runGlobalTaskCompletingActiveWait(server);
++        }
++    }
++
+     private static void parkIfIncomplete(final ParallelTaskBatch batch) {
+         if (!batch.isComplete()) {
+             LockSupport.park(batch);
+@@ -1236,7 +1320,7 @@ public class TickRegions {
          final int chunkZ,
          final long threadId
      ) {
@@ -303,7 +318,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..fac4b0e0ec40d2e1f71b60b8d762887a
              if (context.ownerThreadId() == threadId && context.world() == world && context.contains(chunkX, chunkZ)) {
                  return true;
              }
-@@ -1252,7 +1328,7 @@ public class TickRegions {
+@@ -1252,7 +1336,7 @@ public class TickRegions {
          final int maxChunkZ,
          final long threadId
      ) {
@@ -312,7 +327,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..fac4b0e0ec40d2e1f71b60b8d762887a
              if (context.ownerThreadId() == threadId
                  && context.world() == world
                  && context.contains(minChunkX, minChunkZ)
-@@ -1290,7 +1366,7 @@ public class TickRegions {
+@@ -1290,7 +1374,7 @@ public class TickRegions {
          final Thread currentThread = Thread.currentThread();
          final long threadId = currentThread.threadId();
          return isCurrentThreadOwnerByContext(world, chunkX, chunkZ, threadId)
@@ -321,7 +336,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..fac4b0e0ec40d2e1f71b60b8d762887a
      }
 
      private static long regionBucketKey(final int chunkX, final int chunkZ) {
-@@ -1438,6 +1514,44 @@ public class TickRegions {
+@@ -1438,6 +1522,44 @@ public class TickRegions {
          return stateFor(world).runQueuedOwnerTask(predicate);
      }
 
@@ -366,7 +381,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..fac4b0e0ec40d2e1f71b60b8d762887a
      // Loom - tick independent worlds through the same cooperative batch as region shards. The server thread
      // participates with its GLOBAL_CONTROL owner temporarily detached; nested world coordinators help ready
      // region work but do not recursively enter another world tick. Failures remain deterministic by world
-@@ -1691,6 +1805,10 @@ public class TickRegions {
+@@ -1691,6 +1813,10 @@ public class TickRegions {
          private long parallelMailboxDrainCount;
          private long mailboxBudgetSkipCount;
          private boolean mailboxOverflowWarned;
@@ -377,7 +392,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..fac4b0e0ec40d2e1f71b60b8d762887a
 
          private WorldSchedulerState(final ServerLevel world) {
              this.world = world;
-@@ -1831,6 +1949,9 @@ public class TickRegions {
+@@ -1831,6 +1957,9 @@ public class TickRegions {
              synchronized (this.lock) {
                  for (final Iterator<RegionBoundTask> iterator = this.regionContinuations.iterator(); iterator.hasNext(); ) {
                      final RegionBoundTask candidate = iterator.next();
@@ -387,7 +402,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..fac4b0e0ec40d2e1f71b60b8d762887a
                      if (predicate.test(candidate.task())) {
                          iterator.remove();
                          continuation = candidate.task();
-@@ -1850,6 +1971,9 @@ public class TickRegions {
+@@ -1850,6 +1979,9 @@ public class TickRegions {
                  if (continuation == null) {
                      for (final Iterator<CrossRegionMessage> iterator = this.mailbox.iterator(); iterator.hasNext(); ) {
                          final CrossRegionMessage candidate = iterator.next();
@@ -397,7 +412,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..fac4b0e0ec40d2e1f71b60b8d762887a
                          if (predicate.test(candidate.action())) {
                              iterator.remove();
                              message = candidate;
-@@ -1882,14 +2006,190 @@ public class TickRegions {
+@@ -1882,14 +2014,190 @@ public class TickRegions {
              return false;
          }
 
@@ -590,7 +605,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..fac4b0e0ec40d2e1f71b60b8d762887a
              }
              runRegionBoundTasksFromCurrentContext(this.world, continuations, "region-continuation");
          }
-@@ -1930,11 +2230,13 @@ public class TickRegions {
+@@ -1930,11 +2238,13 @@ public class TickRegions {
                  final int mailboxBudget = getAdaptiveMailboxBudget(this.world, available);
                  final int budgeted = Math.min(available, mailboxBudget);
                  final List<CrossRegionMessage> toDeliver = new ArrayList<>(budgeted);
@@ -607,7 +622,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..fac4b0e0ec40d2e1f71b60b8d762887a
                      toDeliver.add(message);
                  }
 
-@@ -2212,6 +2514,9 @@ public class TickRegions {
+@@ -2212,6 +2522,9 @@ public class TickRegions {
 
                  for (final Iterator<CrossRegionMessage> iterator = this.mailbox.iterator(); iterator.hasNext(); ) {
                      final CrossRegionMessage message = iterator.next();
@@ -617,7 +632,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..fac4b0e0ec40d2e1f71b60b8d762887a
                      if (message.plugin() == plugin) {
                          iterator.remove();
                          ++this.droppedMessageCount;
-@@ -2634,9 +2939,12 @@ public class TickRegions {
+@@ -2634,9 +2947,12 @@ public class TickRegions {
          int maxChunkX,
          int maxChunkZ,
          @Nullable RegionContext previous,

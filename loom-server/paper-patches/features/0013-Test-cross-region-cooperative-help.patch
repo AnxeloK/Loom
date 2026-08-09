@@ -4,6 +4,42 @@ Date: Wed, 5 Aug 2026 21:43:47 +0000
 Subject: [PATCH] Test cross-region cooperative help
 
 
+diff --git a/src/test/java/net/minecraft/server/threading/TickRegionsCooperativeDispatchTest.java b/src/test/java/net/minecraft/server/threading/TickRegionsCooperativeDispatchTest.java
+index 42a55c30dc3f533a4319410e9948b6086c004124..2c47773441282e1c8e4ed762b4f554973bc82324 100644
+--- a/src/test/java/net/minecraft/server/threading/TickRegionsCooperativeDispatchTest.java
++++ b/src/test/java/net/minecraft/server/threading/TickRegionsCooperativeDispatchTest.java
+@@ -169,6 +169,31 @@ public class TickRegionsCooperativeDispatchTest {
+         });
+     }
+
++    @Test
++    public void globalWaitTaskRunsWithGlobalOwnerOnlyOnServerThread() {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        Mockito.when(server.getRunningThread()).thenReturn(Thread.currentThread());
++        Mockito.when(server.runQueuedGlobalOwnerTask(Mockito.any())).thenAnswer(invocation -> {
++            Assertions.assertTrue(OwnerDomainExecutor.isGlobalOwner(server));
++            return true;
++        });
++
++        Assertions.assertNull(OwnerDomainExecutor.currentOwner());
++        Assertions.assertTrue(TickRegions.runQueuedGlobalWaitTask(server));
++        Assertions.assertNull(OwnerDomainExecutor.currentOwner());
++        Mockito.verify(server).runQueuedGlobalOwnerTask(Mockito.any());
++    }
++
++    @Test
++    public void globalWaitTaskDoesNotAttachOwnerToWorkerThread() {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        Mockito.when(server.getRunningThread()).thenReturn(new Thread("different-server-thread"));
++
++        Assertions.assertFalse(TickRegions.runQueuedGlobalWaitTask(server));
++        Assertions.assertNull(OwnerDomainExecutor.currentOwner());
++        Mockito.verify(server, Mockito.never()).runQueuedGlobalOwnerTask(Mockito.any());
++    }
++
+     private static Object newBatch(final int count, final IntConsumer action) {
+         try {
+             return BATCH_CONSTRUCTOR.newInstance(count, action, "cooperative-dispatch-test", false);
 diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
 index 8b746a2bb14ef9a1f64b75c3d9cc1a57996f816d..231ae4e86e4dc5618d201f2375733052886106f2 100644
 --- a/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
