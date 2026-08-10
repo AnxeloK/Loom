@@ -222,13 +222,12 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
          if (!plugin.isEnabled()) {
              throw new IllegalPluginAccessException("Plugin attempted to register " + listener + " while not enabled");
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
-index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e78943c0b3d08 100644
+index 63009af5233851977b4bb84099b8de84e9e7a2e7..ae846b524fc2f63cf7ffe8da8374c48632234ee8 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartment.java
-@@ -1,12 +1,13 @@
+@@ -1,12 +1,12 @@
  package io.papermc.paper.plugin.manager.compat;
  
-+import java.util.ArrayDeque;
  import java.util.Objects;
 -import java.util.concurrent.Callable;
  import java.util.concurrent.CompletableFuture;
@@ -242,7 +241,7 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
  import org.bukkit.plugin.Plugin;
  import org.jspecify.annotations.Nullable;
  
-@@ -22,47 +23,46 @@ public final class CompatibilityApartment {
+@@ -22,105 +22,127 @@ public final class CompatibilityApartment {
      }
  
      private static final class Lease {
@@ -261,27 +260,12 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
          }
      }
  
-+    private static final class LeaseRequest {
-+        private final long transactionId;
-+        private final Thread ownerThread;
-+        private final CompletableFuture<LeaseGrant> granted = new CompletableFuture<>();
-+        private int depth = 1;
-+
-+        private LeaseRequest(final long transactionId, final Thread ownerThread) {
-+            this.transactionId = transactionId;
-+            this.ownerThread = ownerThread;
-+        }
-+    }
-+
-+    private record LeaseGrant(Lease lease, EnterResult result) {
-+    }
-+
      private final Plugin plugin;
 -    private final ExecutorService strictFallbackExecutor;
      private final AtomicReference<@Nullable Lease> activeLease = new AtomicReference<>();
-+    private final AtomicInteger queuedLeaseCount = new AtomicInteger();
-+    private final Object leaseQueueLock = new Object();
-+    private final ArrayDeque<LeaseRequest> queuedLeases = new ArrayDeque<>();
++    private final AtomicInteger queuedHandoffs = new AtomicInteger();
++    private final Object leaseSignalLock = new Object();
++    private CompletableFuture<Void> leaseSignal = new CompletableFuture<>();
  
      public CompatibilityApartment(final Plugin plugin) {
          this.plugin = Objects.requireNonNull(plugin, "plugin");
@@ -310,9 +294,24 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
 -
      public Scope enter(final CompatibilityTransaction transaction, final boolean strictFallback) {
          Objects.requireNonNull(transaction, "transaction");
-         return this.enter(transaction.id(), transaction, strictFallback, "<unknown-path>");
-@@ -81,46 +81,108 @@ public final class CompatibilityApartment {
-         return this.enter(transactionId, null, strictFallback, path);
+-        return this.enter(transaction.id(), transaction, strictFallback, "<unknown-path>");
++        return this.enter(transaction.id(), transaction, strictFallback, "<unknown-path>", false);
+     }
+ 
+     public Scope enter(final CompatibilityTransaction transaction, final boolean strictFallback, final String path) {
+         Objects.requireNonNull(transaction, "transaction");
+-        return this.enter(transaction.id(), transaction, strictFallback, path);
++        return this.enter(transaction.id(), transaction, strictFallback, path, false);
+     }
+ 
+     public Scope enter(final long transactionId, final boolean strictFallback) {
+-        return this.enter(transactionId, null, strictFallback, "<unknown-path>");
++        return this.enter(transactionId, null, strictFallback, "<unknown-path>", false);
+     }
+ 
+     public Scope enter(final long transactionId, final boolean strictFallback, final String path) {
+-        return this.enter(transactionId, null, strictFallback, path);
++        return this.enter(transactionId, null, strictFallback, path, false);
      }
  
 -    private Scope enter(
@@ -331,60 +330,36 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
          final boolean strictFallback,
          final String path
      ) {
-         final Thread currentThread = Thread.currentThread();
+-        final Thread currentThread = Thread.currentThread();
 +        final String operation = "compatibility-apartment:" + this.plugin.getPluginMeta().getName() + ":" + path;
-+        final LeaseGrant grant;
-+        if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
-+            grant = OwnerDomainExecutor.awaitCooperatively(
-+                () -> this.requestLease(transactionId, currentThread),
-+                operation
-+            );
-+        } else {
-+            grant = awaitLease(this.requestLease(transactionId, currentThread), operation);
-+        }
-+        if (grant.lease().ownerThread != currentThread) {
-+            throw new IllegalStateException("Compatibility apartment lease resumed on a different thread for " + operation);
-+        }
-+        return this.openScope(grant.lease(), transactionId, transaction, strictFallback, path, grant.result());
-+    }
++        // A cooperative owner drains already accepted owner work after its wait is signalled. Keep the
++        // apartment idle until one of those callbacks is actually ready to enter instead of pre-assigning
++        // the lease to a waiter that has not resumed yet.
++        this.queuedHandoffs.incrementAndGet();
++        try {
++            while (true) {
++                Scope acquired = this.enter(transactionId, transaction, strictFallback, path, true);
++                if (acquired.acquired()) {
++                    return acquired;
++                }
++
++                final CompletableFuture<Void> signal;
++                synchronized (this.leaseSignalLock) {
++                    acquired = this.enter(transactionId, transaction, strictFallback, path, true);
++                    if (acquired.acquired()) {
++                        return acquired;
++                    }
++                    signal = this.leaseSignal;
++                }
  
-+    private CompletableFuture<LeaseGrant> requestLease(final long transactionId, final Thread ownerThread) {
-+        while (true) {
-+            final Lease observed = this.activeLease.get();
-+            if (observed != null && observed.ownerThread == ownerThread) {
-+                observed.depth.incrementAndGet();
-+                return CompletableFuture.completedFuture(new LeaseGrant(observed, EnterResult.REENTRANT));
-+            }
-+            if (observed != null && !observed.ownerThread.isAlive()) {
-+                this.recoverAbandonedLease(observed);
-+                continue;
-+            }
-+
-+            synchronized (this.leaseQueueLock) {
-+                final Lease current = this.activeLease.get();
-+                if (current != observed) {
-+                    continue;
++                if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
++                    OwnerDomainExecutor.awaitCooperatively(signal, operation);
++                } else {
++                    awaitLease(signal, operation);
 +                }
-+                if (current == null && this.queuedLeases.isEmpty()) {
-+                    final Lease created = new Lease(transactionId, ownerThread, 1);
-+                    if (this.activeLease.compareAndSet(null, created)) {
-+                        return CompletableFuture.completedFuture(new LeaseGrant(created, EnterResult.ACQUIRED));
-+                    }
-+                    continue;
-+                }
-+
-+                for (final LeaseRequest queued : this.queuedLeases) {
-+                    if (queued.ownerThread == ownerThread) {
-+                        ++queued.depth;
-+                        return queued.granted.thenApply(grant -> new LeaseGrant(grant.lease(), EnterResult.REENTRANT));
-+                    }
-+                }
-+
-+                final LeaseRequest request = new LeaseRequest(transactionId, ownerThread);
-+                this.queuedLeases.addLast(request);
-+                this.queuedLeaseCount.incrementAndGet();
-+                return request.granted;
 +            }
++        } finally {
++            this.queuedHandoffs.decrementAndGet();
 +        }
 +    }
 +
@@ -392,14 +367,15 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
 +        final long transactionId,
 +        final @Nullable CompatibilityTransaction transaction,
 +        final boolean strictFallback,
-+        final String path
++        final String path,
++        final boolean queuedHandoff
 +    ) {
 +        final Thread currentThread = Thread.currentThread();
          while (true) {
              final Lease current = this.activeLease.get();
              if (current == null) {
 -                final Lease created = new Lease(this.plugin, transactionId, currentThread);
-+                if (this.queuedLeaseCount.get() != 0) {
++                if (!queuedHandoff && this.queuedHandoffs.get() != 0) {
 +                    return new Scope(EnterResult.BUSY, this, null, null, null);
 +                }
 +                final Lease created = new Lease(transactionId, currentThread, 1);
@@ -443,7 +419,7 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
              }
  
              return new Scope(
-@@ -138,7 +200,97 @@ public final class CompatibilityApartment {
+@@ -138,7 +160,63 @@ public final class CompatibilityApartment {
          if (depth > 0) {
              return;
          }
@@ -451,60 +427,26 @@ index 63009af5233851977b4bb84099b8de84e9e7a2e7..74c1c5e4fa2bba00e59b09191f8e7894
 +        if (depth < 0 || !this.activeLease.compareAndSet(lease, null)) {
 +            throw new IllegalStateException("Compatibility apartment lease released out of order for " + this.plugin.getPluginMeta().getName());
 +        }
-+        this.promoteQueuedLease();
++        this.signalLeaseChange();
 +    }
 +
 +    private void recoverAbandonedLease(final Lease lease) {
 +        if (!lease.ownerThread.isAlive() && this.activeLease.compareAndSet(lease, null)) {
-+            this.promoteQueuedLease();
++            this.signalLeaseChange();
 +        }
 +    }
 +
-+    private void promoteQueuedLease() {
-+        if (this.queuedLeaseCount.get() == 0 || this.activeLease.get() != null) {
-+            return;
++    private void signalLeaseChange() {
++        final CompletableFuture<Void> signal;
++        synchronized (this.leaseSignalLock) {
++            signal = this.leaseSignal;
++            this.leaseSignal = new CompletableFuture<>();
 +        }
-+
-+        LeaseRequest next = null;
-+        Lease granted = null;
-+        ArrayDeque<LeaseRequest> abandoned = null;
-+        synchronized (this.leaseQueueLock) {
-+            if (this.activeLease.get() != null) {
-+                return;
-+            }
-+            while ((next = this.queuedLeases.pollFirst()) != null) {
-+                this.queuedLeaseCount.decrementAndGet();
-+                if (next.ownerThread.isAlive()) {
-+                    granted = new Lease(next.transactionId, next.ownerThread, next.depth);
-+                    if (!this.activeLease.compareAndSet(null, granted)) {
-+                        this.queuedLeases.addFirst(next);
-+                        this.queuedLeaseCount.incrementAndGet();
-+                        next = null;
-+                        granted = null;
-+                    }
-+                    break;
-+                }
-+                if (abandoned == null) {
-+                    abandoned = new ArrayDeque<>();
-+                }
-+                abandoned.addLast(next);
-+            }
-+        }
-+
-+        if (abandoned != null) {
-+            for (final LeaseRequest request : abandoned) {
-+                request.granted.completeExceptionally(new IllegalStateException(
-+                    "Compatibility apartment waiter terminated before acquiring " + this.plugin.getPluginMeta().getName()
-+                ));
-+            }
-+        }
-+        if (next != null) {
-+            next.granted.complete(new LeaseGrant(granted, EnterResult.ACQUIRED));
-+        }
++        signal.complete(null);
 +    }
 +
 +    int queuedLeaseCount() {
-+        return this.queuedLeaseCount.get();
++        return this.queuedHandoffs.get();
 +    }
 +
 +    private Scope openScope(
@@ -1076,10 +1018,10 @@ index b9adac0a54e18f7d662e6cd63403a729145b16a4..2886d4c00ab68832eb789ef00f4b7cff
              return NamedTextColor.YELLOW;
          }
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
-index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..498549d0183f47d269377fb5ff408ae1fc5801a5 100644
+index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da40662b1595e721c66c7db9c430875d0fe1d41b 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
-@@ -1,9 +1,19 @@
+@@ -1,9 +1,20 @@
  package io.papermc.paper.plugin.manager.compat;
  
 +import ca.spottedleaf.moonrise.common.util.TickThread;
@@ -1087,6 +1029,7 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..498549d0183f47d269377fb5ff408ae1
 +import java.util.ArrayList;
 +import java.util.Collections;
  import java.util.List;
++import java.util.concurrent.CompletableFuture;
 +import java.util.concurrent.CountDownLatch;
 +import java.util.concurrent.TimeUnit;
 +import java.util.concurrent.atomic.AtomicInteger;
@@ -1099,7 +1042,7 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..498549d0183f47d269377fb5ff408ae1
  import org.bukkit.event.Event;
  import org.bukkit.event.HandlerList;
  import org.bukkit.plugin.Plugin;
-@@ -41,11 +51,8 @@ class CompatibilityApartmentTest {
+@@ -41,11 +52,8 @@ class CompatibilityApartmentTest {
  
      @Test
      void sameThreadNestedDifferentTransactionReenters() {
@@ -1113,7 +1056,7 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..498549d0183f47d269377fb5ff408ae1
          final Plugin plugin = mockPlugin("LegacyPlugin");
          final CompatibilityApartment apartment = new CompatibilityApartment(plugin);
          final CompatibilityTransaction outer = transactionFor(plugin);
-@@ -66,12 +73,198 @@ class CompatibilityApartmentTest {
+@@ -66,12 +74,279 @@ class CompatibilityApartmentTest {
      }
  
      @Test
@@ -1192,7 +1135,7 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..498549d0183f47d269377fb5ff408ae1
 +    }
 +
 +    @Test
-+    void serializedEntriesAcquireInQueueOrderOnTheirCallingThreads() throws Exception {
++    void serializedEntriesResumeOnTheirCallingThreadsWithoutLoss() throws Exception {
 +        final Plugin plugin = mockPlugin("OrderedPlugin");
 +        final CompatibilityApartment apartment = new CompatibilityApartment(plugin);
 +        final CompatibilityTransaction holderTransaction = transactionFor(plugin);
@@ -1241,8 +1184,89 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..498549d0183f47d269377fb5ff408ae1
 +
 +        Assertions.assertFalse(holder.isAlive());
 +        Assertions.assertNull(failure.get());
-+        Assertions.assertEquals(List.of(0, 1, 2), order);
-+        Assertions.assertEquals(contenders, callbackThreads);
++        Assertions.assertEquals(3, order.size());
++        Assertions.assertEquals(3, callbackThreads.size());
++        for (int index = 0; index < order.size(); ++index) {
++            Assertions.assertSame(contenders.get(order.get(index)), callbackThreads.get(index));
++        }
++        final List<Integer> delivered = new ArrayList<>(order);
++        Collections.sort(delivered);
++        Assertions.assertEquals(List.of(0, 1, 2), delivered);
++    }
++
++    @Test
++    void serializedWaiterDoesNotOwnLeaseWhileCooperativeWorkDrains() throws Exception {
++        final Plugin plugin = mockPlugin("DrainPlugin");
++        final CompatibilityApartment apartment = new CompatibilityApartment(plugin);
++        final CompatibilityTransaction holderTransaction = transactionFor(plugin);
++        final CompatibilityTransaction waiterTransaction = transactionFor(plugin);
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++        Mockito.when(level.dimension()).thenReturn(Level.OVERWORLD);
++        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.region(level, 6, 8, "compatibility-drain-test");
++        final CountDownLatch leaseHeld = new CountDownLatch(1);
++        final CountDownLatch releaseLease = new CountDownLatch(1);
++        final CountDownLatch callbackStarted = new CountDownLatch(1);
++        final CountDownLatch releaseCallback = new CountDownLatch(1);
++        final AtomicReference<Throwable> holderFailure = new AtomicReference<>();
++        final AtomicReference<Throwable> ownerFailure = new AtomicReference<>();
++
++        final Thread holder = new Thread(() -> {
++            try (CompatibilityApartment.Scope ignored = apartment.enter(holderTransaction, false)) {
++                leaseHeld.countDown();
++                releaseLease.await();
++            } catch (final Throwable throwable) {
++                holderFailure.set(throwable);
++            }
++        }, "compatibility-drain-holder");
++        holder.setDaemon(true);
++        holder.start();
++        Assertions.assertTrue(leaseHeld.await(5L, TimeUnit.SECONDS));
++
++        final Thread ownerThread = new TickThread(() -> {
++            try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enter(owner);
++                 CompatibilityApartment.Scope scope = apartment.enterSerialized(waiterTransaction, true, "test:draining-handoff")) {
++                Assertions.assertTrue(scope.acquired());
++            } catch (final Throwable throwable) {
++                ownerFailure.set(throwable);
++            }
++        }, "compatibility-drain-owner");
++        ownerThread.setDaemon(true);
++        ownerThread.start();
++        awaitQueuedLeases(apartment, 1);
++
++        final CompletableFuture<String> drainingCallback = OwnerDomainExecutor.supply(owner, () -> {
++            callbackStarted.countDown();
++            try {
++                releaseCallback.await();
++            } catch (final InterruptedException interruptedException) {
++                Thread.currentThread().interrupt();
++                throw new AssertionError(interruptedException);
++            }
++            return "drained";
++        });
++        Assertions.assertTrue(callbackStarted.await(5L, TimeUnit.SECONDS));
++
++        releaseLease.countDown();
++        holder.join(5_000L);
++        Assertions.assertFalse(holder.isAlive());
++        Assertions.assertNull(holderFailure.get());
++
++        try (CompatibilityApartment.Scope probe = apartment.enter(transactionFor(plugin), false)) {
++            Assertions.assertEquals(CompatibilityApartment.EnterResult.BUSY, probe.result());
++            Assertions.assertNull(probe.busyLease(), "a waiter must not own the lease before its callback resumes");
++        } finally {
++            releaseCallback.countDown();
++        }
++
++        ownerThread.join(5_000L);
++        Assertions.assertFalse(ownerThread.isAlive(), "owner-side compatibility handoff did not resume");
++        Assertions.assertNull(ownerFailure.get());
++        Assertions.assertEquals("drained", drainingCallback.join());
++        try (CompatibilityApartment.Scope finalScope = apartment.enter(transactionFor(plugin), false)) {
++            Assertions.assertTrue(finalScope.acquired(), "the apartment remained stranded after cooperative work drained");
++        }
 +    }
 +
 +    @Test
