@@ -664,10 +664,10 @@ index af4f7bf952f52dbc43de69d20bc63bfa887076c2..da74fc87491bed529212f6a2f6143026
                  }
                  final StagedSpawn s = spawns.get(i);
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
-index 1d3095b897c1cd80be812baa2ec0e0866bc42d09..65fcc768b6af4bd7df384786a157f08939fd56f3 100644
+index 289e5a36a638fd7366999278477c4e479f867945..b90ac0d77d623dccb1adcf8c79097bca8561f56a 100644
 --- a/net/minecraft/server/threading/TickRegions.java
 +++ b/net/minecraft/server/threading/TickRegions.java
-@@ -18,11 +18,13 @@ import java.util.Iterator;
+@@ -20,11 +20,13 @@ import java.util.Iterator;
  import java.util.List;
  import java.util.Map;
  import java.util.Objects;
@@ -684,7 +684,7 @@ index 1d3095b897c1cd80be812baa2ec0e0866bc42d09..65fcc768b6af4bd7df384786a157f089
  import java.util.concurrent.atomic.AtomicLong;
  import java.util.concurrent.atomic.AtomicInteger;
  import java.util.concurrent.atomic.AtomicReference;
-@@ -125,10 +127,9 @@ public class TickRegions {
+@@ -127,10 +129,9 @@ public class TickRegions {
      private static final ThreadLocal<@Nullable RegionContext> CURRENT_CONTEXT = new ThreadLocal<>();
      private static final Map<ServerLevel, WorldSchedulerState> SCHEDULER_STATES = new ConcurrentHashMap<>();
      private static final RegionRuntime REGION_RUNTIME = new RegionRuntime();
@@ -698,7 +698,7 @@ index 1d3095b897c1cd80be812baa2ec0e0866bc42d09..65fcc768b6af4bd7df384786a157f089
      private static final java.util.concurrent.atomic.LongAdder OWNERSHIP_CHECKS = new java.util.concurrent.atomic.LongAdder();
      private static final AtomicLong OWNERSHIP_FAILURES = new AtomicLong();
      private static final AtomicLong LEASE_CLAIM_FAILURES = new AtomicLong();
-@@ -179,6 +180,19 @@ public class TickRegions {
+@@ -181,6 +182,19 @@ public class TickRegions {
          }
      }
  
@@ -718,7 +718,7 @@ index 1d3095b897c1cd80be812baa2ec0e0866bc42d09..65fcc768b6af4bd7df384786a157f089
      public static int getRegionChunkShift() {
          return ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ThreadedTicketLevelPropagator.SECTION_SHIFT;
      }
-@@ -735,68 +749,277 @@ public class TickRegions {
+@@ -737,68 +751,277 @@ public class TickRegions {
      }
  
      /**
@@ -1051,7 +1051,7 @@ index 1d3095b897c1cd80be812baa2ec0e0866bc42d09..65fcc768b6af4bd7df384786a157f089
          }
      }
  
-@@ -1142,46 +1365,42 @@ public class TickRegions {
+@@ -1144,46 +1367,42 @@ public class TickRegions {
          stateFor(world).drainMailbox();
      }
  

@@ -11,7 +11,7 @@ index 42a55c30dc3f533a4319410e9948b6086c004124..2c47773441282e1c8e4ed762b4f55497
 @@ -169,6 +169,31 @@ public class TickRegionsCooperativeDispatchTest {
          });
      }
-
+ 
 +    @Test
 +    public void globalWaitTaskRunsWithGlobalOwnerOnlyOnServerThread() {
 +        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
@@ -61,7 +61,7 @@ index 8b746a2bb14ef9a1f64b75c3d9cc1a57996f816d..4322a7f69ba03f2b46aba2f100608fe1
  import org.junit.jupiter.api.Assertions;
 @@ -94,7 +96,7 @@ class OwnerDomainExecutorCooperativeWaitTest {
      }
-
+ 
      @Test
 -    void cooperativeWaitPrioritizesTaskCompletingAwaitedFuture() throws InterruptedException {
 +    void cooperativeWaitPreservesEarlierSameOwnerTask() throws InterruptedException {
@@ -115,12 +115,12 @@ index 8b746a2bb14ef9a1f64b75c3d9cc1a57996f816d..4322a7f69ba03f2b46aba2f100608fe1
 +        Assertions.assertEquals(List.of("predecessor", "target"), order);
 +        Assertions.assertEquals(0, eventLoop.getPendingTasksCount());
      }
-
+ 
      @Test
 @@ -205,6 +222,272 @@ class OwnerDomainExecutorCooperativeWaitTest {
          Assertions.assertEquals(0, OwnerDomainExecutor.activeCooperativeWaits());
      }
-
+ 
 +    @Test
 +    void cooperativeWaitRunsCompletingTaskOwnedByAnIdleRegion() throws InterruptedException {
 +        final MinecraftServer server = Mockito.mock(MinecraftServer.class);

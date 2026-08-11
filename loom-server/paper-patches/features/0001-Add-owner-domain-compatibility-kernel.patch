@@ -816,6 +816,24 @@ index 2a298ec2c95e9cc913926324dbbf192caa38b05f..fb62c3167fd7ddf22cbbe2433f610c48
              eventSet.add(new RegisteredListener(listener, executor, eh.priority(), plugin, eh.ignoreCancelled()));
          }
          return ret;
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java
+index 7b520d3955f271d1dc8b38c3c0fdf0acd3a521a5..0ae92faed6cf30720f01c9c2faec7272e0964eac 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java
+@@ -274,6 +274,13 @@ class PaperPluginInstanceManager {
+                 + pluginName + " (Is it up to date?)", ex, plugin); // Paper
+         }
+ 
++        try {
++            net.minecraft.server.threading.TickRegions.cancelTasks(plugin);
++        } catch (Throwable ex) {
++            this.handlePluginException("Error occurred (in the plugin loader) while cancelling region tasks for "
++                + pluginName + " (Is it up to date?)", ex, plugin);
++        }
++
+         try {
+             this.server.getAsyncScheduler().cancelTasks(plugin);
+         } catch (Throwable ex) {
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperPluginManagerImpl.java b/src/main/java/io/papermc/paper/plugin/manager/PaperPluginManagerImpl.java
 index 097500a59336db1bbfffcd1aa4cff7a8586e46ec..3a3b1fb1f363e217393813a81a9d411bee2a4381 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/PaperPluginManagerImpl.java
@@ -2707,10 +2725,18 @@ index 879a3b3c6c6266ab23288b4adaeb5eef2a80803b..021625f2d6af9ca62fedbb97cd1695b6
 \ No newline at end of file
 +}
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
-index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c8636f2c9 100644
+index 783a46529621a59437ceaf56f1a3ef6346f0e90b..0e874bc340f775424bec27ba2921ccc565ec6696 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
-@@ -6,7 +6,9 @@ import java.util.ArrayList;
+@@ -1,12 +1,17 @@
+ package io.papermc.paper.plugin.manager.compat;
+ 
+ import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.io.InputStream;
++import java.io.InputStreamReader;
++import java.nio.charset.StandardCharsets;
+ import java.util.ArrayDeque;
+ import java.util.ArrayList;
  import java.util.Comparator;
  import java.util.Deque;
  import java.util.List;
@@ -2720,7 +2746,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
  import java.util.concurrent.ConcurrentHashMap;
  import java.util.concurrent.atomic.LongAdder;
  import org.bukkit.plugin.Plugin;
-@@ -26,6 +28,14 @@ public final class PluginCompatibilityProfile {
+@@ -26,6 +31,14 @@ public final class PluginCompatibilityProfile {
          }
      }
  
@@ -2735,7 +2761,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
      public enum EscalationReason {
          STATIC_INTERNAL_HINT,
          ORDERED_EVENT_LANE,
-@@ -54,11 +64,14 @@ public final class PluginCompatibilityProfile {
+@@ -54,11 +67,14 @@ public final class PluginCompatibilityProfile {
          long ownerRpcWaitNanos,
          long barrierTimeNanos,
          long orderedTransactions,
@@ -2750,7 +2776,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
          List<Escalation> escalations,
          List<EventCost> hotEvents
      ) {
-@@ -68,6 +81,7 @@ public final class PluginCompatibilityProfile {
+@@ -68,6 +84,7 @@ public final class PluginCompatibilityProfile {
      }
  
      private static final int MAX_ESCALATIONS = 64;
@@ -2758,7 +2784,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
  
      private final Plugin plugin;
      private final String pluginName;
-@@ -79,18 +93,40 @@ public final class PluginCompatibilityProfile {
+@@ -79,18 +96,40 @@ public final class PluginCompatibilityProfile {
      private final LongAdder ownerRpcWaitNanos = new LongAdder();
      private final LongAdder barrierTimeNanos = new LongAdder();
      private final LongAdder orderedTransactions = new LongAdder();
@@ -2779,7 +2805,8 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
      public PluginCompatibilityProfile(final Plugin plugin) {
          this.plugin = plugin;
          this.pluginName = plugin.getPluginMeta().getName();
-         this.mode = initialMode(plugin.getPluginMeta());
+-        this.mode = initialMode(plugin.getPluginMeta());
++        this.mode = initialMode(plugin);
 +
 +        final List<String> staticHints = staticInternalHints(this.pluginName);
 +        if (!staticHints.isEmpty()) {
@@ -2799,7 +2826,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
      }
  
      public Plugin plugin() {
-@@ -105,16 +141,29 @@ public final class PluginCompatibilityProfile {
+@@ -105,16 +144,29 @@ public final class PluginCompatibilityProfile {
          return this.mode;
      }
  
@@ -2830,7 +2857,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
          this.monitorMutationAttempts.increment();
          this.escalate(Mode.LEGACY_ORDERED, EscalationReason.MONITOR_MUTATION, detail);
          if (this.monitorMutationAttempts.longValue() >= 3L) {
-@@ -123,6 +172,7 @@ public final class PluginCompatibilityProfile {
+@@ -123,6 +175,7 @@ public final class PluginCompatibilityProfile {
      }
  
      public void noteAsyncBukkitAccess(final String detail) {
@@ -2838,7 +2865,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
          this.asyncBukkitViolations.increment();
          this.escalate(Mode.LEGACY_INTERNAL, EscalationReason.ASYNC_BUKKIT_ACCESS, detail);
          if (this.asyncBukkitViolations.longValue() >= 2L) {
-@@ -131,6 +181,7 @@ public final class PluginCompatibilityProfile {
+@@ -131,6 +184,7 @@ public final class PluginCompatibilityProfile {
      }
  
      public void noteOwnerDomainWaitViolation(final String detail) {
@@ -2846,7 +2873,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
          this.ownerDomainWaitViolations.increment();
          this.escalate(Mode.LEGACY_STRICT, EscalationReason.OWNER_BLOCKING_WAIT, detail);
      }
-@@ -149,15 +200,29 @@ public final class PluginCompatibilityProfile {
+@@ -149,15 +203,29 @@ public final class PluginCompatibilityProfile {
          this.escalate(Mode.REFUSED, EscalationReason.REFUSAL, detail);
      }
  
@@ -2876,7 +2903,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
      public void noteBarrierTimeNanos(final long nanos) {
          this.barrierTimeNanos.add(Math.max(0L, nanos));
      }
-@@ -174,16 +239,37 @@ public final class PluginCompatibilityProfile {
+@@ -174,16 +242,37 @@ public final class PluginCompatibilityProfile {
              this.ownerRpcWaitNanos.longValue(),
              this.barrierTimeNanos.longValue(),
              this.orderedTransactions.longValue(),
@@ -2914,7 +2941,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
      private List<EventCost> hotEvents(final int limit) {
          final List<EventCost> eventCosts = new ArrayList<>(this.callbackNanosByEvent.size());
          for (final Map.Entry<String, LongAdder> entry : this.callbackNanosByEvent.entrySet()) {
-@@ -199,9 +285,10 @@ public final class PluginCompatibilityProfile {
+@@ -199,9 +288,10 @@ public final class PluginCompatibilityProfile {
      private void escalate(final Mode requiredMode, final EscalationReason reason, final String detail) {
          final Mode from = this.mode;
          final Mode to = from.atLeast(requiredMode) ? from : requiredMode;
@@ -2927,15 +2954,18 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
          final Escalation escalation = new Escalation(System.currentTimeMillis(), reason, from, to, detail);
          synchronized (this.escalationLock) {
              this.escalations.addLast(escalation);
-@@ -209,11 +296,50 @@ public final class PluginCompatibilityProfile {
+@@ -209,13 +299,53 @@ public final class PluginCompatibilityProfile {
                  this.escalations.removeFirst();
              }
          }
 +        if (to == Mode.REFUSED) {
 +            this.pathStates.replaceAll((ignored, existing) -> existing == State.FORCED_SERIAL_FALLBACK ? existing : State.REFUSED);
 +        }
-+    }
-+
+     }
+ 
+-    private static Mode initialMode(final PluginMeta meta) {
+-        final String name = meta.getName().toLowerCase(java.util.Locale.ROOT);
+-        final String mainClass = meta.getMainClass().toLowerCase(java.util.Locale.ROOT);
 +    private void markPathState(final String path, final State desiredState) {
 +        final String normalized = normalizePath(path);
 +        this.pathStates.compute(normalized, (ignored, existing) -> {
@@ -2970,18 +3000,38 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
 +            return "<unknown-path>";
 +        }
 +        return path.trim();
-     }
++    }
  
-     private static Mode initialMode(final PluginMeta meta) {
--        final String name = meta.getName().toLowerCase(java.util.Locale.ROOT);
--        final String mainClass = meta.getMainClass().toLowerCase(java.util.Locale.ROOT);
+-        if (name.contains("loom") || mainClass.contains("loom")) {
++    private static Mode initialMode(final Plugin plugin) {
++        final PluginMeta meta = plugin.getPluginMeta();
 +        final String name = meta.getName().toLowerCase(Locale.ROOT);
 +        final String mainClass = meta.getMainClass().toLowerCase(Locale.ROOT);
- 
-         if (name.contains("loom") || mainClass.contains("loom")) {
++
++        if (declaresLoomSupport(plugin)) {
              return Mode.NATIVE_LOOM_AWARE;
-@@ -231,13 +357,28 @@ public final class PluginCompatibilityProfile {
+         }
  
+@@ -229,15 +359,46 @@ public final class PluginCompatibilityProfile {
+         return Mode.LEGACY_NORMAL;
+     }
+ 
++    private static boolean declaresLoomSupport(final Plugin plugin) {
++        for (final String manifest : List.of("paper-plugin.yml", "plugin.yml")) {
++            try (InputStream stream = plugin.getResource(manifest)) {
++                if (stream == null) {
++                    continue;
++                }
++                return org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(
++                    new InputStreamReader(stream, StandardCharsets.UTF_8)
++                ).getBoolean("loom-supported", false);
++            } catch (final Exception ignored) {
++                return false;
++            }
++        }
++        return false;
++    }
++
      private static boolean containsInternalDependency(final List<String> dependencies) {
          for (final String dependency : dependencies) {
 -            if (containsInternalHint(dependency.toLowerCase(java.util.Locale.ROOT))) {
@@ -3010,7 +3060,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
      private static boolean containsInternalHint(final String text) {
          return text.contains("protocol")
              || text.contains("packet")
-@@ -248,4 +389,12 @@ public final class PluginCompatibilityProfile {
+@@ -248,4 +409,12 @@ public final class PluginCompatibilityProfile {
              || text.contains("anticheat")
              || text.contains("npc");
      }
@@ -3025,8 +3075,47 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..682cea8cecaad40fa281fac81f516b4c
 +        return snapshot;
 +    }
 +}
+diff --git a/src/main/java/io/papermc/paper/threadedregions/scheduler/FallbackRegionScheduler.java b/src/main/java/io/papermc/paper/threadedregions/scheduler/FallbackRegionScheduler.java
+index 94056d61a304ee012ae1828a33412516095f996f..ffb35ebff2ee1698be04b33807601b71fc8e902a 100644
+--- a/src/main/java/io/papermc/paper/threadedregions/scheduler/FallbackRegionScheduler.java
++++ b/src/main/java/io/papermc/paper/threadedregions/scheduler/FallbackRegionScheduler.java
+@@ -1,6 +1,8 @@
+ package io.papermc.paper.threadedregions.scheduler;
+ 
++import net.minecraft.server.threading.TickRegions;
+ import org.bukkit.World;
++import org.bukkit.craftbukkit.CraftWorld;
+ import org.bukkit.plugin.Plugin;
+ import org.jetbrains.annotations.NotNull;
+ 
+@@ -10,21 +12,21 @@ public final class FallbackRegionScheduler implements RegionScheduler {
+ 
+     @Override
+     public void execute(@NotNull final Plugin plugin, @NotNull final World world, final int chunkX, final int chunkZ, @NotNull final Runnable run) {
+-        plugin.getServer().getGlobalRegionScheduler().execute(plugin, run);
++        TickRegions.execute(plugin, ((CraftWorld) world).getHandle(), chunkX, chunkZ, run);
+     }
+ 
+     @Override
+     public @NotNull ScheduledTask run(@NotNull final Plugin plugin, @NotNull final World world, final int chunkX, final int chunkZ, @NotNull final Consumer<ScheduledTask> task) {
+-        return plugin.getServer().getGlobalRegionScheduler().run(plugin, task);
++        return TickRegions.run(plugin, ((CraftWorld) world).getHandle(), chunkX, chunkZ, task);
+     }
+ 
+     @Override
+     public @NotNull ScheduledTask runDelayed(@NotNull final Plugin plugin, @NotNull final World world, final int chunkX, final int chunkZ, @NotNull final Consumer<ScheduledTask> task, final long delayTicks) {
+-        return plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin, task, delayTicks);
++        return TickRegions.runDelayed(plugin, ((CraftWorld) world).getHandle(), chunkX, chunkZ, task, delayTicks);
+     }
+ 
+     @Override
+     public @NotNull ScheduledTask runAtFixedRate(@NotNull final Plugin plugin, @NotNull final World world, final int chunkX, final int chunkZ, @NotNull final Consumer<ScheduledTask> task, final long initialDelayTicks, final long periodTicks) {
+-        return plugin.getServer().getGlobalRegionScheduler().runAtFixedRate(plugin, task, initialDelayTicks, periodTicks);
++        return TickRegions.runAtFixedRate(plugin, ((CraftWorld) world).getHandle(), chunkX, chunkZ, task, initialDelayTicks, periodTicks);
+     }
+ }
 diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
-index 17b6275956c09e827201a3eb9bf6ee1521334bd2..43a047d0d4acbdfee4f6582e4dda8cbd7fef5aae 100644
+index 446b079afe2c1b9b24651c81766b6155e2f51a62..c6340f86e3a14fc3ff4ff02dcec566c79dab24fd 100644
 --- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
 +++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
 @@ -246,7 +246,6 @@ import org.bukkit.plugin.PluginLoadOrder;
@@ -4053,13 +4142,15 @@ index 1da4f39a3f418115034b49d6fa8715f2e4bd2831..d59b1d22bb7fd50395ce18b0d5ce05b8
          };
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..0521fd22f4dd6b434634f313ed54d3f3181a2815
+index 0000000000000000000000000000000000000000..3d9fe045b61b576d8b32caaf33a9273fc009c9bf
 --- /dev/null
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,99 @@
 +package io.papermc.paper.plugin.manager.compat;
 +
 +import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.io.ByteArrayInputStream;
++import java.nio.charset.StandardCharsets;
 +import java.util.List;
 +import java.util.logging.Logger;
 +import org.bukkit.plugin.Plugin;
@@ -4077,16 +4168,22 @@ index 0000000000000000000000000000000000000000..0521fd22f4dd6b434634f313ed54d3f3
 +        SHOULD_NOT_WORK
 +    }
 +
-+    record MatrixEntry(String pluginName, String mainClass, List<String> dependencies, ExpectedOutcome expectedOutcome) {
++    record MatrixEntry(
++        String pluginName,
++        String mainClass,
++        List<String> dependencies,
++        boolean loomSupported,
++        ExpectedOutcome expectedOutcome
++    ) {
 +    }
 +
 +    @Test
 +    void matrixContainsAllCompatibilityOutcomes() {
 +        final List<MatrixEntry> matrix = List.of(
-+            new MatrixEntry("LoomNativeTools", "com.example.loom.NativeTools", List.of(), ExpectedOutcome.SHOULD_WORK),
-+            new MatrixEntry("OldClaims", "com.example.claims.OldClaims", List.of("Vault"), ExpectedOutcome.SHOULD_DEGRADE),
-+            new MatrixEntry("PacketBridge", "com.example.packet.PacketBridge", List.of("ProtocolLib"), ExpectedOutcome.SHOULD_DEGRADE),
-+            new MatrixEntry("UnsafeNativeMutator", "com.example.native.UnsafeNativeMutator", List.of(), ExpectedOutcome.SHOULD_NOT_WORK)
++            new MatrixEntry("NativeTools", "com.example.NativeTools", List.of(), true, ExpectedOutcome.SHOULD_WORK),
++            new MatrixEntry("OldClaims", "com.example.claims.OldClaims", List.of("Vault"), false, ExpectedOutcome.SHOULD_DEGRADE),
++            new MatrixEntry("PacketBridge", "com.example.packet.PacketBridge", List.of("ProtocolLib"), false, ExpectedOutcome.SHOULD_DEGRADE),
++            new MatrixEntry("UnsafeNativeMutator", "com.example.native.UnsafeNativeMutator", List.of(), false, ExpectedOutcome.SHOULD_NOT_WORK)
 +        );
 +
 +        boolean sawWork = false;
@@ -4095,7 +4192,7 @@ index 0000000000000000000000000000000000000000..0521fd22f4dd6b434634f313ed54d3f3
 +
 +        for (final MatrixEntry entry : matrix) {
 +            final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(
-+                mockPlugin(entry.pluginName(), entry.mainClass(), entry.dependencies())
++                mockPlugin(entry.pluginName(), entry.mainClass(), entry.dependencies(), entry.loomSupported())
 +            );
 +
 +            if (entry.expectedOutcome() == ExpectedOutcome.SHOULD_NOT_WORK) {
@@ -4124,7 +4221,12 @@ index 0000000000000000000000000000000000000000..0521fd22f4dd6b434634f313ed54d3f3
 +        Assertions.assertTrue(sawNotWork, "Matrix should include should-NOT-work plugin");
 +    }
 +
-+    private static Plugin mockPlugin(final String name, final String mainClass, final List<String> dependencies) {
++    private static Plugin mockPlugin(
++        final String name,
++        final String mainClass,
++        final List<String> dependencies,
++        final boolean loomSupported
++    ) {
 +        final PluginMeta meta = Mockito.mock(PluginMeta.class);
 +        Mockito.when(meta.getName()).thenReturn(name);
 +        Mockito.when(meta.getMainClass()).thenReturn(mainClass);
@@ -4136,6 +4238,10 @@ index 0000000000000000000000000000000000000000..0521fd22f4dd6b434634f313ed54d3f3
 +        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
 +        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
 +        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        Mockito.when(plugin.getResource("plugin.yml")).thenAnswer(ignored -> loomSupported
++            ? new ByteArrayInputStream("loom-supported: true\n".getBytes(StandardCharsets.UTF_8))
++            : null
++        );
 +        return plugin;
 +    }
 +}
@@ -4404,16 +4510,52 @@ index a1e3974ac242e1ed63f27c98ba5bfd686e2b0c81..6da37be18083d7a9620f046b31ad3a71
 +    }
 +}
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
-index a8638b2b507cecac8ea0808651d2b864bf30d31e..5d283861d99c3f54ac8d7156b65569b699116156 100644
+index a8638b2b507cecac8ea0808651d2b864bf30d31e..647a89d341e2abfe301d582edb2b0a8188f88083 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
-@@ -47,6 +47,32 @@ class PluginCompatibilityProfileTest {
+@@ -1,6 +1,8 @@
+ package io.papermc.paper.plugin.manager.compat;
+ 
+ import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.io.ByteArrayInputStream;
++import java.nio.charset.StandardCharsets;
+ import java.util.List;
+ import java.util.logging.Logger;
+ import org.bukkit.plugin.Plugin;
+@@ -14,7 +16,7 @@ class PluginCompatibilityProfileTest {
+ 
+     @Test
+     void profileEscalatesToStrictAfterRepeatedMonitorMutation() {
+-        final Plugin plugin = mockPlugin("OldClaims", "com.example.OldClaims", List.of(), List.of());
++        final Plugin plugin = mockPlugin("OldClaims", "com.example.OldClaims", List.of(), List.of(), null, null);
+         final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
+ 
+         Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_NORMAL, profile.mode());
+@@ -29,7 +31,7 @@ class PluginCompatibilityProfileTest {
+ 
+     @Test
+     void internalPluginStartsInInternalMode() {
+-        final Plugin plugin = mockPlugin("ProtocolBridge", "com.example.protocol.Bridge", List.of("ProtocolLib"), List.of());
++        final Plugin plugin = mockPlugin("ProtocolBridge", "com.example.protocol.Bridge", List.of("ProtocolLib"), List.of(), null, null);
+         final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
+ 
+         Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_INTERNAL, profile.mode());
+@@ -37,7 +39,7 @@ class PluginCompatibilityProfileTest {
+ 
+     @Test
+     void refusalIsTerminalMode() {
+-        final Plugin plugin = mockPlugin("UnsafePlugin", "com.example.Unsafe", List.of(), List.of());
++        final Plugin plugin = mockPlugin("UnsafePlugin", "com.example.Unsafe", List.of(), List.of(), null, null);
+         final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
+ 
+         profile.noteRefusal("unsafe raw handles");
+@@ -47,11 +49,86 @@ class PluginCompatibilityProfileTest {
          Assertions.assertEquals(1L, profile.snapshot().refusals());
      }
  
 +    @Test
 +    void repeatedUnsafeInternalAccessEscalatesToStrict() {
-+        final Plugin plugin = mockPlugin("PacketMagic", "com.example.PacketMagic", List.of(), List.of());
++        final Plugin plugin = mockPlugin("PacketMagic", "com.example.PacketMagic", List.of(), List.of(), null, null);
 +        final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
 +
 +        profile.noteUnsafeInternalAccess("reflection target #1");
@@ -4426,7 +4568,14 @@ index a8638b2b507cecac8ea0808651d2b864bf30d31e..5d283861d99c3f54ac8d7156b65569b6
 +
 +    @Test
 +    void ordinaryOrderedTransactionsDoNotEscalateProfile() {
-+        final Plugin plugin = mockPlugin("LoomAware", "com.example.LoomAware", List.of(), List.of());
++        final Plugin plugin = mockPlugin(
++            "Bending",
++            "com.example.Bending",
++            List.of(),
++            List.of(),
++            null,
++            "loom-supported: true\n"
++        );
 +        final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
 +
 +        Assertions.assertEquals(PluginCompatibilityProfile.Mode.NATIVE_LOOM_AWARE, profile.mode());
@@ -4437,15 +4586,125 @@ index a8638b2b507cecac8ea0808651d2b864bf30d31e..5d283861d99c3f54ac8d7156b65569b6
 +        Assertions.assertEquals(1L, profile.snapshot().orderedTransactions());
 +    }
 +
++    @Test
++    void pluginNameDoesNotOptIntoNativeDispatch() {
++        final Plugin plugin = mockPlugin("Heirloom", "com.example.loom.Plugin", List.of(), List.of(), null, null);
++
++        Assertions.assertEquals(
++            PluginCompatibilityProfile.Mode.LEGACY_NORMAL,
++            new PluginCompatibilityProfile(plugin).mode()
++        );
++    }
++
++    @Test
++    void falseOrMalformedManifestDoesNotOptIntoNativeDispatch() {
++        final Plugin disabled = mockPlugin(
++            "DisabledOptIn", "com.example.Plugin", List.of(), List.of(), null, "loom-supported: false\n"
++        );
++        final Plugin malformed = mockPlugin(
++            "MalformedOptIn", "com.example.Plugin", List.of(), List.of(), null, "loom-supported: [\n"
++        );
++
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_NORMAL, new PluginCompatibilityProfile(disabled).mode());
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_NORMAL, new PluginCompatibilityProfile(malformed).mode());
++    }
++
++    @Test
++    void primaryManifestCannotBeOverriddenBySecondaryManifest() {
++        final Plugin plugin = mockPlugin(
++            "ConflictingOptIn",
++            "com.example.Plugin",
++            List.of(),
++            List.of(),
++            "loom-supported: false\n",
++            "loom-supported: true\n"
++        );
++
++        Assertions.assertEquals(
++            PluginCompatibilityProfile.Mode.LEGACY_NORMAL,
++            new PluginCompatibilityProfile(plugin).mode()
++        );
++    }
++
      private static Plugin mockPlugin(
          final String name,
          final String mainClass,
-@@ -66,4 +92,4 @@ class PluginCompatibilityProfileTest {
+         final List<String> dependencies,
+-        final List<String> softDependencies
++        final List<String> softDependencies,
++        final String paperManifest,
++        final String pluginManifest
+     ) {
+         final PluginMeta meta = Mockito.mock(PluginMeta.class);
+         Mockito.when(meta.getName()).thenReturn(name);
+@@ -64,6 +141,12 @@ class PluginCompatibilityProfileTest {
+         Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
+         Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
          Mockito.when(plugin.isEnabled()).thenReturn(true);
++        Mockito.when(plugin.getResource("paper-plugin.yml")).thenAnswer(ignored -> manifestStream(paperManifest));
++        Mockito.when(plugin.getResource("plugin.yml")).thenAnswer(ignored -> manifestStream(pluginManifest));
          return plugin;
      }
 -}
 \ No newline at end of file
++
++    private static ByteArrayInputStream manifestStream(final String manifest) {
++        return manifest == null ? null : new ByteArrayInputStream(manifest.getBytes(StandardCharsets.UTF_8));
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/threadedregions/scheduler/RegionSchedulerRoutingTest.java b/src/test/java/io/papermc/paper/threadedregions/scheduler/RegionSchedulerRoutingTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b4819ce1d3e1c865836385367a0cfabb72b753d6
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/threadedregions/scheduler/RegionSchedulerRoutingTest.java
+@@ -0,0 +1,48 @@
++package io.papermc.paper.threadedregions.scheduler;
++
++import java.util.function.Consumer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.TickRegions;
++import org.bukkit.craftbukkit.CraftWorld;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.MockedStatic;
++import org.mockito.Mockito;
++
++@Normal
++public class RegionSchedulerRoutingTest {
++
++    @Test
++    void everyApiShapeRoutesToTheRequestedOwner() {
++        final FallbackRegionScheduler scheduler = new FallbackRegionScheduler();
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        final CraftWorld world = Mockito.mock(CraftWorld.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        final Runnable runnable = Mockito.mock(Runnable.class);
++        @SuppressWarnings("unchecked")
++        final Consumer<ScheduledTask> callback = Mockito.mock(Consumer.class);
++        final ScheduledTask expected = Mockito.mock(ScheduledTask.class);
++        Mockito.when(world.getHandle()).thenReturn(level);
++
++        try (MockedStatic<TickRegions> runtime = Mockito.mockStatic(TickRegions.class)) {
++            runtime.when(() -> TickRegions.run(plugin, level, 2, -3, callback)).thenReturn(expected);
++            runtime.when(() -> TickRegions.runDelayed(plugin, level, 4, -5, callback, 6L)).thenReturn(expected);
++            runtime.when(() -> TickRegions.runAtFixedRate(plugin, level, 7, -8, callback, 9L, 10L)).thenReturn(expected);
++
++            scheduler.execute(plugin, world, 0, -1, runnable);
++            Assertions.assertSame(expected, scheduler.run(plugin, world, 2, -3, callback));
++            Assertions.assertSame(expected, scheduler.runDelayed(plugin, world, 4, -5, callback, 6L));
++            Assertions.assertSame(expected, scheduler.runAtFixedRate(plugin, world, 7, -8, callback, 9L, 10L));
++
++            runtime.verify(() -> TickRegions.execute(plugin, level, 0, -1, runnable));
++            runtime.verify(() -> TickRegions.run(plugin, level, 2, -3, callback));
++            runtime.verify(() -> TickRegions.runDelayed(plugin, level, 4, -5, callback, 6L));
++            runtime.verify(() -> TickRegions.runAtFixedRate(plugin, level, 7, -8, callback, 9L, 10L));
++            runtime.verifyNoMoreInteractions();
++        }
++
++        Mockito.verify(plugin, Mockito.never()).getServer();
++    }
 +}
 diff --git a/src/test/java/io/papermc/paper/util/KeepAliveTest.java b/src/test/java/io/papermc/paper/util/KeepAliveTest.java
 new file mode 100644
@@ -4505,6 +4764,153 @@ index 0000000000000000000000000000000000000000..99c26c98ff286572bf00855aff401e5e
 +        assertEquals(1, calculator.getAvgLatencyMS());
 +        assertEquals(threads * updatesPerThread, calculator.getAllNS().size());
 +    }
++}
+diff --git a/src/test/java/net/minecraft/server/threading/TickRegionsSchedulerTest.java b/src/test/java/net/minecraft/server/threading/TickRegionsSchedulerTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac4dc8b9af456d82b96bc9de0f5ce41c72c5fe80
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/TickRegionsSchedulerTest.java
+@@ -0,0 +1,119 @@
++package net.minecraft.server.threading;
++
++import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import net.minecraft.server.level.ServerLevel;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class TickRegionsSchedulerTest {
++
++    @Test
++    void oneShotTaskCannotRunTwice() {
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        final Plugin plugin = enabledPlugin();
++        final AtomicInteger executions = new AtomicInteger();
++
++        try {
++            final ScheduledTask task = TickRegions.run(plugin, level, 0, 0, ignored -> executions.incrementAndGet());
++            runNow(task);
++            runNow(task);
++
++            Assertions.assertEquals(1, executions.get());
++            Assertions.assertEquals(ScheduledTask.ExecutionState.FINISHED, task.getExecutionState());
++        } finally {
++            TickRegions.clearWorldState(level);
++        }
++    }
++
++    @Test
++    void cancellationDuringCallbackCannotRescheduleRepeatingTask() throws InterruptedException {
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        final Plugin plugin = enabledPlugin();
++        final CountDownLatch entered = new CountDownLatch(1);
++        final CountDownLatch release = new CountDownLatch(1);
++        final AtomicInteger executions = new AtomicInteger();
++
++        try {
++            final ScheduledTask task = TickRegions.runAtFixedRate(plugin, level, 0, 0, ignored -> {
++                executions.incrementAndGet();
++                entered.countDown();
++                try {
++                    if (!release.await(5L, TimeUnit.SECONDS)) {
++                        throw new AssertionError("Timed out waiting to release scheduler callback");
++                    }
++                } catch (final InterruptedException exception) {
++                    Thread.currentThread().interrupt();
++                    throw new AssertionError(exception);
++                }
++            }, 1L, 1L);
++
++            final Thread worker = new Thread(() -> runNow(task), "region-scheduler-cancel-test");
++            worker.start();
++            Assertions.assertTrue(entered.await(5L, TimeUnit.SECONDS));
++            Assertions.assertEquals(ScheduledTask.CancelledState.NEXT_RUNS_CANCELLED, task.cancel());
++            release.countDown();
++            worker.join(5000L);
++
++            Assertions.assertFalse(worker.isAlive());
++            runNow(task);
++            Assertions.assertEquals(1, executions.get());
++            Assertions.assertEquals(ScheduledTask.ExecutionState.CANCELLED, task.getExecutionState());
++        } finally {
++            release.countDown();
++            TickRegions.clearWorldState(level);
++        }
++    }
++
++    @Test
++    void disableRaceCancelsTaskAfterRegistration() {
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        final AtomicInteger enabledChecks = new AtomicInteger();
++        Mockito.when(plugin.isEnabled()).thenAnswer(ignored -> enabledChecks.getAndIncrement() == 0);
++
++        try {
++            final ScheduledTask task = TickRegions.runDelayed(plugin, level, 0, 0, ignored -> {
++                throw new AssertionError("Disabled task ran");
++            }, 20L);
++
++            Assertions.assertEquals(ScheduledTask.ExecutionState.CANCELLED, task.getExecutionState());
++            runNow(task);
++        } finally {
++            TickRegions.clearWorldState(level);
++        }
++    }
++
++    private static Plugin enabledPlugin() {
++        final Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
++
++    private static void runNow(final ScheduledTask task) {
++        try {
++            final Method runNow = task.getClass().getDeclaredMethod("runNow");
++            runNow.setAccessible(true);
++            runNow.invoke(task);
++        } catch (final InvocationTargetException exception) {
++            final Throwable cause = exception.getCause();
++            if (cause instanceof Error error) {
++                throw error;
++            }
++            if (cause instanceof RuntimeException runtimeException) {
++                throw runtimeException;
++            }
++            throw new AssertionError(cause);
++        } catch (final ReflectiveOperationException exception) {
++            throw new AssertionError(exception);
++        }
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/threading/TickRegionsSchedulerTestSuite.java b/src/test/java/net/minecraft/server/threading/TickRegionsSchedulerTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9e7d1cac0ee6924c91bcc3155c0767349aea724
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/TickRegionsSchedulerTestSuite.java
+@@ -0,0 +1,16 @@
++package net.minecraft.server.threading;
++
++import io.papermc.paper.threadedregions.scheduler.RegionSchedulerRoutingTest;
++import org.junit.platform.suite.api.ConfigurationParameter;
++import org.junit.platform.suite.api.IncludeTags;
++import org.junit.platform.suite.api.SelectClasses;
++import org.junit.platform.suite.api.Suite;
++import org.junit.platform.suite.api.SuiteDisplayName;
++
++@Suite
++@SuiteDisplayName("Owner scheduler")
++@IncludeTags("Normal")
++@SelectClasses({TickRegionsSchedulerTest.class, RegionSchedulerRoutingTest.class})
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class TickRegionsSchedulerTestSuite {
 +}
 diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnershipRouterTest.java b/src/test/java/net/minecraft/server/threading/runtime/OwnershipRouterTest.java
 new file mode 100644

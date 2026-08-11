@@ -11,7 +11,7 @@ index fdcbc63f30326f981703a36edec7c06e639f7193..fd66ecfe6bc0d29cf55a679bc31b2daa
 @@ -29,6 +29,11 @@ public class RegionRuntime {
      protected RegionRuntime() {
      }
-
+ 
 +    /**
 +     * Sentinel returned by {@link #tryClaimLease} when the bounds are already leased by another thread.
 +     */
@@ -43,7 +43,7 @@ index fdcbc63f30326f981703a36edec7c06e639f7193..fd66ecfe6bc0d29cf55a679bc31b2daa
 +    ) {
 +        return this.claimLeaseInternal(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread, false);
      }
-
+ 
      protected long claimLeaseForTesting(
 @@ -48,7 +69,7 @@ public class RegionRuntime {
          final int maxChunkZ,
@@ -52,7 +52,7 @@ index fdcbc63f30326f981703a36edec7c06e639f7193..fd66ecfe6bc0d29cf55a679bc31b2daa
 -        return this.claimLeaseInternal(worldKey, minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread);
 +        return this.claimLeaseInternal(worldKey, minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThread, true);
      }
-
+ 
      private long claimLeaseInternal(
 @@ -57,7 +78,8 @@ public class RegionRuntime {
          final int minChunkZ,
@@ -66,7 +66,7 @@ index fdcbc63f30326f981703a36edec7c06e639f7193..fd66ecfe6bc0d29cf55a679bc31b2daa
          Objects.requireNonNull(ownerThread, "Owner thread may not be null");
 @@ -66,7 +88,7 @@ public class RegionRuntime {
          }
-
+ 
          final long leaseId = this.nextLeaseId.getAndIncrement();
 -        this.ownershipByWorld
 +        final boolean claimed = this.ownershipByWorld
@@ -81,16 +81,16 @@ index fdcbc63f30326f981703a36edec7c06e639f7193..fd66ecfe6bc0d29cf55a679bc31b2daa
 +                this.nextRegionId,
 +                required
              );
-
+ 
 -        return leaseId;
 +        return claimed ? leaseId : NO_LEASE;
      }
-
+ 
      public void releaseLease(final ServerLevel world, final long leaseId) {
 @@ -244,7 +267,7 @@ public class RegionRuntime {
          private long retiredRegions;
          private long reusedRegionAssignments;
-
+ 
 -        private void claimLease(
 +        private boolean claimLease(
              final long leaseId,
@@ -125,18 +125,18 @@ index fdcbc63f30326f981703a36edec7c06e639f7193..fd66ecfe6bc0d29cf55a679bc31b2daa
                  this.lock.unlock();
              }
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
-index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde6ac9a3d4 100644
+index f6127c113dc272f9694a6ef3969b86c8f116bac1..ab2624d9f23633c322ad66d4dea8fc9c891414f9 100644
 --- a/net/minecraft/server/threading/TickRegions.java
 +++ b/net/minecraft/server/threading/TickRegions.java
-@@ -2,6 +2,7 @@ package net.minecraft.server.threading;
-
+@@ -3,6 +3,7 @@ package net.minecraft.server.threading;
+ import ca.spottedleaf.concurrentutil.util.ConcurrentUtil;
  import ca.spottedleaf.moonrise.common.util.TickThread;
  import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 +import net.minecraft.server.MinecraftServer;
  import net.minecraft.server.level.ServerLevel;
  import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
  import net.minecraft.util.Util;
-@@ -249,14 +250,72 @@ public class TickRegions {
+@@ -251,14 +252,72 @@ public class TickRegions {
              maxChunkX,
              maxChunkZ,
              previous,
@@ -151,7 +151,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
          CURRENT_CONTEXT.set(next);
          return next;
      }
-
+ 
 +    /**
 +     * Pushes a region context only when the bounds are free, returning null when another thread holds an
 +     * overlapping lease. Used by callers that can decline the work, so losing the race is an ordinary outcome
@@ -210,7 +210,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
      public static void popContext(final RegionContext context) {
          RegionContext current = CURRENT_CONTEXT.get();
          if (current != context) {
-@@ -279,7 +338,14 @@ public class TickRegions {
+@@ -281,7 +340,14 @@ public class TickRegions {
          try {
              current.ownerScope().close();
          } finally {
@@ -225,8 +225,8 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
 +            }
          }
      }
-
-@@ -290,7 +356,8 @@ public class TickRegions {
+ 
+@@ -292,7 +358,8 @@ public class TickRegions {
                  || current.minChunkZ() != expected.minChunkZ()
                  || current.maxChunkX() != expected.maxChunkX()
                  || current.maxChunkZ() != expected.maxChunkZ()
@@ -236,7 +236,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
                  return false;
              }
              current = current.previous();
-@@ -307,7 +374,7 @@ public class TickRegions {
+@@ -309,7 +376,7 @@ public class TickRegions {
          if (isCurrentThreadOwnerByContext(world, chunkX, chunkZ, currentThread.threadId())) {
              return true;
          }
@@ -244,8 +244,8 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
 +        if (!hasIsolatedOwnerView() && REGION_RUNTIME.isOwner(world, chunkX, chunkZ, currentThread)) {
              return true;
          }
-
-@@ -327,7 +394,7 @@ public class TickRegions {
+ 
+@@ -329,7 +396,7 @@ public class TickRegions {
          if (isCurrentThreadOwnerByContext(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread.threadId())) {
              return true;
          }
@@ -253,19 +253,19 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
 +        if (!hasIsolatedOwnerView() && REGION_RUNTIME.isOwner(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread)) {
              return true;
          }
-
-@@ -348,13 +415,18 @@ public class TickRegions {
+ 
+@@ -350,13 +417,18 @@ public class TickRegions {
          final Thread currentThread = Thread.currentThread();
          final long threadId = currentThread.threadId();
          return isCurrentThreadOwnerByContext(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, threadId)
 -            || REGION_RUNTIME.isOwner(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread);
 +            || (!hasIsolatedOwnerView() && REGION_RUNTIME.isOwner(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread));
      }
-
+ 
      public static @Nullable RegionContext currentContext() {
          return CURRENT_CONTEXT.get();
      }
-
+ 
 +    private static boolean hasIsolatedOwnerView() {
 +        final RegionContext context = CURRENT_CONTEXT.get();
 +        return context != null && context.isolatedOwnerView();
@@ -274,7 +274,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
      public static long getOwnershipCheckCount() {
          return OWNERSHIP_CHECKS.sum();
      }
-@@ -787,6 +859,7 @@ public class TickRegions {
+@@ -789,6 +861,7 @@ public class TickRegions {
          boolean interrupted = Thread.interrupted();
          int idleSpins = 0;
          final boolean alreadyTickingWorld = RUNNING_WORLD_TICK.get();
@@ -282,7 +282,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
          batch.waiter = Thread.currentThread();
          try (OwnerDomainExecutor.Scope ignored = currentOwner == null
              ? null
-@@ -798,7 +871,9 @@ public class TickRegions {
+@@ -800,7 +873,9 @@ public class TickRegions {
                  // Preserve an acyclic progress rule: a coordinator always claims its own available
                  // work before entering an unrelated batch. Cross-batch helping is only needed once
                  // every local index is already claimed by an active helper.
@@ -293,10 +293,10 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
                      idleSpins = 0;
                      continue;
                  }
-@@ -830,6 +905,15 @@ public class TickRegions {
+@@ -832,6 +907,15 @@ public class TickRegions {
          return interrupted;
      }
-
+ 
 +    static boolean runQueuedGlobalWaitTask(final @Nullable MinecraftServer server) {
 +        if (server == null || Thread.currentThread() != server.getRunningThread()) {
 +            return false;
@@ -309,7 +309,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
      private static void parkIfIncomplete(final ParallelTaskBatch batch) {
          if (!batch.isComplete()) {
              LockSupport.park(batch);
-@@ -1236,7 +1320,7 @@ public class TickRegions {
+@@ -1238,7 +1322,7 @@ public class TickRegions {
          final int chunkZ,
          final long threadId
      ) {
@@ -318,7 +318,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
              if (context.ownerThreadId() == threadId && context.world() == world && context.contains(chunkX, chunkZ)) {
                  return true;
              }
-@@ -1252,7 +1336,7 @@ public class TickRegions {
+@@ -1254,7 +1338,7 @@ public class TickRegions {
          final int maxChunkZ,
          final long threadId
      ) {
@@ -327,19 +327,19 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
              if (context.ownerThreadId() == threadId
                  && context.world() == world
                  && context.contains(minChunkX, minChunkZ)
-@@ -1290,7 +1374,7 @@ public class TickRegions {
+@@ -1292,7 +1376,7 @@ public class TickRegions {
          final Thread currentThread = Thread.currentThread();
          final long threadId = currentThread.threadId();
          return isCurrentThreadOwnerByContext(world, chunkX, chunkZ, threadId)
 -            || REGION_RUNTIME.isOwner(world, chunkX, chunkZ, currentThread);
 +            || (!hasIsolatedOwnerView() && REGION_RUNTIME.isOwner(world, chunkX, chunkZ, currentThread));
      }
-
+ 
      private static long regionBucketKey(final int chunkX, final int chunkZ) {
-@@ -1438,6 +1522,44 @@ public class TickRegions {
+@@ -1440,6 +1524,44 @@ public class TickRegions {
          return stateFor(world).runQueuedOwnerTask(predicate);
      }
-
+ 
 +    /**
 +     * Runs one queued task the caller does not already own, under a freshly claimed lease for that task's
 +     * region. Only bounded regions are eligible, and only while no other thread owns them and they do not
@@ -381,7 +381,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
      // Loom - tick independent worlds through the same cooperative batch as region shards. The server thread
      // participates with its GLOBAL_CONTROL owner temporarily detached; nested world coordinators help ready
      // region work but do not recursively enter another world tick. Failures remain deterministic by world
-@@ -1691,6 +1813,10 @@ public class TickRegions {
+@@ -1693,6 +1815,10 @@ public class TickRegions {
          private long parallelMailboxDrainCount;
          private long mailboxBudgetSkipCount;
          private boolean mailboxOverflowWarned;
@@ -389,10 +389,10 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
 +            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
 +        private final java.util.Set<CrossRegionMessage> cooperativeMailboxClaims =
 +            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
-
+ 
          private WorldSchedulerState(final ServerLevel world) {
              this.world = world;
-@@ -1831,6 +1957,9 @@ public class TickRegions {
+@@ -1836,6 +1962,9 @@ public class TickRegions {
              synchronized (this.lock) {
                  for (final Iterator<RegionBoundTask> iterator = this.regionContinuations.iterator(); iterator.hasNext(); ) {
                      final RegionBoundTask candidate = iterator.next();
@@ -402,7 +402,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
                      if (predicate.test(candidate.task())) {
                          iterator.remove();
                          continuation = candidate.task();
-@@ -1850,6 +1979,9 @@ public class TickRegions {
+@@ -1855,6 +1984,9 @@ public class TickRegions {
                  if (continuation == null) {
                      for (final Iterator<CrossRegionMessage> iterator = this.mailbox.iterator(); iterator.hasNext(); ) {
                          final CrossRegionMessage candidate = iterator.next();
@@ -412,10 +412,10 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
                          if (predicate.test(candidate.action())) {
                              iterator.remove();
                              message = candidate;
-@@ -1882,14 +2014,190 @@ public class TickRegions {
+@@ -1887,14 +2019,190 @@ public class TickRegions {
              return false;
          }
-
+ 
 +        private boolean helpQueuedOwnerTask(final Predicate<Runnable> predicate) {
 +            final RegionBoundTask continuation;
 +            final CrossRegionMessage message;
@@ -605,7 +605,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
              }
              runRegionBoundTasksFromCurrentContext(this.world, continuations, "region-continuation");
          }
-@@ -1930,11 +2238,13 @@ public class TickRegions {
+@@ -1935,11 +2243,13 @@ public class TickRegions {
                  final int mailboxBudget = getAdaptiveMailboxBudget(this.world, available);
                  final int budgeted = Math.min(available, mailboxBudget);
                  final List<CrossRegionMessage> toDeliver = new ArrayList<>(budgeted);
@@ -621,9 +621,9 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
 +                    iterator.remove();
                      toDeliver.add(message);
                  }
-
-@@ -2212,6 +2522,9 @@ public class TickRegions {
-
+ 
+@@ -2217,6 +2527,9 @@ public class TickRegions {
+ 
                  for (final Iterator<CrossRegionMessage> iterator = this.mailbox.iterator(); iterator.hasNext(); ) {
                      final CrossRegionMessage message = iterator.next();
 +                    if (this.cooperativeMailboxClaims.contains(message)) {
@@ -632,7 +632,7 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
                      if (message.plugin() == plugin) {
                          iterator.remove();
                          ++this.droppedMessageCount;
-@@ -2634,9 +2947,12 @@ public class TickRegions {
+@@ -2662,9 +2975,12 @@ public class TickRegions {
          int maxChunkX,
          int maxChunkZ,
          @Nullable RegionContext previous,
@@ -644,14 +644,14 @@ index 57fbf6e2f24f92769d2d307975b76ac5b34a96fa..bd828bf286bb7f604b94ba5b809a8dde
 +        OwnerDomainExecutor.@Nullable Scope suspendedOwnerScope,
 +        boolean isolatedOwnerView
      ) {
-
+ 
          public boolean contains(final int chunkX, final int chunkZ) {
 diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 index d21de16dbf859cd0475852a46f60cccc9209d330..b17465ccf1ca5ab6b05c73181b7faba9a702cccb 100644
 --- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 +++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 @@ -2,8 +2,10 @@ package net.minecraft.server.threading.runtime;
-
+ 
  import com.mojang.logging.LogUtils;
  import java.util.EnumMap;
 +import java.util.IdentityHashMap;
@@ -680,13 +680,13 @@ index d21de16dbf859cd0475852a46f60cccc9209d330..b17465ccf1ca5ab6b05c73181b7faba9
      private static final java.util.concurrent.atomic.LongAdder[] EXECUTE_INLINE_BY_DOMAIN = createDomainCounters();
      private static final java.util.concurrent.atomic.LongAdder[] EXECUTE_HANDOFF_BY_DOMAIN = createDomainCounters();
 +    private static final AtomicLong OWNER_TASK_SEQUENCE = new AtomicLong();
-
+ 
      private OwnerDomainExecutor() {
      }
 @@ -338,6 +345,15 @@ public final class OwnerDomainExecutor {
          executeInternal(owner, task, null, null);
      }
-
+ 
 +    static void executeCompleting(
 +        final Owner owner,
 +        final Runnable task,
@@ -707,7 +707,7 @@ index d21de16dbf859cd0475852a46f60cccc9209d330..b17465ccf1ca5ab6b05c73181b7faba9
 +            signalCooperativeWaiters(completion);
 +        }
      }
-
+ 
      public static CompletableFuture<Void> submit(final Owner owner, final Runnable task) {
 @@ -450,20 +469,25 @@ public final class OwnerDomainExecutor {
          boolean interrupted = false;
@@ -740,7 +740,7 @@ index d21de16dbf859cd0475852a46f60cccc9209d330..b17465ccf1ca5ab6b05c73181b7faba9
 @@ -491,6 +515,145 @@ public final class OwnerDomainExecutor {
          return cooperativeWaits.length;
      }
-
+ 
 +    /**
 +     * Records that {@code awaited} cannot complete until {@code prerequisite} completes. Owner queues use
 +     * this metadata to find the exact continuation that can make a composed synchronous wait progress.
@@ -888,19 +888,19 @@ index d21de16dbf859cd0475852a46f60cccc9209d330..b17465ccf1ca5ab6b05c73181b7faba9
          private final Runnable task;
          private final @Nullable CompletableFuture<?> completion;
 +        private final long sequence;
-
+ 
          private OwnerTask(final Owner owner, final Runnable task, final @Nullable CompletableFuture<?> completion) {
              this.owner = owner;
              this.task = task;
              this.completion = completion;
 +            this.sequence = OWNER_TASK_SEQUENCE.getAndIncrement();
          }
-
+ 
          private boolean completes(final CompletableFuture<?> future) {
 -            return this.completion == future;
 +            return completionCanFinish(future, this.completion);
          }
-
+ 
          @Override
 @@ -710,6 +875,8 @@ public final class OwnerDomainExecutor {
          private final OwnerContext ownerContext;
@@ -909,12 +909,12 @@ index d21de16dbf859cd0475852a46f60cccc9209d330..b17465ccf1ca5ab6b05c73181b7faba9
 +        private final AtomicLong signalSequence = new AtomicLong();
 +        private volatile @Nullable CompletableFuture<?> awaitedFuture;
          private boolean accepting = true;
-
+ 
          private CooperativeWait(final Thread thread, final OwnerContext ownerContext, final String operation) {
 @@ -731,6 +898,15 @@ public final class OwnerDomainExecutor {
              return false;
          }
-
+ 
 +        private void await(final CompletableFuture<?> future) {
 +            this.awaitedFuture = future;
 +        }
@@ -929,7 +929,7 @@ index d21de16dbf859cd0475852a46f60cccc9209d330..b17465ccf1ca5ab6b05c73181b7faba9
                  return false;
 @@ -809,8 +985,13 @@ public final class OwnerDomainExecutor {
          }
-
+ 
          private void signal() {
 +            this.signalSequence.incrementAndGet();
              LockSupport.unpark(this.thread);
@@ -939,7 +939,7 @@ index d21de16dbf859cd0475852a46f60cccc9209d330..b17465ccf1ca5ab6b05c73181b7faba9
 +            return this.signalSequence.get();
 +        }
      }
-
+ 
      public static final class Scope implements AutoCloseable {
 diff --git a/net/minecraft/server/threading/runtime/OwnershipRouter.java b/net/minecraft/server/threading/runtime/OwnershipRouter.java
 index f75fa8ee15efa0ee6b99c56409d5cd2efd456cf7..c8d4c635157a1d398f614b428440d6016b4b6011 100644
@@ -967,7 +967,7 @@ index f75fa8ee15efa0ee6b99c56409d5cd2efd456cf7..c8d4c635157a1d398f614b428440d601
              }
 @@ -225,7 +227,7 @@ public final class OwnershipRouter {
          }
-
+ 
          try {
 -            OwnerDomainExecutor.execute(
 +            OwnerDomainExecutor.executeCompleting(

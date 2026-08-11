@@ -62,10 +62,10 @@ index 81f10744a0fcf32a750b07feec863c18bac0350c..08157a2715fde6887043ff7f55e5f5bf
                  level.tick(haveTime);
              } catch (Throwable throwable) {
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
-index 67b63540c9b3f17c8bf485530786befab35e3d1f..dcffa1217cebeedb90a48dda8d04ff0c59adcfbe 100644
+index cac92b122b891f98e61ef495ddae393bb7a0202b..373a48c11003fc3a1b5804762423274289fe24ab 100644
 --- a/net/minecraft/server/threading/TickRegions.java
 +++ b/net/minecraft/server/threading/TickRegions.java
-@@ -1365,6 +1365,43 @@ public class TickRegions {
+@@ -1367,6 +1367,43 @@ public class TickRegions {
          stateFor(world).drainMailbox();
      }
  
@@ -109,7 +109,7 @@ index 67b63540c9b3f17c8bf485530786befab35e3d1f..dcffa1217cebeedb90a48dda8d04ff0c
      public static void runFullLevelContinuations(final ServerLevel world) {
          if (!isCurrentThreadOwnerQuiet(
              world,
-@@ -1621,6 +1658,7 @@ public class TickRegions {
+@@ -1623,6 +1660,7 @@ public class TickRegions {
          private final Object lock = new Object();
          private final Map<Long, List<RegionScheduledTask>> tasksByDeadline = new HashMap<>();
          private final ArrayDeque<CrossRegionMessage> mailbox = new ArrayDeque<>();
@@ -117,7 +117,7 @@ index 67b63540c9b3f17c8bf485530786befab35e3d1f..dcffa1217cebeedb90a48dda8d04ff0c
          private final ArrayDeque<Runnable> fullLevelContinuations = new ArrayDeque<>();
          private long tickCount;
          private long scheduledTaskCount;
-@@ -1764,6 +1802,24 @@ public class TickRegions {
+@@ -1769,6 +1807,24 @@ public class TickRegions {
              }
          }
  

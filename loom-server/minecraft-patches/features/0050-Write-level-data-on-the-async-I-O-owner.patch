@@ -5,12 +5,12 @@ Subject: [PATCH] Write level data on the async-I/O owner
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 940e80117e945385863cf8c82b5c64cb5d47162e..6f0f3039a9b9713b1181a6369ed51767419e2771 100644
+index 03953a7e19d9fc286d8f085aa2ed89ef049a71d1..fb3ee08f9a7bf8112a3ee5e4b44d7c8191ce98aa 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -1019,8 +1019,27 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1035,8 +1035,27 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.scoreboard.storeToSaveDataIfDirty(this.getDataStorage().computeIfAbsent(ScoreboardSaveData.TYPE));
-
+ 
          GameProfile singleplayerProfile = this.getSingleplayerProfile();
 -        this.storageSource.saveDataTag(this.worldData, singleplayerProfile == null ? null : singleplayerProfile.id());
 +        // Loom - the snapshot is built here because it reads mutable world state, but compressing and
@@ -37,7 +37,7 @@ index 940e80117e945385863cf8c82b5c64cb5d47162e..6f0f3039a9b9713b1181a6369ed51767
              this.savedDataStorage.saveAndJoin();
          } else {
              this.savedDataStorage.scheduleSave();
-@@ -1087,6 +1106,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1103,6 +1122,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              // removes the subsequent durability wait; every vanilla save is still scheduled.
              savedAny = this.saveAllChunks(silent, false, force);
              if (flush) {
@@ -62,7 +62,7 @@ index 49a89fad126f8a93c29f842c2db0ac76c18dc183..7a0b5dc6b76d722dcaa5e54e943a1b5c
 @@ -131,6 +133,21 @@ public final class ThreadedRegionsBlockingBarrier {
          }
      }
-
+ 
 +    public static <T> T awaitNonOwnerFutureInterruptibly(
 +        final CompletableFuture<T> future,
 +        final long time,
@@ -94,18 +94,18 @@ index 6f24eb34e0ecc2b03371c585a9538e9337a2295a..e4832799c9d9fcbaf7d86ad50866cebe
  import net.minecraft.util.datafix.DataFixTypes;
  import net.minecraft.util.datafix.DataFixers;
 @@ -470,6 +471,9 @@ public class LevelStorageSource {
-
+ 
          private void createLock() throws IOException {
              this.lock = DirectoryLock.create(this.levelDirectory.path);
 +            synchronized (this.levelDataWriteLock) {
 +                this.closingLevelDataWrites = false;
 +            }
          }
-
+ 
          public void releaseTemporarilyAndRun(final IORunnable runnable) throws IOException {
 @@ -583,10 +587,72 @@ public class LevelStorageSource {
          }
-
+ 
          public void saveDataTag(final WorldData levelData, final @Nullable UUID singleplayerUUID) {
 +            this.saveLevelData(this.createLevelDataTag(levelData, singleplayerUUID));
 +        }
@@ -175,11 +175,11 @@ index 6f24eb34e0ecc2b03371c585a9538e9337a2295a..e4832799c9d9fcbaf7d86ad50866cebe
 +                return this.pendingLevelDataWrite;
 +            }
          }
-
+ 
          public void saveLevelData(final Dynamic<?> tag) {
 @@ -600,16 +666,36 @@ public class LevelStorageSource {
              Path worldDir = this.levelDirectory.path();
-
+ 
              try {
 -                Path dataFile = Files.createTempFile(worldDir, "level", ".dat");
 -                NbtIo.writeCompressed(root, dataFile);
@@ -191,7 +191,7 @@ index 6f24eb34e0ecc2b03371c585a9538e9337a2295a..e4832799c9d9fcbaf7d86ad50866cebe
                  LevelStorageSource.LOGGER.error("Failed to save level {}", worldDir, e);
              }
          }
-
+ 
 +        private void writeLevelDataUnchecked(final CompoundTag root) {
 +            try {
 +                this.writeLevelData(root);
@@ -220,7 +220,7 @@ index 6f24eb34e0ecc2b03371c585a9538e9337a2295a..e4832799c9d9fcbaf7d86ad50866cebe
              return !this.lock.isValid() ? Optional.empty() : Optional.of(this.levelDirectory.iconFile());
          }
 @@ -724,7 +810,66 @@ public class LevelStorageSource {
-
+ 
          @Override
          public void close() throws IOException {
 -            this.lock.close();
@@ -285,5 +285,5 @@ index 6f24eb34e0ecc2b03371c585a9538e9337a2295a..e4832799c9d9fcbaf7d86ad50866cebe
 +                throw writeFailure;
 +            }
          }
-
+ 
          public boolean restoreLevelDataFromOld() {

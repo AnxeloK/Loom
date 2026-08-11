@@ -64,10 +64,10 @@ index 185abbc450eb03cf285854b0decd7950a7925f27..5974592669221273ef99aa192428e7a2
      // the owner remains synchronously phase-bound and only helps owner-scoped region shards; it does not run
      // global callbacks until every world completes, so a synchronous round-trip would deadlock.
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
-index dcffa1217cebeedb90a48dda8d04ff0c59adcfbe..18fa40dd1740e50d1b361e27d764e01dc4ff3a1f 100644
+index 373a48c11003fc3a1b5804762423274289fe24ab..ec4b1f19537eb9ce511031805fd3481ac7379712 100644
 --- a/net/minecraft/server/threading/TickRegions.java
 +++ b/net/minecraft/server/threading/TickRegions.java
-@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger;
+@@ -32,6 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  import java.util.concurrent.atomic.AtomicReference;
  import java.util.function.Consumer;
  import java.util.function.IntConsumer;
@@ -75,7 +75,7 @@ index dcffa1217cebeedb90a48dda8d04ff0c59adcfbe..18fa40dd1740e50d1b361e27d764e01d
  
  /**
   * Runtime region ownership state used by thread checks.
-@@ -1421,6 +1422,12 @@ public class TickRegions {
+@@ -1423,6 +1424,12 @@ public class TickRegions {
          stateFor(world).enqueueFullLevelContinuation(action);
      }
  
@@ -88,7 +88,7 @@ index dcffa1217cebeedb90a48dda8d04ff0c59adcfbe..18fa40dd1740e50d1b361e27d764e01d
      // Loom - tick independent worlds through the same cooperative batch as region shards. The server thread
      // participates with its GLOBAL_CONTROL owner temporarily detached; nested world coordinators help ready
      // region work but do not recursively enter another world tick. Failures remain deterministic by world
-@@ -1808,6 +1815,63 @@ public class TickRegions {
+@@ -1813,6 +1820,63 @@ public class TickRegions {
              }
          }
  

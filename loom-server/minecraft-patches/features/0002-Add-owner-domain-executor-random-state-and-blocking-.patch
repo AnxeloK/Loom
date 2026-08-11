@@ -324,18 +324,18 @@ index 68151ce05e7009f28dda0470c744920cbd5f4a27..bcedec73102ab35d0c84646c9a82a023
      }
  
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
-index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b1149bde548 100644
+index 2a4d93e33ba1220d83a36868baff8c8b5cef8b73..3b6c181a0d87cef7d80a1787582c0cb9bb119c29 100644
 --- a/net/minecraft/server/threading/TickRegions.java
 +++ b/net/minecraft/server/threading/TickRegions.java
-@@ -2,6 +2,7 @@ package net.minecraft.server.threading;
- 
+@@ -3,6 +3,7 @@ package net.minecraft.server.threading;
+ import ca.spottedleaf.concurrentutil.util.ConcurrentUtil;
  import ca.spottedleaf.moonrise.common.util.TickThread;
  import net.minecraft.server.level.ServerLevel;
 +import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
  import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
  import org.bukkit.plugin.IllegalPluginAccessException;
  import org.bukkit.plugin.Plugin;
-@@ -191,6 +192,14 @@ public class TickRegions {
+@@ -193,6 +194,14 @@ public class TickRegions {
                  ex
              );
          }
@@ -350,7 +350,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
          final RegionContext next = new RegionContext(
              world,
              minChunkX,
-@@ -199,7 +208,8 @@ public class TickRegions {
+@@ -201,7 +210,8 @@ public class TickRegions {
              maxChunkZ,
              previous,
              leaseId,
@@ -360,7 +360,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
          );
          CURRENT_CONTEXT.set(next);
          return next;
-@@ -224,7 +234,11 @@ public class TickRegions {
+@@ -226,7 +236,11 @@ public class TickRegions {
              }
          }
          CURRENT_CONTEXT.set(current.previous());
@@ -373,7 +373,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
      }
  
      private static boolean isEquivalentContextStack(RegionContext current, RegionContext expected) {
-@@ -1138,7 +1152,7 @@ public class TickRegions {
+@@ -1140,7 +1154,7 @@ public class TickRegions {
          }
  
          private void schedule(final RegionScheduledTask task, final long delayTicks) {
@@ -382,7 +382,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
                  this.tasksByDeadline.computeIfAbsent(this.tickCount + delayTicks, ignored -> new ArrayList<>()).add(task);
                  ++this.scheduledTaskCount;
              }
-@@ -1146,7 +1160,7 @@ public class TickRegions {
+@@ -1151,7 +1165,7 @@ public class TickRegions {
  
          private void tickScheduler() {
              final List<RegionScheduledTask> toRun;
@@ -391,7 +391,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
                  ++this.tickCount;
                  toRun = this.tasksByDeadline.remove(this.tickCount);
              }
-@@ -1180,7 +1194,7 @@ public class TickRegions {
+@@ -1185,7 +1199,7 @@ public class TickRegions {
              }
  
              SCHEDULER_BUDGET_SKIPS.getAndIncrement();
@@ -400,7 +400,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
                  ++this.schedulerBudgetSkipCount;
              }
              recordDiagnostic(
-@@ -1249,7 +1263,7 @@ public class TickRegions {
+@@ -1254,7 +1268,7 @@ public class TickRegions {
          }
  
          private List<CrossRegionMessage> collectMailboxBudgeted() {
@@ -409,7 +409,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
                  final int available = this.mailbox.size();
                  if (available == 0) {
                      return List.of();
-@@ -1387,7 +1401,7 @@ public class TickRegions {
+@@ -1392,7 +1406,7 @@ public class TickRegions {
          private void recordParallelDispatch(final int bucketCount) {
              SCHEDULER_PARALLEL_TICKS.getAndIncrement();
              SCHEDULER_PARALLEL_BUCKETS.getAndAdd(bucketCount);
@@ -418,7 +418,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
                  ++this.parallelTickCount;
              }
          }
-@@ -1395,13 +1409,13 @@ public class TickRegions {
+@@ -1400,13 +1414,13 @@ public class TickRegions {
          private void recordParallelMailboxDrain(final int bucketCount) {
              MAILBOX_PARALLEL_DRAINS.getAndIncrement();
              MAILBOX_PARALLEL_BUCKETS.getAndAdd(bucketCount);
@@ -434,7 +434,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
                  this.enqueueMailboxInternal(message, true);
              }
          }
-@@ -1435,7 +1449,7 @@ public class TickRegions {
+@@ -1440,7 +1454,7 @@ public class TickRegions {
          private void runScheduledTask(final RegionScheduledTask task) {
              if (isCurrentThreadOwnerNoFailure(this.world, task.chunkX, task.chunkZ)) {
                  SCHEDULER_TASKS_EXECUTED.getAndIncrement();
@@ -443,7 +443,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
                      ++this.executedTaskCount;
                  }
                  task.runNow();
-@@ -1484,7 +1498,7 @@ public class TickRegions {
+@@ -1489,7 +1503,7 @@ public class TickRegions {
              } finally {
                  MAILBOX_MESSAGES_DELIVERED.getAndIncrement();
                  incrementTypeCounter(MAILBOX_DELIVERED_BY_TYPE, message.messageType());
@@ -452,7 +452,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
                      ++this.deliveredMessageCount;
                  }
              }
-@@ -1493,7 +1507,7 @@ public class TickRegions {
+@@ -1498,7 +1512,7 @@ public class TickRegions {
          private void deferMailboxMessage(final CrossRegionMessage message, final String detail) {
              MAILBOX_MESSAGES_DEFERRED.getAndIncrement();
              incrementTypeCounter(MAILBOX_DEFERRED_BY_TYPE, message.messageType());
@@ -461,7 +461,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
                  ++this.deferredMessageCount;
                  this.enqueueMailboxInternal(message, false);
              }
-@@ -1511,7 +1525,7 @@ public class TickRegions {
+@@ -1516,7 +1530,7 @@ public class TickRegions {
          private void dropMailboxMessage(final CrossRegionMessage message, final String detail) {
              MAILBOX_MESSAGES_DROPPED.getAndIncrement();
              incrementTypeCounter(MAILBOX_DROPPED_BY_TYPE, message.messageType());
@@ -470,7 +470,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
                  ++this.droppedMessageCount;
              }
              recordDiagnostic(
-@@ -1527,7 +1541,7 @@ public class TickRegions {
+@@ -1532,7 +1546,7 @@ public class TickRegions {
  
          private void deferTask(final RegionScheduledTask task, final String detail) {
              SCHEDULER_TASKS_DEFERRED.getAndIncrement();
@@ -479,7 +479,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
                  ++this.deferredTaskCount;
              }
              recordDiagnostic(
-@@ -1543,7 +1557,7 @@ public class TickRegions {
+@@ -1548,7 +1562,7 @@ public class TickRegions {
          }
  
          private void cancelTasks(final Plugin plugin) {
@@ -488,7 +488,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
                  for (final List<RegionScheduledTask> tasks : this.tasksByDeadline.values()) {
                      for (int i = 0, len = tasks.size(); i < len; ++i) {
                          final RegionScheduledTask task = tasks.get(i);
-@@ -1570,7 +1584,7 @@ public class TickRegions {
+@@ -1575,7 +1589,7 @@ public class TickRegions {
          }
  
          private WorldSchedulerDiagnostics snapshotDiagnostics() {
@@ -497,7 +497,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
                  long queuedTasks = 0L;
                  for (final List<RegionScheduledTask> tasks : this.tasksByDeadline.values()) {
                      queuedTasks += tasks.size();
-@@ -1976,7 +1990,8 @@ public class TickRegions {
+@@ -2004,7 +2018,8 @@ public class TickRegions {
          int maxChunkZ,
          @Nullable RegionContext previous,
          long leaseId,
@@ -507,7 +507,7 @@ index d08c56e6ce636605136a0b37060113da8d1fd0ed..d65b75f602f39eacb52e32d095ee6b11
      ) {
  
          public boolean contains(final int chunkX, final int chunkZ) {
-@@ -2073,4 +2088,4 @@ public class TickRegions {
+@@ -2101,4 +2116,4 @@ public class TickRegions {
          int maxChunkZ
      ) {
      }

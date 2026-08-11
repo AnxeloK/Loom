@@ -856,10 +856,10 @@ index 0000000000000000000000000000000000000000..56de9e0ec3ef2dd8d2df8d780fcd89f5
 +    }
 +}
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
-index 2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791..a8ff6c10f3e04ee120364ff0c6557c981a8b973d 100644
+index f30d953a54c4e1f404e8fb50f85c233cf10ddae5..885cfda0d6279c7f546a5705365b8e6a2e894c5a 100644
 --- a/net/minecraft/server/threading/TickRegions.java
 +++ b/net/minecraft/server/threading/TickRegions.java
-@@ -25,7 +25,9 @@ import java.util.concurrent.Executors;
+@@ -27,7 +27,9 @@ import java.util.concurrent.Executors;
  import java.util.concurrent.ThreadFactory;
  import java.util.concurrent.atomic.AtomicLong;
  import java.util.concurrent.atomic.AtomicInteger;
@@ -869,7 +869,7 @@ index 2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791..a8ff6c10f3e04ee120364ff0c6557c98
  
  /**
   * Runtime region ownership state used by thread checks.
-@@ -110,6 +112,11 @@ public class TickRegions {
+@@ -112,6 +114,11 @@ public class TickRegions {
          1,
          Integer.getInteger("paper.threadedregions.parallelSimulation.targetTasksPerWorker", 4)
      );
@@ -881,7 +881,7 @@ index 2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791..a8ff6c10f3e04ee120364ff0c6557c98
      private static final int DIAGNOSTIC_EVENT_LIMIT = Math.max(
          64,
          Integer.getInteger("paper.threadedregions.diagnostics.eventLimit", 512)
-@@ -718,39 +725,7 @@ public class TickRegions {
+@@ -720,39 +727,7 @@ public class TickRegions {
              : bucketRegionBoundTasksByDispatchChunk(world, tasks);
  
          if (PARALLEL_SIMULATION_ENABLED && buckets.size() > 1) {
@@ -922,7 +922,7 @@ index 2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791..a8ff6c10f3e04ee120364ff0c6557c98
              return;
          }
  
-@@ -759,6 +734,72 @@ public class TickRegions {
+@@ -761,6 +736,72 @@ public class TickRegions {
          }
      }
  
@@ -995,7 +995,7 @@ index 2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791..a8ff6c10f3e04ee120364ff0c6557c98
      private static boolean containsMultiChunkRegionTasks(final List<RegionBoundTask> tasks) {
          for (int i = 0, len = tasks.size(); i < len; ++i) {
              final RegionBoundTask task = tasks.get(i);
-@@ -811,13 +852,22 @@ public class TickRegions {
+@@ -813,13 +854,22 @@ public class TickRegions {
              }
              target.add(task);
  
@@ -1024,7 +1024,7 @@ index 2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791..a8ff6c10f3e04ee120364ff0c6557c98
              }
          }
  
-@@ -1022,6 +1072,48 @@ public class TickRegions {
+@@ -1024,6 +1074,48 @@ public class TickRegions {
          stateFor(world).drainMailbox();
      }
  
@@ -1073,7 +1073,7 @@ index 2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791..a8ff6c10f3e04ee120364ff0c6557c98
      public static void cancelTasks(final Plugin plugin) {
          for (final WorldSchedulerState state : SCHEDULER_STATES.values()) {
              state.cancelTasks(plugin);
-@@ -1322,11 +1414,7 @@ public class TickRegions {
+@@ -1327,11 +1419,7 @@ public class TickRegions {
  
              if (PARALLEL_SCHEDULER_ENABLED && buckets.size() > 1) {
                  this.recordParallelDispatch(buckets.size());
@@ -1086,7 +1086,7 @@ index 2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791..a8ff6c10f3e04ee120364ff0c6557c98
                  return;
              }
  
-@@ -1405,11 +1493,7 @@ public class TickRegions {
+@@ -1410,11 +1498,7 @@ public class TickRegions {
  
              if (PARALLEL_MAILBOX_ENABLED && toDeliver.size() >= PARALLEL_MAILBOX_MIN_MESSAGES && buckets.size() > 1) {
                  this.recordParallelMailboxDrain(buckets.size());
@@ -1099,7 +1099,7 @@ index 2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791..a8ff6c10f3e04ee120364ff0c6557c98
                  return;
              }
  
-@@ -1429,13 +1513,7 @@ public class TickRegions {
+@@ -1434,13 +1518,7 @@ public class TickRegions {
              }
  
              this.recordParallelMailboxDrain(buckets.size());
@@ -1114,7 +1114,7 @@ index 2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791..a8ff6c10f3e04ee120364ff0c6557c98
              return true;
          }
  
-@@ -1450,13 +1528,7 @@ public class TickRegions {
+@@ -1455,13 +1533,7 @@ public class TickRegions {
              }
  
              this.recordParallelDispatch(buckets.size());
@@ -1129,7 +1129,7 @@ index 2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791..a8ff6c10f3e04ee120364ff0c6557c98
              return true;
          }
  
-@@ -2126,17 +2198,21 @@ public class TickRegions {
+@@ -2154,17 +2226,21 @@ public class TickRegions {
          }
  
          private boolean intersects(final RegionBoundTask task) {

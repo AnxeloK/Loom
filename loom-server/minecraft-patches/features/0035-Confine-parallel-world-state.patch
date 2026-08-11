@@ -140,7 +140,7 @@ index d8a64e4c2ab81ccd5feaa53d6bf97682df77d88e..97fb4dee3f3f89798c9c536f2b0eaf3d
              } catch (Throwable throwable) {
                  CrashReport report = CrashReport.forThrowable(throwable, "Exception ticking world");
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 00695adb4abeb8e80652b7ecfdaca69c5150ddf1..7d926bb271766cf00b9991e7b798989a4cd0ad72 100644
+index 00695adb4abeb8e80652b7ecfdaca69c5150ddf1..48ed1659e4e7499dcecadc9654536da1b2870559 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -941,7 +941,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
@@ -747,10 +747,10 @@ index da74fc87491bed529212f6a2f6143026ca616bca..185abbc450eb03cf285854b0decd7950
      // holds the owning world's full-level lease, so for a write into this world it already owns the target
      // region and takes the inline fast path. The cross-region routing is a defensive fallback: if a write's
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
-index 65fcc768b6af4bd7df384786a157f08939fd56f3..67b63540c9b3f17c8bf485530786befab35e3d1f 100644
+index b90ac0d77d623dccb1adcf8c79097bca8561f56a..cac92b122b891f98e61ef495ddae393bb7a0202b 100644
 --- a/net/minecraft/server/threading/TickRegions.java
 +++ b/net/minecraft/server/threading/TickRegions.java
-@@ -1365,6 +1365,25 @@ public class TickRegions {
+@@ -1367,6 +1367,25 @@ public class TickRegions {
          stateFor(world).drainMailbox();
      }
  
@@ -776,7 +776,7 @@ index 65fcc768b6af4bd7df384786a157f08939fd56f3..67b63540c9b3f17c8bf485530786befa
      // Loom - tick independent worlds through the same cooperative batch as region shards. The server thread
      // participates with its GLOBAL_CONTROL owner temporarily detached; nested world coordinators help ready
      // region work but do not recursively enter another world tick. Failures remain deterministic by world
-@@ -1602,6 +1621,7 @@ public class TickRegions {
+@@ -1604,6 +1623,7 @@ public class TickRegions {
          private final Object lock = new Object();
          private final Map<Long, List<RegionScheduledTask>> tasksByDeadline = new HashMap<>();
          private final ArrayDeque<CrossRegionMessage> mailbox = new ArrayDeque<>();
@@ -784,7 +784,7 @@ index 65fcc768b6af4bd7df384786a157f08939fd56f3..67b63540c9b3f17c8bf485530786befa
          private long tickCount;
          private long scheduledTaskCount;
          private long executedTaskCount;
-@@ -1738,6 +1758,38 @@ public class TickRegions {
+@@ -1743,6 +1763,38 @@ public class TickRegions {
              }
          }
  

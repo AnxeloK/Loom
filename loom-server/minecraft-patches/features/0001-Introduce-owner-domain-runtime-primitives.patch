@@ -899,12 +899,13 @@ index 0000000000000000000000000000000000000000..67ef35a877fa5c418d65d446c397093f
 \ No newline at end of file
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..d08c56e6ce636605136a0b37060113da8d1fd0ed
+index 0000000000000000000000000000000000000000..2a4d93e33ba1220d83a36868baff8c8b5cef8b73
 --- /dev/null
 +++ b/net/minecraft/server/threading/TickRegions.java
-@@ -0,0 +1,2076 @@
+@@ -0,0 +1,2104 @@
 +package net.minecraft.server.threading;
 +
++import ca.spottedleaf.concurrentutil.util.ConcurrentUtil;
 +import ca.spottedleaf.moonrise.common.util.TickThread;
 +import net.minecraft.server.level.ServerLevel;
 +import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
@@ -912,6 +913,7 @@ index 0000000000000000000000000000000000000000..d08c56e6ce636605136a0b37060113da
 +import org.bukkit.plugin.Plugin;
 +import org.jspecify.annotations.Nullable;
 +
++import java.lang.invoke.VarHandle;
 +import java.util.ArrayDeque;
 +import java.util.ArrayList;
 +import java.util.Comparator;
@@ -2047,6 +2049,9 @@ index 0000000000000000000000000000000000000000..d08c56e6ce636605136a0b37060113da
 +                this.tasksByDeadline.computeIfAbsent(this.tickCount + delayTicks, ignored -> new ArrayList<>()).add(task);
 +                ++this.scheduledTaskCount;
 +            }
++            if (!task.plugin.isEnabled()) {
++                task.cancel();
++            }
 +        }
 +
 +        private void tickScheduler() {
@@ -2624,6 +2629,7 @@ index 0000000000000000000000000000000000000000..d08c56e6ce636605136a0b37060113da
 +        private static final int STATE_CANCELLED_RUNNING = 2;
 +        private static final int STATE_FINISHED = 3;
 +        private static final int STATE_CANCELLED = 4;
++        private static final VarHandle STATE_HANDLE = ConcurrentUtil.getVarHandle(RegionScheduledTask.class, "state", int.class);
 +
 +        private final WorldSchedulerState owner;
 +        private final Plugin plugin;
@@ -2631,7 +2637,7 @@ index 0000000000000000000000000000000000000000..d08c56e6ce636605136a0b37060113da
 +        private final int chunkZ;
 +        private final long repeatDelay;
 +        private @Nullable Consumer<ScheduledTask> run;
-+        private int state = STATE_IDLE;
++        private volatile int state = STATE_IDLE;
 +
 +        private RegionScheduledTask(
 +            final WorldSchedulerState owner,
@@ -2650,20 +2656,14 @@ index 0000000000000000000000000000000000000000..d08c56e6ce636605136a0b37060113da
 +        }
 +
 +        private void runNow() {
-+            final Consumer<ScheduledTask> callback;
-+            {
-+                if (this.state != STATE_IDLE) {
-+                    return;
-+                }
-+                this.state = STATE_RUNNING;
-+                callback = this.run;
++            if (this.compareAndExchangeState(STATE_IDLE, STATE_RUNNING) != STATE_IDLE) {
++                return;
 +            }
 +
++            final Consumer<ScheduledTask> callback = this.run;
 +            if (callback == null || !this.plugin.isEnabled()) {
-+                {
-+                    this.state = STATE_CANCELLED;
-+                    this.run = null;
-+                }
++                this.setState(STATE_CANCELLED);
++                this.run = null;
 +                return;
 +            }
 +
@@ -2673,23 +2673,34 @@ index 0000000000000000000000000000000000000000..d08c56e6ce636605136a0b37060113da
 +                this.plugin.getLogger().log(java.util.logging.Level.WARNING, "Region task for " + this.plugin.getDescription().getFullName() + " generated an exception", throwable);
 +            } finally {
 +                boolean reschedule = false;
-+                {
-+                    if (this.repeatDelay > 0L && this.state == STATE_RUNNING && this.plugin.isEnabled()) {
-+                        this.state = STATE_IDLE;
-+                        reschedule = true;
-+                    } else if (this.state == STATE_CANCELLED_RUNNING) {
-+                        this.state = STATE_CANCELLED;
-+                        this.run = null;
-+                    } else if (this.state == STATE_RUNNING) {
-+                        this.state = STATE_FINISHED;
-+                        this.run = null;
-+                    }
++                if (this.repeatDelay <= 0L) {
++                    this.setState(STATE_FINISHED);
++                } else if (!this.plugin.isEnabled()) {
++                    this.setState(STATE_CANCELLED);
++                } else if (this.compareAndExchangeState(STATE_RUNNING, STATE_IDLE) == STATE_RUNNING) {
++                    reschedule = true;
++                } else {
++                    this.setState(STATE_CANCELLED);
 +                }
 +
 +                if (reschedule) {
 +                    this.owner.schedule(this, this.repeatDelay);
++                } else {
++                    this.run = null;
 +                }
 +            }
++        }
++
++        private int getState() {
++            return (int) STATE_HANDLE.getVolatile(this);
++        }
++
++        private int compareAndExchangeState(final int expected, final int updated) {
++            return (int) STATE_HANDLE.compareAndExchange(this, expected, updated);
++        }
++
++        private void setState(final int updated) {
++            STATE_HANDLE.setVolatile(this, updated);
 +        }
 +
 +        @Override
@@ -2704,35 +2715,52 @@ index 0000000000000000000000000000000000000000..d08c56e6ce636605136a0b37060113da
 +
 +        @Override
 +        public CancelledState cancel() {
-+            return switch (this.state) {
-+                case STATE_IDLE -> {
-+                    this.state = STATE_CANCELLED;
-+                    this.run = null;
-+                    yield CancelledState.CANCELLED_BY_CALLER;
-+                }
-+                case STATE_RUNNING -> {
-+                    if (this.repeatDelay > 0L) {
-+                        this.state = STATE_CANCELLED_RUNNING;
-+                        yield CancelledState.NEXT_RUNS_CANCELLED;
++            for (int current = this.getState();;) {
++                switch (current) {
++                    case STATE_IDLE -> {
++                        final int observed = this.compareAndExchangeState(STATE_IDLE, STATE_CANCELLED);
++                        if (observed != STATE_IDLE) {
++                            current = observed;
++                            continue;
++                        }
++                        this.run = null;
++                        return CancelledState.CANCELLED_BY_CALLER;
 +                    }
-+                    yield CancelledState.RUNNING;
++                    case STATE_RUNNING -> {
++                        if (this.repeatDelay <= 0L) {
++                            return CancelledState.RUNNING;
++                        }
++                        final int observed = this.compareAndExchangeState(STATE_RUNNING, STATE_CANCELLED_RUNNING);
++                        if (observed != STATE_RUNNING) {
++                            current = observed;
++                            continue;
++                        }
++                        return CancelledState.NEXT_RUNS_CANCELLED;
++                    }
++                    case STATE_CANCELLED_RUNNING -> {
++                        return CancelledState.NEXT_RUNS_CANCELLED_ALREADY;
++                    }
++                    case STATE_FINISHED -> {
++                        return CancelledState.ALREADY_EXECUTED;
++                    }
++                    case STATE_CANCELLED -> {
++                        return CancelledState.CANCELLED_ALREADY;
++                    }
++                    default -> throw new IllegalStateException("Unknown task state: " + current);
 +                }
-+                case STATE_CANCELLED_RUNNING -> CancelledState.NEXT_RUNS_CANCELLED_ALREADY;
-+                case STATE_FINISHED -> CancelledState.ALREADY_EXECUTED;
-+                case STATE_CANCELLED -> CancelledState.CANCELLED_ALREADY;
-+                default -> throw new IllegalStateException("Unknown task state: " + this.state);
-+            };
++            }
 +        }
 +
 +        @Override
 +        public ExecutionState getExecutionState() {
-+            return switch (this.state) {
++            final int current = this.getState();
++            return switch (current) {
 +                case STATE_IDLE -> ExecutionState.IDLE;
 +                case STATE_RUNNING -> ExecutionState.RUNNING;
 +                case STATE_CANCELLED_RUNNING -> ExecutionState.CANCELLED_RUNNING;
 +                case STATE_FINISHED -> ExecutionState.FINISHED;
 +                case STATE_CANCELLED -> ExecutionState.CANCELLED;
-+                default -> throw new IllegalStateException("Unknown task state: " + this.state);
++                default -> throw new IllegalStateException("Unknown task state: " + current);
 +            };
 +        }
 +    }

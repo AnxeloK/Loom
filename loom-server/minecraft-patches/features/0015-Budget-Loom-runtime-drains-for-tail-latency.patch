@@ -696,10 +696,10 @@ index 41c5b0d8915d81d1b51de769252a7d83aca6276f..b8ca941fcf03019c6ee2871ca1bf2591
      }
  
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
-index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda784c30791 100644
+index 3b6c181a0d87cef7d80a1787582c0cb9bb119c29..f30d953a54c4e1f404e8fb50f85c233cf10ddae5 100644
 --- a/net/minecraft/server/threading/TickRegions.java
 +++ b/net/minecraft/server/threading/TickRegions.java
-@@ -3,6 +3,7 @@ package net.minecraft.server.threading;
+@@ -4,6 +4,7 @@ import ca.spottedleaf.concurrentutil.util.ConcurrentUtil;
  import ca.spottedleaf.moonrise.common.util.TickThread;
  import net.minecraft.server.level.ServerLevel;
  import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
@@ -707,7 +707,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
  import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
  import org.bukkit.plugin.IllegalPluginAccessException;
  import org.bukkit.plugin.Plugin;
-@@ -68,6 +69,10 @@ public class TickRegions {
+@@ -70,6 +71,10 @@ public class TickRegions {
          SCHEDULER_MAX_TASKS_PER_TICK,
          Integer.getInteger("paper.threadedregions.scheduler.maxTasksPerTickBurst", SCHEDULER_MAX_TASKS_PER_TICK * 2)
      );
@@ -718,7 +718,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
      private static final int MAILBOX_MAX_MESSAGES_PER_TICK = Math.max(
          32,
          Integer.getInteger("paper.threadedregions.mailbox.maxMessagesPerTick", 4096)
-@@ -76,10 +81,17 @@ public class TickRegions {
+@@ -78,10 +83,17 @@ public class TickRegions {
          MAILBOX_MAX_MESSAGES_PER_TICK,
          Integer.getInteger("paper.threadedregions.mailbox.maxMessagesPerTickBurst", MAILBOX_MAX_MESSAGES_PER_TICK * 2)
      );
@@ -736,7 +736,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
      private static final boolean PARALLEL_MAILBOX_ENABLED = Boolean.parseBoolean(
          System.getProperty("paper.threadedregions.parallelMailbox", "true")
      );
-@@ -118,6 +130,9 @@ public class TickRegions {
+@@ -120,6 +132,9 @@ public class TickRegions {
      private static final AtomicLong SCHEDULER_PARALLEL_TICKS = new AtomicLong();
      private static final AtomicLong SCHEDULER_PARALLEL_BUCKETS = new AtomicLong();
      private static final AtomicLong SCHEDULER_BUDGET_SKIPS = new AtomicLong();
@@ -746,7 +746,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
      private static final AtomicLong MAILBOX_MESSAGES_POSTED = new AtomicLong();
      private static final AtomicLong MAILBOX_MESSAGES_DELIVERED = new AtomicLong();
      private static final AtomicLong MAILBOX_MESSAGES_DEFERRED = new AtomicLong();
-@@ -125,6 +140,9 @@ public class TickRegions {
+@@ -127,6 +142,9 @@ public class TickRegions {
      private static final AtomicLong MAILBOX_PARALLEL_DRAINS = new AtomicLong();
      private static final AtomicLong MAILBOX_PARALLEL_BUCKETS = new AtomicLong();
      private static final AtomicLong MAILBOX_BUDGET_SKIPS = new AtomicLong();
@@ -756,7 +756,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
      private static final AtomicLong SIMULATION_BATCH_TASKS = new AtomicLong();
      private static final AtomicLong SIMULATION_BATCH_OPERATIONS = new AtomicLong();
      private static final AtomicLong SIMULATION_SERIAL_FALLBACKS = new AtomicLong();
-@@ -418,6 +436,9 @@ public class TickRegions {
+@@ -420,6 +438,9 @@ public class TickRegions {
              SCHEDULER_PARALLEL_TICKS.get(),
              SCHEDULER_PARALLEL_BUCKETS.get(),
              SCHEDULER_BUDGET_SKIPS.get(),
@@ -766,7 +766,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
              MAILBOX_MESSAGES_POSTED.get(),
              MAILBOX_MESSAGES_DELIVERED.get(),
              MAILBOX_MESSAGES_DEFERRED.get(),
-@@ -425,6 +446,9 @@ public class TickRegions {
+@@ -427,6 +448,9 @@ public class TickRegions {
              MAILBOX_PARALLEL_DRAINS.get(),
              MAILBOX_PARALLEL_BUCKETS.get(),
              MAILBOX_BUDGET_SKIPS.get(),
@@ -776,7 +776,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
              SIMULATION_BATCH_TASKS.get(),
              SIMULATION_BATCH_OPERATIONS.get(),
              SIMULATION_SERIAL_FALLBACKS.get(),
-@@ -449,6 +473,9 @@ public class TickRegions {
+@@ -451,6 +475,9 @@ public class TickRegions {
              .append(", schedulerParallelTicks=").append(diagnostics.schedulerParallelTicks())
              .append(", schedulerParallelBuckets=").append(diagnostics.schedulerParallelBuckets())
              .append(", schedulerBudgetSkips=").append(diagnostics.schedulerBudgetSkips())
@@ -786,7 +786,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
              .append(", mailboxPosted=").append(diagnostics.mailboxMessagesPosted())
              .append(", mailboxDelivered=").append(diagnostics.mailboxMessagesDelivered())
              .append(", mailboxDeferred=").append(diagnostics.mailboxMessagesDeferred())
-@@ -456,6 +483,9 @@ public class TickRegions {
+@@ -458,6 +485,9 @@ public class TickRegions {
              .append(", mailboxParallelDrains=").append(diagnostics.mailboxParallelDrains())
              .append(", mailboxParallelBuckets=").append(diagnostics.mailboxParallelBuckets())
              .append(", mailboxBudgetSkips=").append(diagnostics.mailboxBudgetSkips())
@@ -796,7 +796,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
              .append(", simulationBatchTasks=").append(diagnostics.simulationBatchTasks())
              .append(", simulationBatchOps=").append(diagnostics.simulationBatchOperations())
              .append(", simulationSerialFallbacks=").append(diagnostics.simulationSerialFallbacks())
-@@ -513,6 +543,10 @@ public class TickRegions {
+@@ -515,6 +545,10 @@ public class TickRegions {
          );
      }
  
@@ -807,7 +807,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
      public static int getAdaptiveMailboxBudget(final int queuedMessages) {
          return computeAdaptiveDrainBudget(
              queuedMessages,
-@@ -522,6 +556,10 @@ public class TickRegions {
+@@ -524,6 +558,10 @@ public class TickRegions {
          );
      }
  
@@ -818,7 +818,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
      public static boolean areChunksInSameRegionTaskBucket(
          final int firstChunkX,
          final int firstChunkZ,
-@@ -560,6 +598,26 @@ public class TickRegions {
+@@ -562,6 +600,26 @@ public class TickRegions {
          }
      }
  
@@ -845,7 +845,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
      static int computeAdaptiveDrainBudget(
          final int available,
          final int baseBudget,
-@@ -582,6 +640,36 @@ public class TickRegions {
+@@ -584,6 +642,36 @@ public class TickRegions {
          return Math.max(baseBudget, Math.min(burstBudget, baseBudget + scaledBoost));
      }
  
@@ -882,7 +882,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
      public static void runRegionBoundTasksFromCurrentContext(
          final ServerLevel world,
          final List<RegionBoundTask> tasks,
-@@ -1173,22 +1261,27 @@ public class TickRegions {
+@@ -1178,22 +1266,27 @@ public class TickRegions {
                  return;
              }
  
@@ -920,7 +920,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
              if (toRun.size() <= schedulerBudget) {
                  return toRun;
              }
-@@ -1248,17 +1341,22 @@ public class TickRegions {
+@@ -1253,17 +1346,22 @@ public class TickRegions {
                  return;
              }
  
@@ -952,7 +952,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
              }
          }
  
-@@ -1269,7 +1367,7 @@ public class TickRegions {
+@@ -1274,7 +1372,7 @@ public class TickRegions {
                      return List.of();
                  }
  
@@ -961,7 +961,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
                  final int budgeted = Math.min(available, mailboxBudget);
                  final List<CrossRegionMessage> toDeliver = new ArrayList<>(budgeted);
                  for (int i = 0; i < budgeted; ++i) {
-@@ -1891,6 +1989,9 @@ public class TickRegions {
+@@ -1919,6 +2017,9 @@ public class TickRegions {
          long schedulerParallelTicks,
          long schedulerParallelBuckets,
          long schedulerBudgetSkips,
@@ -971,7 +971,7 @@ index d65b75f602f39eacb52e32d095ee6b1149bde548..2e8cf2ff4bbbf0d590e4bc8038c4cda7
          long mailboxMessagesPosted,
          long mailboxMessagesDelivered,
          long mailboxMessagesDeferred,
-@@ -1898,6 +1999,9 @@ public class TickRegions {
+@@ -1926,6 +2027,9 @@ public class TickRegions {
          long mailboxParallelDrains,
          long mailboxParallelBuckets,
          long mailboxBudgetSkips,

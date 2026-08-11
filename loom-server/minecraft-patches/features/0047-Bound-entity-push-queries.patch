@@ -74,10 +74,10 @@ index 92315ba997c66f86661fa58ed0887d2d95541b0b..1c345419dd047357a9d0015150ae7fdd
                  }
  
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index c8bed7a9782c84ea1cb174ae12e86db058e9ec4a..12f8d218deb671c0ef943d7178954dd847f2f3fa 100644
+index 23a570035161338a223b210284b9fe706df58884..f344f8794a00c80fe304bf8fdb7b46f2aecccb14 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
-@@ -1967,6 +1967,32 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1969,6 +1969,32 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
          // Paper end - rewrite chunk system
      }
  

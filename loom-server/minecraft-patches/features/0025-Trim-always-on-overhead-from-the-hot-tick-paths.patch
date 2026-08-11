@@ -113,10 +113,10 @@ index 02c979c382284d03735ac8389b08f22ad011ccdc..af4f7bf952f52dbc43de69d20bc63bfa
                  }
                  final StagedSpawn s = spawns.get(i);
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
-index 789be2c5ae3c8f8ef99a468661337d249560e148..14b4a882e88470bb9ef10695091aef78017b9d7e 100644
+index 195e24aee17ef212efcf846b3fa7b8c70cb0524c..397a8cf4a21b25a12a8ed69889f8c2c2ded0ab77 100644
 --- a/net/minecraft/server/threading/TickRegions.java
 +++ b/net/minecraft/server/threading/TickRegions.java
-@@ -129,7 +129,7 @@ public class TickRegions {
+@@ -131,7 +131,7 @@ public class TickRegions {
          REGION_WORKER_COUNT,
          new RegionSchedulerThreadFactory()
      );
@@ -125,7 +125,7 @@ index 789be2c5ae3c8f8ef99a468661337d249560e148..14b4a882e88470bb9ef10695091aef78
      private static final AtomicLong OWNERSHIP_FAILURES = new AtomicLong();
      private static final AtomicLong LEASE_CLAIM_FAILURES = new AtomicLong();
      private static final AtomicLong SCHEDULER_TASKS_EXECUTED = new AtomicLong();
-@@ -137,9 +137,9 @@ public class TickRegions {
+@@ -139,9 +139,9 @@ public class TickRegions {
      private static final AtomicLong SCHEDULER_PARALLEL_TICKS = new AtomicLong();
      private static final AtomicLong SCHEDULER_PARALLEL_BUCKETS = new AtomicLong();
      private static final AtomicLong SCHEDULER_BUDGET_SKIPS = new AtomicLong();
@@ -138,7 +138,7 @@ index 789be2c5ae3c8f8ef99a468661337d249560e148..14b4a882e88470bb9ef10695091aef78
      private static final AtomicLong MAILBOX_MESSAGES_POSTED = new AtomicLong();
      private static final AtomicLong MAILBOX_MESSAGES_DELIVERED = new AtomicLong();
      private static final AtomicLong MAILBOX_MESSAGES_DEFERRED = new AtomicLong();
-@@ -147,9 +147,9 @@ public class TickRegions {
+@@ -149,9 +149,9 @@ public class TickRegions {
      private static final AtomicLong MAILBOX_PARALLEL_DRAINS = new AtomicLong();
      private static final AtomicLong MAILBOX_PARALLEL_BUCKETS = new AtomicLong();
      private static final AtomicLong MAILBOX_BUDGET_SKIPS = new AtomicLong();
@@ -151,7 +151,7 @@ index 789be2c5ae3c8f8ef99a468661337d249560e148..14b4a882e88470bb9ef10695091aef78
      private static final AtomicLong SIMULATION_BATCH_TASKS = new AtomicLong();
      private static final AtomicLong SIMULATION_BATCH_OPERATIONS = new AtomicLong();
      private static final AtomicLong SIMULATION_SERIAL_FALLBACKS = new AtomicLong();
-@@ -284,7 +284,7 @@ public class TickRegions {
+@@ -286,7 +286,7 @@ public class TickRegions {
      }
  
      public static boolean isCurrentThreadOwner(final ServerLevel world, final int chunkX, final int chunkZ) {
@@ -160,7 +160,7 @@ index 789be2c5ae3c8f8ef99a468661337d249560e148..14b4a882e88470bb9ef10695091aef78
  
          final Thread currentThread = Thread.currentThread();
          if (isCurrentThreadOwnerByContext(world, chunkX, chunkZ, currentThread.threadId())) {
-@@ -304,7 +304,7 @@ public class TickRegions {
+@@ -306,7 +306,7 @@ public class TickRegions {
          final int maxChunkX,
          final int maxChunkZ
      ) {
@@ -169,7 +169,7 @@ index 789be2c5ae3c8f8ef99a468661337d249560e148..14b4a882e88470bb9ef10695091aef78
  
          final Thread currentThread = Thread.currentThread();
          if (isCurrentThreadOwnerByContext(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, currentThread.threadId())) {
-@@ -339,7 +339,7 @@ public class TickRegions {
+@@ -341,7 +341,7 @@ public class TickRegions {
      }
  
      public static long getOwnershipCheckCount() {
@@ -178,7 +178,7 @@ index 789be2c5ae3c8f8ef99a468661337d249560e148..14b4a882e88470bb9ef10695091aef78
      }
  
      public static long getOwnershipFailureCount() {
-@@ -435,7 +435,7 @@ public class TickRegions {
+@@ -437,7 +437,7 @@ public class TickRegions {
  
          return new RuntimeDiagnostics(
              STRICT_RUNTIME_MODE,
@@ -187,7 +187,7 @@ index 789be2c5ae3c8f8ef99a468661337d249560e148..14b4a882e88470bb9ef10695091aef78
              OWNERSHIP_FAILURES.get(),
              LEASE_CLAIM_FAILURES.get(),
              SCHEDULER_TASKS_EXECUTED.get(),
-@@ -443,9 +443,9 @@ public class TickRegions {
+@@ -445,9 +445,9 @@ public class TickRegions {
              SCHEDULER_PARALLEL_TICKS.get(),
              SCHEDULER_PARALLEL_BUCKETS.get(),
              SCHEDULER_BUDGET_SKIPS.get(),
@@ -200,7 +200,7 @@ index 789be2c5ae3c8f8ef99a468661337d249560e148..14b4a882e88470bb9ef10695091aef78
              MAILBOX_MESSAGES_POSTED.get(),
              MAILBOX_MESSAGES_DELIVERED.get(),
              MAILBOX_MESSAGES_DEFERRED.get(),
-@@ -453,9 +453,9 @@ public class TickRegions {
+@@ -455,9 +455,9 @@ public class TickRegions {
              MAILBOX_PARALLEL_DRAINS.get(),
              MAILBOX_PARALLEL_BUCKETS.get(),
              MAILBOX_BUDGET_SKIPS.get(),
@@ -213,7 +213,7 @@ index 789be2c5ae3c8f8ef99a468661337d249560e148..14b4a882e88470bb9ef10695091aef78
              SIMULATION_BATCH_TASKS.get(),
              SIMULATION_BATCH_OPERATIONS.get(),
              SIMULATION_SERIAL_FALLBACKS.get(),
-@@ -606,22 +606,22 @@ public class TickRegions {
+@@ -608,22 +608,22 @@ public class TickRegions {
      }
  
      private static void recordSchedulerDrain(final int tasks, final long nanos) {

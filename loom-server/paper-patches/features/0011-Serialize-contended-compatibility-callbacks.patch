@@ -843,10 +843,10 @@ index 50dd4e1c08d432d6a244fbfe5e29b297192b28e7..fb853a4b543340f669f3f490df78089a
              throw throwable;
          } catch (final Throwable throwable) {
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
-index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f4323066e 100644
+index 0e874bc340f775424bec27ba2921ccc565ec6696..ae06139135f5c760e0bace5c1e6a7fa6a17cb6a5 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
-@@ -20,8 +20,7 @@ public final class PluginCompatibilityProfile {
+@@ -23,8 +23,7 @@ public final class PluginCompatibilityProfile {
          LEGACY_NORMAL,
          LEGACY_ORDERED,
          LEGACY_INTERNAL,
@@ -856,7 +856,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
  
          public boolean atLeast(final Mode mode) {
              return this.ordinal() >= mode.ordinal();
-@@ -32,8 +31,7 @@ public final class PluginCompatibilityProfile {
+@@ -35,8 +34,7 @@ public final class PluginCompatibilityProfile {
          NATIVE_FAST_PATH,
          LEGACY_OBSERVED_SAFE,
          LEGACY_DEGRADED,
@@ -866,7 +866,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
      }
  
      public enum EscalationReason {
-@@ -44,8 +42,7 @@ public final class PluginCompatibilityProfile {
+@@ -47,8 +45,7 @@ public final class PluginCompatibilityProfile {
          OWNER_BLOCKING_WAIT,
          APARTMENT_CONTENTION,
          UNSAFE_INTERNAL_ACCESS,
@@ -876,7 +876,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
      }
  
      public record Escalation(
-@@ -69,7 +66,7 @@ public final class PluginCompatibilityProfile {
+@@ -72,7 +69,7 @@ public final class PluginCompatibilityProfile {
          long asyncBukkitViolations,
          long unsafeInternalViolations,
          long strictFallbacks,
@@ -885,7 +885,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
          long ownerDomainWaitViolations,
          Map<String, Long> laneUsage,
          List<Escalation> escalations,
-@@ -98,7 +95,7 @@ public final class PluginCompatibilityProfile {
+@@ -101,7 +98,7 @@ public final class PluginCompatibilityProfile {
      private final LongAdder asyncBukkitViolations = new LongAdder();
      private final LongAdder unsafeInternalViolations = new LongAdder();
      private final LongAdder strictFallbacks = new LongAdder();
@@ -894,7 +894,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
      private final LongAdder ownerDomainWaitViolations = new LongAdder();
  
      private final Map<String, LongAdder> callbackNanosByEvent = new ConcurrentHashMap<>();
-@@ -195,9 +192,8 @@ public final class PluginCompatibilityProfile {
+@@ -198,9 +195,8 @@ public final class PluginCompatibilityProfile {
          this.escalate(Mode.LEGACY_STRICT, EscalationReason.STRICT_FALLBACK, detail);
      }
  
@@ -906,7 +906,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
      }
  
      public void noteForcedSerializedFallback(final String path, final String detail) {
-@@ -244,7 +240,7 @@ public final class PluginCompatibilityProfile {
+@@ -247,7 +243,7 @@ public final class PluginCompatibilityProfile {
              this.asyncBukkitViolations.longValue(),
              this.unsafeInternalViolations.longValue(),
              this.strictFallbacks.longValue(),
@@ -915,7 +915,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
              this.ownerDomainWaitViolations.longValue(),
              this.laneUsageSnapshot(),
              history,
-@@ -265,7 +261,7 @@ public final class PluginCompatibilityProfile {
+@@ -268,7 +264,7 @@ public final class PluginCompatibilityProfile {
              + ", asyncViolations=" + snapshot.asyncBukkitViolations()
              + ", unsafeInternals=" + snapshot.unsafeInternalViolations()
              + ", strictFallbacks=" + snapshot.strictFallbacks()
@@ -924,7 +924,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
              + ", laneUsage=" + snapshot.laneUsage()
              + ", firstEscalation=" + (firstEscalation == null ? "none" : firstEscalation.reason() + ":" + firstEscalation.detail());
      }
-@@ -296,18 +292,12 @@ public final class PluginCompatibilityProfile {
+@@ -299,18 +295,12 @@ public final class PluginCompatibilityProfile {
                  this.escalations.removeFirst();
              }
          }
@@ -944,7 +944,7 @@ index 682cea8cecaad40fa281fac81f516b4c8636f2c9..225b5394cf56c1e4be5e84c93ce76d9f
                  return existing;
              }
              if (desiredState == State.LEGACY_DEGRADED && existing == State.LEGACY_DEGRADED) {
-@@ -323,11 +313,7 @@ public final class PluginCompatibilityProfile {
+@@ -326,11 +316,7 @@ public final class PluginCompatibilityProfile {
      }
  
      private State defaultState() {
@@ -1406,10 +1406,10 @@ index d59b1d22bb7fd50395ce18b0d5ce05b86ec26f03..6ff31ecb58024747dc79718a5e72af6e
 \ No newline at end of file
 +}
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java
-index 0521fd22f4dd6b434634f313ed54d3f3181a2815..576fe4ed712a8f5088119f3a32dfb5616eaa52cb 100644
+index 3d9fe045b61b576d8b32caaf33a9273fc009c9bf..6fb3be273c1d14d301b84588d45ea09b3152234f 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityPluginMatrixTest.java
-@@ -15,7 +15,7 @@ class CompatibilityPluginMatrixTest {
+@@ -17,7 +17,7 @@ class CompatibilityPluginMatrixTest {
      enum ExpectedOutcome {
          SHOULD_WORK,
          SHOULD_DEGRADE,
@@ -1417,13 +1417,13 @@ index 0521fd22f4dd6b434634f313ed54d3f3181a2815..576fe4ed712a8f5088119f3a32dfb561
 +        SHOULD_SERIALIZE
      }
  
-     record MatrixEntry(String pluginName, String mainClass, List<String> dependencies, ExpectedOutcome expectedOutcome) {
-@@ -27,22 +27,22 @@ class CompatibilityPluginMatrixTest {
-             new MatrixEntry("LoomNativeTools", "com.example.loom.NativeTools", List.of(), ExpectedOutcome.SHOULD_WORK),
-             new MatrixEntry("OldClaims", "com.example.claims.OldClaims", List.of("Vault"), ExpectedOutcome.SHOULD_DEGRADE),
-             new MatrixEntry("PacketBridge", "com.example.packet.PacketBridge", List.of("ProtocolLib"), ExpectedOutcome.SHOULD_DEGRADE),
--            new MatrixEntry("UnsafeNativeMutator", "com.example.native.UnsafeNativeMutator", List.of(), ExpectedOutcome.SHOULD_NOT_WORK)
-+            new MatrixEntry("UnsafeNativeMutator", "com.example.native.UnsafeNativeMutator", List.of(), ExpectedOutcome.SHOULD_SERIALIZE)
+     record MatrixEntry(
+@@ -35,22 +35,22 @@ class CompatibilityPluginMatrixTest {
+             new MatrixEntry("NativeTools", "com.example.NativeTools", List.of(), true, ExpectedOutcome.SHOULD_WORK),
+             new MatrixEntry("OldClaims", "com.example.claims.OldClaims", List.of("Vault"), false, ExpectedOutcome.SHOULD_DEGRADE),
+             new MatrixEntry("PacketBridge", "com.example.packet.PacketBridge", List.of("ProtocolLib"), false, ExpectedOutcome.SHOULD_DEGRADE),
+-            new MatrixEntry("UnsafeNativeMutator", "com.example.native.UnsafeNativeMutator", List.of(), false, ExpectedOutcome.SHOULD_NOT_WORK)
++            new MatrixEntry("UnsafeNativeMutator", "com.example.native.UnsafeNativeMutator", List.of(), false, ExpectedOutcome.SHOULD_SERIALIZE)
          );
  
          boolean sawWork = false;
@@ -1433,7 +1433,7 @@ index 0521fd22f4dd6b434634f313ed54d3f3181a2815..576fe4ed712a8f5088119f3a32dfb561
  
          for (final MatrixEntry entry : matrix) {
              final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(
-                 mockPlugin(entry.pluginName(), entry.mainClass(), entry.dependencies())
+                 mockPlugin(entry.pluginName(), entry.mainClass(), entry.dependencies(), entry.loomSupported())
              );
  
 -            if (entry.expectedOutcome() == ExpectedOutcome.SHOULD_NOT_WORK) {
@@ -1447,7 +1447,7 @@ index 0521fd22f4dd6b434634f313ed54d3f3181a2815..576fe4ed712a8f5088119f3a32dfb561
                  continue;
              }
  
-@@ -62,7 +62,7 @@ class CompatibilityPluginMatrixTest {
+@@ -70,7 +70,7 @@ class CompatibilityPluginMatrixTest {
  
          Assertions.assertTrue(sawWork, "Matrix should include should-work plugin");
          Assertions.assertTrue(sawDegrade, "Matrix should include should-degrade plugin");
@@ -1455,7 +1455,7 @@ index 0521fd22f4dd6b434634f313ed54d3f3181a2815..576fe4ed712a8f5088119f3a32dfb561
 +        Assertions.assertTrue(sawSerialize, "Matrix should include serialized compatibility fallback");
      }
  
-     private static Plugin mockPlugin(final String name, final String mainClass, final List<String> dependencies) {
+     private static Plugin mockPlugin(
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java
 index b184d2638016c67c432362ae819ebab5fdd91e5a..120bae6f2aeda2c1ee1cd1a51ce0bf4e4878f22f 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilitySyncBridgeTest.java
@@ -1542,16 +1542,16 @@ index b184d2638016c67c432362ae819ebab5fdd91e5a..120bae6f2aeda2c1ee1cd1a51ce0bf4e
  
      private static Plugin mockPlugin(final String name) {
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
-index 5d283861d99c3f54ac8d7156b65569b699116156..d742f1350d06e8052f63ef8bfd0956ed73cfb9bf 100644
+index 647a89d341e2abfe301d582edb2b0a8188f88083..2aa0f6e19526c9537052d663b74fa9f6f5cee314 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
-@@ -36,15 +36,15 @@ class PluginCompatibilityProfileTest {
+@@ -38,15 +38,15 @@ class PluginCompatibilityProfileTest {
      }
  
      @Test
 -    void refusalIsTerminalMode() {
 +    void serializedHandoffKeepsPluginDeliverable() {
-         final Plugin plugin = mockPlugin("UnsafePlugin", "com.example.Unsafe", List.of(), List.of());
+         final Plugin plugin = mockPlugin("UnsafePlugin", "com.example.Unsafe", List.of(), List.of(), null, null);
          final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
  
 -        profile.noteRefusal("unsafe raw handles");

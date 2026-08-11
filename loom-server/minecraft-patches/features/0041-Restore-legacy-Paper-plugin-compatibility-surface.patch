@@ -18,7 +18,7 @@ index 58e67d0663a9528b5a651666876700878d5b67c5..7512ae34ba1fb47170a0bdba96bca36c
 +++ b/io/papermc/paper/entity/activation/ActivationRange.java
 @@ -1,5 +1,7 @@
  package io.papermc.paper.entity.activation;
-
+ 
 +import java.lang.invoke.MethodHandles;
 +import java.lang.invoke.VarHandle;
  import net.minecraft.core.BlockPos;
@@ -29,13 +29,13 @@ index 58e67d0663a9528b5a651666876700878d5b67c5..7512ae34ba1fb47170a0bdba96bca36c
  import java.util.List;
  import java.util.Set;
 -import java.util.concurrent.atomic.AtomicInteger;
-
+ 
  public final class ActivationRange {
 +    private static final VarHandle WAKEUP_INACTIVE_REMAINING_ANIMALS = wakeupCounter("wakeupInactiveRemainingAnimals");
 +    private static final VarHandle WAKEUP_INACTIVE_REMAINING_FLYING = wakeupCounter("wakeupInactiveRemainingFlying");
 +    private static final VarHandle WAKEUP_INACTIVE_REMAINING_MONSTERS = wakeupCounter("wakeupInactiveRemainingMonsters");
 +    private static final VarHandle WAKEUP_INACTIVE_REMAINING_VILLAGERS = wakeupCounter("wakeupInactiveRemainingVillagers");
-
+ 
      private ActivationRange() {
      }
 @@ -67,45 +72,53 @@ public final class ActivationRange {
@@ -64,7 +64,7 @@ index 58e67d0663a9528b5a651666876700878d5b67c5..7512ae34ba1fb47170a0bdba96bca36c
          }
          return -1;
      }
-
+ 
 -    private static boolean consumeWakeup(final AtomicInteger remaining) {
 +    private static VarHandle wakeupCounter(final String name) {
 +        try {
@@ -85,7 +85,7 @@ index 58e67d0663a9528b5a651666876700878d5b67c5..7512ae34ba1fb47170a0bdba96bca36c
          }
          return false;
      }
-
+ 
 -    private static void replenishWakeups(final AtomicInteger remaining, final int maximum) {
 +    private static void replenishWakeups(final Level world, final VarHandle remaining, final int maximum) {
          int current;
@@ -100,7 +100,7 @@ index 58e67d0663a9528b5a651666876700878d5b67c5..7512ae34ba1fb47170a0bdba96bca36c
 -        } while (!remaining.compareAndSet(current, replenished));
 +        } while (!remaining.compareAndSet(world, current, replenished));
      }
-
+ 
      /**
 @@ -154,10 +167,10 @@ public final class ActivationRange {
          final int waterActivationRange = world.spigotConfig.waterActivationRange;
@@ -114,7 +114,7 @@ index 58e67d0663a9528b5a651666876700878d5b67c5..7512ae34ba1fb47170a0bdba96bca36c
 +        replenishWakeups(world, WAKEUP_INACTIVE_REMAINING_VILLAGERS, world.spigotConfig.wakeUpInactiveVillagers);
 +        replenishWakeups(world, WAKEUP_INACTIVE_REMAINING_MONSTERS, world.spigotConfig.wakeUpInactiveMonsters);
 +        replenishWakeups(world, WAKEUP_INACTIVE_REMAINING_FLYING, world.spigotConfig.wakeUpInactiveFlying);
-
+ 
          int maxRange = Math.max(monsterActivationRange, animalActivationRange);
          maxRange = Math.max(maxRange, raiderActivationRange);
 diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
@@ -124,7 +124,7 @@ index 8aa2e8938f4cfc22cb185566e2c143f33dab35e2..d8d713711fac2938a3d48ad55701024e
 @@ -35,6 +35,10 @@ public class PacketProcessor implements AutoCloseable {
      }
      // Paper end - improve tick loop
-
+ 
 +    public boolean isSameThread() {
 +        return Thread.currentThread() == this.runningThread;
 +    }
@@ -188,11 +188,11 @@ index 08157a2715fde6887043ff7f55e5f5bf6b233a58..598afbf5c2dd2b0afa5c8fd3cf5d05cb
                      this.setupDebugLevel(this.worldData, overworld); // Paper - per-level GameRules
 @@ -1675,6 +1697,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
                  this.lastOverloadWarningNanos = this.nextTickTimeNanos;
-
+ 
                  this.currentTickStart = tickStart;
 +                ++MinecraftServer.currentTick; // Loom - legacy Paper compatibility - see field declaration
                  // Paper end - improve tick loop
-
+ 
                  boolean sprinting = thisTickNanos == 0L;
 @@ -2127,18 +2150,20 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          profiler.pop();
@@ -210,7 +210,7 @@ index 08157a2715fde6887043ff7f55e5f5bf6b233a58..598afbf5c2dd2b0afa5c8fd3cf5d05cb
 +            // Paper end - per-world time
              profiler.pop();
          }
-
+ 
          if (this.tickCount % 20 == 0) {
 -            profiler.push("timeSync");
 -            // Paper start - per-world game time
@@ -221,7 +221,7 @@ index 08157a2715fde6887043ff7f55e5f5bf6b233a58..598afbf5c2dd2b0afa5c8fd3cf5d05cb
 -            profiler.pop();
 +            this.forceGameTimeSynchronization();
          }
-
+ 
          // CraftBukkit start
 @@ -2162,6 +2187,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              level.hasEntityMoveEvent = io.papermc.paper.event.entity.EntityMoveEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - Add EntityMoveEvent
@@ -243,7 +243,7 @@ index 08157a2715fde6887043ff7f55e5f5bf6b233a58..598afbf5c2dd2b0afa5c8fd3cf5d05cb
 +        // Paper end - per-world time
          profiler.pop();
      }
-
+ 
 @@ -3314,8 +3344,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          } else if (rule == GameRules.SPAWN_MONSTERS) {
              level.setSpawnSettings(level.isSpawningMonsters()); // Paper - per-world game rules
@@ -253,9 +253,9 @@ index 08157a2715fde6887043ff7f55e5f5bf6b233a58..598afbf5c2dd2b0afa5c8fd3cf5d05cb
 +            level.players().forEach(player -> player.connection.send(level.clockManager().createFullSyncPacket(player))); // Paper - per-world time; per-player time
          }
      }
-
+ 
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index ad53de932963acbcda3267bd18879034ae90ccc3..066c808c62f990e6f380241a9b314a353f3e4311 100644
+index e15917c11645120d90e14a87ba06c9f84685866a..a232577ad5167bc673737180fd91d9c0d5cd2331 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -234,6 +234,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
@@ -280,13 +280,13 @@ index ad53de932963acbcda3267bd18879034ae90ccc3..066c808c62f990e6f380241a9b314a35
              this.persistentDataContainer.putAll(loadedWorldData.pdc().persistentData().toTagCompound());
          }
 @@ -778,7 +785,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
-
+ 
      @Override
      public ServerClockManager clockManager() {
 -        return this.server.clockManager();
 +        return io.papermc.paper.configuration.GlobalConfiguration.get().time.affectsAllWorlds ? this.server.clockManager() : this.clockManager; // Paper - per-world time
      }
-
+ 
      @Override
 @@ -827,8 +834,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              boolean timeSkipDispatched = false;
@@ -314,7 +314,7 @@ index 6796ef6ec20b5b707ca369aa3a55eaecd86e4043..0120979a74bedce50ff351b7ff912e7a
 +++ b/net/minecraft/server/level/ServerPlayer.java
 @@ -1366,12 +1366,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
      }
-
+ 
      // Paper start
 -    public record RespawnResult(
 -        TeleportTransition transition,
@@ -324,7 +324,7 @@ index 6796ef6ec20b5b707ca369aa3a55eaecd86e4043..0120979a74bedce50ff351b7ff912e7a
 -    ) {
 +    public record RespawnResult(TeleportTransition transition, boolean isBedSpawn, boolean isAnchorSpawn) {
      }
-
+ 
      public @Nullable TeleportTransition findRespawnPositionAndUseSpawnBlock(
 @@ -1390,7 +1385,6 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
          boolean isBedSpawn = false;
@@ -384,7 +384,7 @@ index 6796ef6ec20b5b707ca369aa3a55eaecd86e4043..0120979a74bedce50ff351b7ff912e7a
 +            isAnchorSpawn
          );
      }
-
+ 
 diff --git a/net/minecraft/server/network/ServerLoginPacketListenerImpl.java b/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
 index 8b6c2ca84f62a95c9b27edee2a45cd4138ad630b..237298087047ae1e9eccc24dc7ff48a3f6247864 100644
 --- a/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
@@ -400,11 +400,11 @@ index 8b6c2ca84f62a95c9b27edee2a45cd4138ad630b..237298087047ae1e9eccc24dc7ff48a3
 +            this.disconnectAsync(Component.translatable("multiplayer.disconnect.slow_login"));
          }
      }
-
+ 
 @@ -137,6 +137,22 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
          }
      }
-
+ 
 +    // Paper start
 +    public void disconnectAsync(final Component reason) {
 +        try {
@@ -449,7 +449,7 @@ index 23058ff83012f0d1d6c80abdac76ca71db1f0f03..84863b0974d1511f83cbfb81abf62eed
              !keepAllPlayerData, TeleportTransition.DO_NOTHING, respawnReason
          ).whenComplete((result, throwable) -> {
 @@ -852,7 +853,7 @@ public abstract class PlayerList {
-
+ 
                              runWithRespawnOwnerContexts(serverPlayer, transition, () -> {
                                  final ServerPlayer respawned = this.respawnWithResult(
 -                                    serverPlayer, keepAllPlayerData, removalReason, respawnReason, result
@@ -459,7 +459,7 @@ index 23058ff83012f0d1d6c80abdac76ca71db1f0f03..84863b0974d1511f83cbfb81abf62eed
                              });
 @@ -873,11 +874,12 @@ public abstract class PlayerList {
      }
-
+ 
      public ServerPlayer respawn(final ServerPlayer serverPlayer, final boolean keepAllPlayerData, final Entity.RemovalReason removalReason, final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason) {
 +        final ServerPlayer.RespawnConfig respawnConfig = serverPlayer.getRespawnConfig();
          ServerPlayer.RespawnResult result = serverPlayer.findRespawnPositionAndUseSpawnBlock0(!keepAllPlayerData, TeleportTransition.DO_NOTHING, respawnReason);
@@ -469,7 +469,7 @@ index 23058ff83012f0d1d6c80abdac76ca71db1f0f03..84863b0974d1511f83cbfb81abf62eed
 -        return this.respawnWithResult(serverPlayer, keepAllPlayerData, removalReason, respawnReason, result);
 +        return this.respawnWithResult(serverPlayer, keepAllPlayerData, removalReason, respawnReason, result, respawnConfig);
      }
-
+ 
      private ServerPlayer respawnWithResult(
 @@ -885,7 +887,8 @@ public abstract class PlayerList {
          final boolean keepAllPlayerData,
@@ -509,11 +509,11 @@ index c6bdff28889a68dd96e7e810cf6b8276642a3e2c..6f225fe85adcc53971c576395296e296
      private MinecraftServer server;
 +    private @org.jspecify.annotations.Nullable ServerLevel level; // Paper - per-world time
      private final Map<Holder<WorldClock>, ServerClockManager.ClockInstance> clocks = new HashMap<>();
-
+ 
      private ServerClockManager(final PackedClockStates packedClockStates) {
 @@ -37,6 +38,13 @@ public class ServerClockManager extends SavedData implements ClockManager {
      }
-
+ 
      public void init(final MinecraftServer server) {
 +        // Paper start - per-world time
 +        this.init(server, null);
@@ -526,7 +526,7 @@ index c6bdff28889a68dd96e7e810cf6b8276642a3e2c..6f225fe85adcc53971c576395296e296
          server.registryAccess()
              .lookupOrThrow(Registries.WORLD_CLOCK)
 @@ -62,7 +70,7 @@ public class ServerClockManager extends SavedData implements ClockManager {
-
+ 
      public void tick() {
          this.ensureGlobalOwner("tick");
 -        boolean advanceTime = this.server.getGlobalGameRules().get(GameRules.ADVANCE_TIME);
@@ -543,7 +543,7 @@ index c6bdff28889a68dd96e7e810cf6b8276642a3e2c..6f225fe85adcc53971c576395296e296
 +        // Paper start - per-world time
 +        this.broadcastUpdates(clock, instance);
          this.setDirty();
-
+ 
 +        if (this.level != null) {
 +            this.level.environmentAttributes().invalidateTickCache();
 +        } else {
@@ -553,11 +553,11 @@ index c6bdff28889a68dd96e7e810cf6b8276642a3e2c..6f225fe85adcc53971c576395296e296
 +        }
 +        // Paper end - per-world time
      }
-
+ 
      @Override
 @@ -153,13 +166,22 @@ public class ServerClockManager extends SavedData implements ClockManager {
      // Paper end
-
+ 
      public ClientboundSetTimePacket createFullSyncPacket() {
 -        // TODO: restore per-player time sync for 26.1.
 -        return new ClientboundSetTimePacket(this.getGameTime(), Util.mapValues(this.clocks, clock -> clock.packNetworkState(this.server)));
@@ -571,7 +571,7 @@ index c6bdff28889a68dd96e7e810cf6b8276642a3e2c..6f225fe85adcc53971c576395296e296
 +        return new ClientboundSetTimePacket(this.getGameTime(), updates);
 +        // Paper end - per-player time
      }
-
+ 
      public void broadcastFullSyncPacket() {
          this.ensureGlobalOwner("broadcast full sync packet");
 -        this.server.getPlayerList().broadcastAll(this.createFullSyncPacket());
@@ -579,11 +579,11 @@ index c6bdff28889a68dd96e7e810cf6b8276642a3e2c..6f225fe85adcc53971c576395296e296
 +            player.connection.send(this.createFullSyncPacket(player));
 +        }
      }
-
+ 
      private void ensureGlobalOwner(final String operation) {
 @@ -170,8 +192,36 @@ public class ServerClockManager extends SavedData implements ClockManager {
      }
-
+ 
      private long getGameTime() {
 -        return this.server.overworld().getGameTime();
 +        return this.level != null ? this.level.getGameTime() : this.server.overworld().getGameTime(); // Paper - per-world time
@@ -616,13 +616,13 @@ index c6bdff28889a68dd96e7e810cf6b8276642a3e2c..6f225fe85adcc53971c576395296e296
 +        return this.level != null ? this.level.getGameRules().get(GameRules.ADVANCE_TIME) : this.server.getGlobalGameRules().get(GameRules.ADVANCE_TIME);
      }
 +    // Paper end - per-world time; per-player time
-
+ 
      public boolean isAtTimeMarker(final Holder<WorldClock> clock, final ResourceKey<ClockTimeMarker> timeMarkerId) {
          ServerClockManager.ClockInstance clockInstance = this.getInstance(clock);
 @@ -210,8 +260,7 @@ public class ServerClockManager extends SavedData implements ClockManager {
              return new ClockState(this.totalTicks, this.partialTick, this.rate, this.paused);
          }
-
+ 
 -        public ClockNetworkState packNetworkState(final MinecraftServer server) {
 -            boolean advanceTime = server.getGlobalGameRules().get(GameRules.ADVANCE_TIME);
 +        public ClockNetworkState packNetworkState(final boolean advanceTime) { // Paper - per-world time
@@ -638,7 +638,7 @@ index e697cd58f93e4799ceec0843fe8fe589ee00e093..25a343230231234b728469e335f0586c
      private int sourceFireTicks;
      private long sourcePositionSyncGameTime = Long.MIN_VALUE;
 +    private boolean sourceStateCaptured;
-
+ 
 -    public PortalProcessor(final Portal portal, final BlockPos portalEntryPosition, final Entity entity) {
 +    public PortalProcessor(final Portal portal, final BlockPos portalEntryPosition) {
          this.portal = portal;
@@ -650,10 +650,10 @@ index e697cd58f93e4799ceec0843fe8fe589ee00e093..25a343230231234b728469e335f0586c
 +        this(portal, portalEntryPosition);
          this.captureSourceState(entity);
      }
-
+ 
 @@ -48,6 +53,7 @@ public class PortalProcessor {
      }
-
+ 
      public @Nullable TeleportTransition getPortalDestination(final ServerLevel serverLevel, final Entity entity) {
 +        this.ensureSourceStateCaptured(entity);
          this.destinationPending = false;
@@ -665,7 +665,7 @@ index e697cd58f93e4799ceec0843fe8fe589ee00e093..25a343230231234b728469e335f0586c
          this.sourcePositionSyncGameTime = Long.MIN_VALUE;
 +        this.sourceStateCaptured = true;
      }
-
+ 
      public void holdSourceState(final Entity entity) {
 +        this.ensureSourceStateCaptured(entity);
          entity.absSnapTo(this.sourcePosition.x(), this.sourcePosition.y(), this.sourcePosition.z(), entity.getYRot(), entity.getXRot());
@@ -673,7 +673,7 @@ index e697cd58f93e4799ceec0843fe8fe589ee00e093..25a343230231234b728469e335f0586c
          entity.fallDistance = this.sourceFallDistance;
 @@ -135,12 +143,19 @@ public class PortalProcessor {
      }
-
+ 
      private void restoreSourceState(final Entity entity) {
 +        this.ensureSourceStateCaptured(entity);
          entity.absSnapTo(this.sourcePosition.x(), this.sourcePosition.y(), this.sourcePosition.z(), entity.getYRot(), entity.getXRot());
@@ -681,7 +681,7 @@ index e697cd58f93e4799ceec0843fe8fe589ee00e093..25a343230231234b728469e335f0586c
          entity.fallDistance = this.sourceFallDistance;
          entity.setRemainingFireTicks(this.sourceFireTicks);
      }
-
+ 
 +    private void ensureSourceStateCaptured(final Entity entity) {
 +        if (!this.sourceStateCaptured) {
 +            this.captureSourceState(entity);
@@ -698,7 +698,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..23a570035161338a223b210284b9fe70
 @@ -150,12 +150,38 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      private final CraftWorld world;
      public org.bukkit.generator.@Nullable ChunkGenerator generator;
-
+ 
 +    // Loom start - legacy Paper capture-field compatibility
 +    // Upstream Paper exposed these mutable public fields as the de facto NMS plugin API for world
 +    // mutation capture (FAWE and others link against them directly); LevelCaptureContext replaced them
@@ -739,7 +739,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..23a570035161338a223b210284b9fe70
      public boolean populating;
      public final org.spigotmc.SpigotWorldConfig spigotConfig; // Spigot
 @@ -190,13 +216,18 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
-
+ 
      public final boolean isCaptureModeActive(final int mode) {
          final LevelCaptureContext.Frame context = this.currentCaptureContext();
 -        return context != null && context.hasMode(mode);
@@ -748,7 +748,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..23a570035161338a223b210284b9fe70
 +        }
 +        return this.legacyCaptureActive(mode); // Loom - legacy Paper capture-field compatibility
      }
-
+ 
      public final void setCapturedTreeType(final org.bukkit.TreeType treeType) {
          final LevelCaptureContext.Frame context = this.currentCaptureContext();
          if (context != null && context.hasMode(LevelCaptureContext.TREE)) {
@@ -757,7 +757,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..23a570035161338a223b210284b9fe70
 +            net.minecraft.world.level.block.SaplingBlock.treeType = treeType;
          }
      }
-
+ 
 @@ -210,6 +241,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      public final boolean captureItemDrop(final net.minecraft.world.entity.item.ItemEntity item) {
          final LevelCaptureContext.Frame context = this.currentCaptureContext();
@@ -835,7 +835,7 @@ index 428a9b90b218431bcdb9ed18316865654ca9bd75..23a570035161338a223b210284b9fe70
              return false;
 @@ -1177,7 +1247,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
          */ // CraftBukkit
-
+ 
          // CraftBukkit start
 -        if (captureContext == null || !captureContext.hasMode(LevelCaptureContext.BLOCK_STATES)) { // Don't notify clients or update physics while capturing blockstates
 +                if ((captureContext == null || !captureContext.hasMode(LevelCaptureContext.BLOCK_STATES)) && !this.legacyCaptureActive(LevelCaptureContext.BLOCK_STATES)) { // Don't notify clients or update physics while capturing blockstates // Loom - legacy Paper capture-field compatibility
@@ -888,7 +888,7 @@ index e3398cfef77c306f03a16f03e1234489e10a33b7..d7f44d2168faa6b2116408bb769fd0a9
      private static final VoxelShape SHAPE = Block.column(12.0, 0.0, 12.0);
      protected final TreeGrower treeGrower;
 +    public static org.bukkit.@org.jspecify.annotations.Nullable TreeType treeType; // CraftBukkit
-
+ 
      @Override
      public MapCodec<? extends SaplingBlock> codec() {
 diff --git a/net/minecraft/world/level/block/entity/HopperBlockEntity.java b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
@@ -897,7 +897,7 @@ index 4b87eb54828f422b627e59a2714179e58c8617e8..4f1a8d6f8e5fe8abf624ca212d1c8074
 +++ b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
 @@ -219,6 +219,8 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
      }
-
+ 
      // Paper start - Perf: Optimize Hoppers
 +    public static boolean skipHopperEvents;
 +
@@ -936,7 +936,7 @@ index ed7e541b422ef4cc8e86cc397b17311bafb5ae6f..a04be389ba8c0cd968837d2a381fe61f
              }
 @@ -627,6 +626,12 @@ public abstract class StructurePiece {
      }
-
+ 
      public abstract static class BlockSelector {
 -        public abstract BlockState next(RandomSource random, int worldX, int worldY, int worldZ, boolean isEdge);
 +        protected BlockState next = Blocks.AIR.defaultBlockState();
@@ -963,7 +963,7 @@ index a1fd4b1214644d898fc4b6ae8d7cc3714951b088..551fb6c4d4c9d1bc410da20c1710a879
 +    private static JungleTemplePiece.MossStoneSelector stoneSelector() {
 +        return THREAD_LOCAL_STONE_SELECTOR.get();
 +    }
-
+ 
      public JungleTemplePiece(final RandomSource random, final int west, final int north) {
          super(StructurePieceType.JUNGLE_PYRAMID_PIECE, west, 64, north, 12, 10, 15, getRandomHorizontalDirection(random));
 @@ -68,19 +75,19 @@ public class JungleTemplePiece extends ScatteredFeaturePiece {
@@ -1001,7 +1001,7 @@ index a1fd4b1214644d898fc4b6ae8d7cc3714951b088..551fb6c4d4c9d1bc410da20c1710a879
              this.generateAirBox(level, chunkBB, 2, 4, 2, 9, 5, 12);
 @@ -96,32 +103,32 @@ public class JungleTemplePiece extends ScatteredFeaturePiece {
              this.placeBlock(level, Blocks.AIR.defaultBlockState(), 10, 5, 9, chunkBB);
-
+ 
              for (int z = 0; z <= 14; z += 14) {
 -                this.generateBox(level, chunkBB, 2, 4, z, 2, 5, z, false, random, STONE_SELECTOR);
 -                this.generateBox(level, chunkBB, 4, 4, z, 4, 5, z, false, random, STONE_SELECTOR);
@@ -1012,22 +1012,22 @@ index a1fd4b1214644d898fc4b6ae8d7cc3714951b088..551fb6c4d4c9d1bc410da20c1710a879
 +                this.generateBox(level, chunkBB, 7, 4, z, 7, 5, z, false, random, stoneSelector());
 +                this.generateBox(level, chunkBB, 9, 4, z, 9, 5, z, false, random, stoneSelector());
              }
-
+ 
 -            this.generateBox(level, chunkBB, 5, 6, 0, 6, 6, 0, false, random, STONE_SELECTOR);
 +            this.generateBox(level, chunkBB, 5, 6, 0, 6, 6, 0, false, random, stoneSelector());
-
+ 
              for (int x = 0; x <= 11; x += 11) {
                  for (int z = 2; z <= 12; z += 2) {
 -                    this.generateBox(level, chunkBB, x, 4, z, x, 5, z, false, random, STONE_SELECTOR);
 +                    this.generateBox(level, chunkBB, x, 4, z, x, 5, z, false, random, stoneSelector());
                  }
-
+ 
 -                this.generateBox(level, chunkBB, x, 6, 5, x, 6, 5, false, random, STONE_SELECTOR);
 -                this.generateBox(level, chunkBB, x, 6, 9, x, 6, 9, false, random, STONE_SELECTOR);
 +                this.generateBox(level, chunkBB, x, 6, 5, x, 6, 5, false, random, stoneSelector());
 +                this.generateBox(level, chunkBB, x, 6, 9, x, 6, 9, false, random, stoneSelector());
              }
-
+ 
 -            this.generateBox(level, chunkBB, 2, 7, 2, 2, 9, 2, false, random, STONE_SELECTOR);
 -            this.generateBox(level, chunkBB, 9, 7, 2, 9, 9, 2, false, random, STONE_SELECTOR);
 -            this.generateBox(level, chunkBB, 2, 7, 12, 2, 9, 12, false, random, STONE_SELECTOR);
@@ -1063,20 +1063,20 @@ index a1fd4b1214644d898fc4b6ae8d7cc3714951b088..551fb6c4d4c9d1bc410da20c1710a879
 +            this.generateBox(level, chunkBB, 5, 4, 5, 6, 4, 5, false, random, stoneSelector());
              this.placeBlock(level, eastStairs, 4, 4, 5, chunkBB);
              this.placeBlock(level, westStairs, 7, 4, 5, chunkBB);
-
+ 
 @@ -158,17 +165,17 @@ public class JungleTemplePiece extends ScatteredFeaturePiece {
              this.generateAirBox(level, chunkBB, 1, -3, 1, 9, -1, 5);
-
+ 
              for (int z = 1; z <= 13; z += 2) {
 -                this.generateBox(level, chunkBB, 1, -3, z, 1, -2, z, false, random, STONE_SELECTOR);
 +                this.generateBox(level, chunkBB, 1, -3, z, 1, -2, z, false, random, stoneSelector());
              }
-
+ 
              for (int z = 2; z <= 12; z += 2) {
 -                this.generateBox(level, chunkBB, 1, -1, z, 3, -1, z, false, random, STONE_SELECTOR);
 +                this.generateBox(level, chunkBB, 1, -1, z, 3, -1, z, false, random, stoneSelector());
              }
-
+ 
 -            this.generateBox(level, chunkBB, 2, -2, 1, 5, -2, 1, false, random, STONE_SELECTOR);
 -            this.generateBox(level, chunkBB, 7, -2, 1, 9, -2, 1, false, random, STONE_SELECTOR);
 -            this.generateBox(level, chunkBB, 6, -3, 1, 6, -3, 1, false, random, STONE_SELECTOR);
@@ -1109,7 +1109,7 @@ index a1fd4b1214644d898fc4b6ae8d7cc3714951b088..551fb6c4d4c9d1bc410da20c1710a879
              this.placeBlock(level, redstoneWireNS, 8, -2, 9, chunkBB);
              this.placeBlock(level, redstoneWireNS, 8, -2, 10, chunkBB);
 @@ -392,11 +399,11 @@ public class JungleTemplePiece extends ScatteredFeaturePiece {
-
+ 
      private static class MossStoneSelector extends StructurePiece.BlockSelector {
          @Override
 -        public BlockState next(final RandomSource random, final int worldX, final int worldY, final int worldZ, final boolean isEdge) {
@@ -1149,7 +1149,7 @@ index a4648518002feab94f5aa4a98cbdb09815c7e458..50a4f8f7aa21ca45d884c17f19877deb
 +        NEXT_ASSEMBLY_STATE.remove();
 +        return assemblyState != null ? assemblyState : new StrongholdPieces.AssemblyState();
 +    }
-
+ 
      private static StrongholdPieces.@Nullable StrongholdPiece findAndCreatePieceFactory(
          final Class<? extends StrongholdPieces.StrongholdPiece> pieceClass,
 @@ -140,7 +158,7 @@ public class StrongholdPieces {
@@ -1160,7 +1160,7 @@ index a4648518002feab94f5aa4a98cbdb09815c7e458..50a4f8f7aa21ca45d884c17f19877deb
 +                    if (!piece.doPlace(depth) || piece.definition == startPiece.previousPiece) {
                          break;
                      }
-
+ 
 @@ -149,7 +167,7 @@ public class StrongholdPieces {
                      );
                      if (strongholdPiece != null) {
@@ -1190,7 +1190,7 @@ index a4648518002feab94f5aa4a98cbdb09815c7e458..50a4f8f7aa21ca45d884c17f19877deb
                  this.generateBox(level, chunkBB, 0, 3, 1, 0, 5, 3, CAVE_AIR, CAVE_AIR, false);
 @@ -453,18 +471,18 @@ public class StrongholdPieces {
              }
-
+ 
              this.generateBox(level, chunkBB, 5, 1, 10, 7, 3, 10, CAVE_AIR, CAVE_AIR, false);
 -            this.generateBox(level, chunkBB, 1, 2, 1, 8, 2, 6, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
 -            this.generateBox(level, chunkBB, 4, 1, 5, 4, 4, 9, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
@@ -1225,20 +1225,20 @@ index a4648518002feab94f5aa4a98cbdb09815c7e458..50a4f8f7aa21ca45d884c17f19877deb
 @@ -611,7 +629,7 @@ public class StrongholdPieces {
                  currentHeight = 6;
              }
-
+ 
 -            this.generateBox(level, chunkBB, 0, 0, 0, 13, currentHeight - 1, 14, true, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
 +            this.generateBox(level, chunkBB, 0, 0, 0, 13, currentHeight - 1, 14, true, random, StrongholdPieces.smoothStoneSelector());
              this.generateSmallDoor(level, random, chunkBB, this.entryDoor, 4, 1, 0);
              this.generateMaybeBox(
                  level, chunkBB, random, 0.07F, 2, 1, 1, 11, 4, 13, Blocks.COBWEB.defaultBlockState(), Blocks.COBWEB.defaultBlockState(), false, false
 @@ -762,7 +780,6 @@ public class StrongholdPieces {
-
+ 
      private static final class AssemblyState {
          private final List<StrongholdPieces.PieceState> currentPieces = Lists.newArrayList();
 -        private StrongholdPieces.@Nullable PieceState previousPiece;
          private @Nullable Class<? extends StrongholdPieces.StrongholdPiece> imposedPiece;
          private int totalWeight;
-
+ 
 @@ -839,18 +856,18 @@ public class StrongholdPieces {
              final ChunkPos chunkPos,
              final BlockPos referencePos
@@ -1268,7 +1268,7 @@ index a4648518002feab94f5aa4a98cbdb09815c7e458..50a4f8f7aa21ca45d884c17f19877deb
              BlockState weBars = Blocks.IRON_BARS.defaultBlockState().setValue(IronBarsBlock.WEST, true).setValue(IronBarsBlock.EAST, true);
 @@ -865,9 +882,9 @@ public class StrongholdPieces {
              }
-
+ 
              BlockState blockState = Blocks.STONE_BRICK_STAIRS.defaultBlockState().setValue(StairBlock.FACING, Direction.NORTH);
 -            this.generateBox(level, chunkBB, 4, 1, 5, 6, 1, 7, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
 -            this.generateBox(level, chunkBB, 4, 2, 6, 6, 2, 7, false, random, StrongholdPieces.SMOOTH_STONE_SELECTOR);
@@ -1276,7 +1276,7 @@ index a4648518002feab94f5aa4a98cbdb09815c7e458..50a4f8f7aa21ca45d884c17f19877deb
 +            this.generateBox(level, chunkBB, 4, 1, 5, 6, 1, 7, false, random, StrongholdPieces.smoothStoneSelector());
 +            this.generateBox(level, chunkBB, 4, 2, 6, 6, 2, 7, false, random, StrongholdPieces.smoothStoneSelector());
 +            this.generateBox(level, chunkBB, 4, 3, 7, 6, 3, 7, false, random, StrongholdPieces.smoothStoneSelector());
-
+ 
              for (int x = 4; x <= 6; x++) {
                  this.placeBlock(level, blockState, x, 1, 4, chunkBB);
 @@ -973,13 +990,13 @@ public class StrongholdPieces {
@@ -1295,7 +1295,7 @@ index a4648518002feab94f5aa4a98cbdb09815c7e458..50a4f8f7aa21ca45d884c17f19877deb
 +            this.generateBox(level, chunkBB, 4, 1, 3, 4, 3, 3, false, random, StrongholdPieces.smoothStoneSelector());
 +            this.generateBox(level, chunkBB, 4, 1, 7, 4, 3, 7, false, random, StrongholdPieces.smoothStoneSelector());
 +            this.generateBox(level, chunkBB, 4, 1, 9, 4, 3, 9, false, random, StrongholdPieces.smoothStoneSelector());
-
+ 
              for (int y = 1; y <= 3; y++) {
                  this.placeBlock(
 @@ -1075,7 +1092,7 @@ public class StrongholdPieces {
@@ -1317,7 +1317,7 @@ index a4648518002feab94f5aa4a98cbdb09815c7e458..50a4f8f7aa21ca45d884c17f19877deb
              this.generateBox(level, chunkBB, 4, 1, 10, 6, 3, 10, CAVE_AIR, CAVE_AIR, false);
              this.generateBox(level, chunkBB, 0, 1, 4, 0, 3, 6, CAVE_AIR, CAVE_AIR, false);
 @@ -1231,20 +1248,20 @@ public class StrongholdPieces {
-
+ 
      private static class SmoothStoneSelector extends StructurePiece.BlockSelector {
          @Override
 -        public BlockState next(final RandomSource random, final int worldX, final int worldY, final int worldZ, final boolean isEdge) {
@@ -1354,24 +1354,24 @@ index a4648518002feab94f5aa4a98cbdb09815c7e458..50a4f8f7aa21ca45d884c17f19877deb
              this.placeBlock(level, Blocks.STONE_BRICKS.defaultBlockState(), 2, 6, 1, chunkBB);
 @@ -1342,16 +1359,19 @@ public class StrongholdPieces {
      }
-
+ 
      public static class StartPiece extends StrongholdPieces.StairsDown {
 -        private final StrongholdPieces.AssemblyState assemblyState = new StrongholdPieces.AssemblyState();
 +        private final StrongholdPieces.AssemblyState assemblyState;
 +        public StrongholdPieces.@Nullable PieceWeight previousPiece;
          public StrongholdPieces.@Nullable PortalRoom portalRoomPiece;
          public final List<StructurePiece> pendingChildren = Lists.newArrayList();
-
+ 
          public StartPiece(final RandomSource random, final int west, final int north) {
              super(StructurePieceType.STRONGHOLD_START, 0, west, north, getRandomHorizontalDirection(random));
 +            this.assemblyState = takeAssemblyState();
          }
-
+ 
          public StartPiece(final CompoundTag tag) {
              super(StructurePieceType.STRONGHOLD_START, tag);
 +            this.assemblyState = new StrongholdPieces.AssemblyState();
          }
-
+ 
          @Override
 @@ -1425,7 +1445,7 @@ public class StrongholdPieces {
              final ChunkPos chunkPos,

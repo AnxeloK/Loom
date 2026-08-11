@@ -9,7 +9,7 @@ index f344f8794a00c80fe304bf8fdb7b46f2aecccb14..a8f62bd3412cbac0078d859e4d5a540f
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
 @@ -152,14 +152,19 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
-
+ 
      // Loom start - legacy Paper capture-field compatibility
      // Upstream Paper exposed these mutable public fields as the de facto NMS plugin API for world
 -    // mutation capture (FAWE and others link against them directly); LevelCaptureContext replaced them
@@ -29,7 +29,7 @@ index f344f8794a00c80fe304bf8fdb7b46f2aecccb14..a8f62bd3412cbac0078d859e4d5a540f
 +    public Map<BlockPos, BlockEntity> capturedTileEntities = this.capturedBlockEntities;
      @Nullable
      public List<net.minecraft.world.entity.item.ItemEntity> captureDrops;
-
+ 
 @@ -1862,7 +1867,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
                  return captured;
              }
