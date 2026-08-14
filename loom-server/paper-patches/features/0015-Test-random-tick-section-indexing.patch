@@ -1,0 +1,183 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Fri, 14 Aug 2026 08:01:45 +0300
+Subject: [PATCH] Test random tick section indexing
+
+Cover base and overflow sections together with live add and removal ordering.
+
+diff --git a/src/test/java/net/minecraft/world/level/chunk/RandomTickingBlockSectionIndexTest.java b/src/test/java/net/minecraft/world/level/chunk/RandomTickingBlockSectionIndexTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..03aae6387a0ffcedfd595e85b5054776aa3ecda7
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/level/chunk/RandomTickingBlockSectionIndexTest.java
+@@ -0,0 +1,149 @@
++package net.minecraft.world.level.chunk;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++
++@Normal
++class RandomTickingBlockSectionIndexTest {
++
++    @Test
++    void findsBaseAndOverflowSectionsInAscendingOrder() {
++        long base = 0L;
++        base = RandomTickingBlockSectionIndex.setBase(base, 0, true);
++        base = RandomTickingBlockSectionIndex.setBase(base, 17, true);
++        base = RandomTickingBlockSectionIndex.setBase(base, 63, true);
++
++        long[] overflow = null;
++        overflow = RandomTickingBlockSectionIndex.setOverflow(overflow, 64, true);
++        overflow = RandomTickingBlockSectionIndex.setOverflow(overflow, 65, true);
++        overflow = RandomTickingBlockSectionIndex.setOverflow(overflow, 129, true);
++        final long indexedBase = base;
++        final long[] indexedOverflow = overflow;
++
++        Assertions.assertAll(
++            () -> Assertions.assertEquals(0, RandomTickingBlockSectionIndex.next(indexedBase, indexedOverflow, 0)),
++            () -> Assertions.assertEquals(17, RandomTickingBlockSectionIndex.next(indexedBase, indexedOverflow, 1)),
++            () -> Assertions.assertEquals(63, RandomTickingBlockSectionIndex.next(indexedBase, indexedOverflow, 18)),
++            () -> Assertions.assertEquals(64, RandomTickingBlockSectionIndex.next(indexedBase, indexedOverflow, 64)),
++            () -> Assertions.assertEquals(65, RandomTickingBlockSectionIndex.next(indexedBase, indexedOverflow, 65)),
++            () -> Assertions.assertEquals(129, RandomTickingBlockSectionIndex.next(indexedBase, indexedOverflow, 66)),
++            () -> Assertions.assertEquals(-1, RandomTickingBlockSectionIndex.next(indexedBase, indexedOverflow, 130))
++        );
++    }
++
++    @Test
++    void liveChangesOnlyAffectSectionsNotYetVisited() {
++        long base = 0L;
++        base = RandomTickingBlockSectionIndex.setBase(base, 2, true);
++        base = RandomTickingBlockSectionIndex.setBase(base, 7, true);
++
++        Assertions.assertEquals(2, RandomTickingBlockSectionIndex.next(base, null, 0));
++
++        base = RandomTickingBlockSectionIndex.setBase(base, 2, false);
++        base = RandomTickingBlockSectionIndex.setBase(base, 5, true);
++        Assertions.assertEquals(5, RandomTickingBlockSectionIndex.next(base, null, 3));
++
++        base = RandomTickingBlockSectionIndex.setBase(base, 7, false);
++        base = RandomTickingBlockSectionIndex.setBase(base, 1, true);
++        Assertions.assertEquals(-1, RandomTickingBlockSectionIndex.next(base, null, 6));
++        Assertions.assertEquals(1, RandomTickingBlockSectionIndex.next(base, null, 0));
++    }
++
++    @Test
++    void clearingMissingOverflowSectionDoesNotAllocate() {
++        Assertions.assertNull(RandomTickingBlockSectionIndex.setOverflow(null, 96, false));
++    }
++
++    @Test
++    void matchesLinearScanAcrossSeededLiveMutations() {
++        final Random random = new Random(0x5EED5EC710L);
++        for (int trial = 0; trial < 1_000; trial++) {
++            final int sectionCount = 1 + random.nextInt(192);
++            final boolean[] initialSections = new boolean[sectionCount];
++            for (int sectionIndex = 0; sectionIndex < sectionCount; sectionIndex++) {
++                initialSections[sectionIndex] = random.nextInt(4) == 0;
++            }
++
++            final int[][] mutationTargets = new int[sectionCount][4];
++            final boolean[][] mutationStates = new boolean[sectionCount][4];
++            for (int visit = 0; visit < sectionCount; visit++) {
++                for (int mutation = 0; mutation < mutationTargets[visit].length; mutation++) {
++                    mutationTargets[visit][mutation] = random.nextInt(sectionCount);
++                    mutationStates[visit][mutation] = random.nextBoolean();
++                }
++            }
++
++            final List<Integer> expected = scanLinearly(initialSections, mutationTargets, mutationStates);
++            final List<Integer> actual = scanIndex(initialSections, mutationTargets, mutationStates);
++            Assertions.assertEquals(expected, actual, "trial " + trial);
++        }
++    }
++
++    private static List<Integer> scanLinearly(
++        final boolean[] initialSections,
++        final int[][] mutationTargets,
++        final boolean[][] mutationStates
++    ) {
++        final boolean[] activeSections = initialSections.clone();
++        final List<Integer> visited = new ArrayList<>();
++        for (int sectionIndex = 0; sectionIndex < activeSections.length; sectionIndex++) {
++            if (!activeSections[sectionIndex]) {
++                continue;
++            }
++            applyMutations(activeSections, mutationTargets, mutationStates, visited.size());
++            visited.add(sectionIndex);
++        }
++        return visited;
++    }
++
++    private static List<Integer> scanIndex(
++        final boolean[] initialSections,
++        final int[][] mutationTargets,
++        final boolean[][] mutationStates
++    ) {
++        long base = 0L;
++        long[] overflow = null;
++        for (int sectionIndex = 0; sectionIndex < initialSections.length; sectionIndex++) {
++            if (sectionIndex < Long.SIZE) {
++                base = RandomTickingBlockSectionIndex.setBase(base, sectionIndex, initialSections[sectionIndex]);
++            } else {
++                overflow = RandomTickingBlockSectionIndex.setOverflow(overflow, sectionIndex, initialSections[sectionIndex]);
++            }
++        }
++
++        final List<Integer> visited = new ArrayList<>();
++        for (
++            int sectionIndex = RandomTickingBlockSectionIndex.next(base, overflow, 0);
++            sectionIndex >= 0;
++            sectionIndex = RandomTickingBlockSectionIndex.next(base, overflow, sectionIndex + 1)
++        ) {
++            final int visit = visited.size();
++            for (int mutation = 0; mutation < mutationTargets[visit].length; mutation++) {
++                final int target = mutationTargets[visit][mutation];
++                final boolean active = mutationStates[visit][mutation];
++                if (target < Long.SIZE) {
++                    base = RandomTickingBlockSectionIndex.setBase(base, target, active);
++                } else {
++                    overflow = RandomTickingBlockSectionIndex.setOverflow(overflow, target, active);
++                }
++            }
++            visited.add(sectionIndex);
++        }
++        return visited;
++    }
++
++    private static void applyMutations(
++        final boolean[] activeSections,
++        final int[][] mutationTargets,
++        final boolean[][] mutationStates,
++        final int visit
++    ) {
++        for (int mutation = 0; mutation < mutationTargets[visit].length; mutation++) {
++            activeSections[mutationTargets[visit][mutation]] = mutationStates[visit][mutation];
++        }
++    }
++}
+diff --git a/src/test/java/net/minecraft/world/level/chunk/RandomTickingBlockSectionIndexTestSuite.java b/src/test/java/net/minecraft/world/level/chunk/RandomTickingBlockSectionIndexTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..8e9db7946cb093e58e51456145629fb3af2bd725
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/level/chunk/RandomTickingBlockSectionIndexTestSuite.java
+@@ -0,0 +1,15 @@
++package net.minecraft.world.level.chunk;
++
++import org.junit.platform.suite.api.ConfigurationParameter;
++import org.junit.platform.suite.api.IncludeTags;
++import org.junit.platform.suite.api.SelectClasses;
++import org.junit.platform.suite.api.Suite;
++import org.junit.platform.suite.api.SuiteDisplayName;
++
++@Suite
++@SuiteDisplayName("Random tick section indexing")
++@IncludeTags("Normal")
++@SelectClasses(RandomTickingBlockSectionIndexTest.class)
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class RandomTickingBlockSectionIndexTestSuite {
++}

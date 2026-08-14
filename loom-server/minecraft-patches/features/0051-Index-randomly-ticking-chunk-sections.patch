@@ -1,0 +1,200 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Fri, 14 Aug 2026 08:01:45 +0300
+Subject: [PATCH] Index randomly ticking chunk sections
+
+Track active vertical sections per full chunk so random ticking skips empty sections while preserving section order and live mutations.
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index a232577ad5167bc673737180fd91d9c0d5cd2331..2f3f8a6d87f10e26ac974de514ca415c2c769b8d 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1059,13 +1059,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         final int offsetX = chunk.locX << 4;
+         final int offsetZ = chunk.locZ << 4;
+ 
+-        for (int sectionIndex = 0, sectionsLen = sections.length; sectionIndex < sectionsLen; sectionIndex++) {
++        for (
++            int sectionIndex = chunk.loom$getNextRandomlyTickingBlockSectionIndex(0);
++            sectionIndex >= 0;
++            sectionIndex = chunk.loom$getNextRandomlyTickingBlockSectionIndex(sectionIndex + 1)
++        ) {
+             final int offsetY = (sectionIndex + minSection) << 4;
+             final LevelChunkSection section = sections[sectionIndex];
+             final net.minecraft.world.level.chunk.PalettedContainer<net.minecraft.world.level.block.state.BlockState> states = section.getStates();
+-            if (!section.isRandomlyTickingBlocks()) {
+-                continue;
+-            }
+ 
+             final ca.spottedleaf.moonrise.common.list.ShortList tickList = ((ca.spottedleaf.moonrise.patches.block_counting.BlockCountingChunkSection)section).moonrise$getTickingBlockList();
+ 
+diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
+index 2955550bbc0eb46e31ce88d3e726527dcde9bce6..282072ef35079572de08dc9ad7e00bb856466916 100644
+--- a/net/minecraft/world/level/chunk/LevelChunk.java
++++ b/net/minecraft/world/level/chunk/LevelChunk.java
+@@ -96,6 +96,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+     private final LevelChunkTicks<Block> blockTicks;
+     private final LevelChunkTicks<Fluid> fluidTicks;
+     private LevelChunk.UnsavedListener unsavedListener = chunkPos -> {};
++    // Loom - compact index of vertical sections containing randomly ticking blocks. The common case fits
++    // in one long; unusually tall dimensions allocate overflow words only when an upper section becomes active.
++    private long loom$randomlyTickingBlockSections;
++    private long @Nullable [] loom$randomlyTickingBlockSectionsOverflow;
+     // CraftBukkit start
+     public boolean mustNotSave;
+     public boolean needsDecoration;
+@@ -278,6 +282,13 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+         this.debug = !empty && this.level.isDebug();
+         this.defaultBlockState = empty ? VOID_AIR_BLOCKSTATE : AIR_BLOCKSTATE;
+         // Paper end - get block chunk optimisation
++        // Loom start - index randomly ticking chunk sections
++        for (int sectionIndex = 0; sectionIndex < this.sections.length; ++sectionIndex) {
++            if (this.sections[sectionIndex].isRandomlyTickingBlocks()) {
++                this.loom$setRandomlyTickingBlockSection(sectionIndex, true);
++            }
++        }
++        // Loom end - index randomly ticking chunk sections
+     }
+ 
+     public LevelChunk(final ServerLevel level, final ProtoChunk protoChunk, final LevelChunk.@Nullable PostLoadProcessor postLoad) {
+@@ -472,8 +483,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+     @Override
+     public @Nullable BlockState setBlockState(final BlockPos pos, final BlockState state, final @Block.UpdateFlags int flags) {
+         int y = pos.getY();
+-        LevelChunkSection section = this.getSection(this.getSectionIndex(y));
++        final int sectionIndex = this.getSectionIndex(y);
++        LevelChunkSection section = this.getSection(sectionIndex);
+         boolean wasEmpty = section.hasOnlyAir();
++        final boolean wasRandomlyTickingBlocks = section.isRandomlyTickingBlocks(); // Loom - index randomly ticking chunk sections
+         if (wasEmpty && state.isAir()) {
+             return null;
+         }
+@@ -486,6 +499,13 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+             return null;
+         }
+ 
++        // Loom start - index randomly ticking chunk sections
++        final boolean isRandomlyTickingBlocks = section.isRandomlyTickingBlocks();
++        if (wasRandomlyTickingBlocks != isRandomlyTickingBlocks) {
++            this.loom$setRandomlyTickingBlockSection(sectionIndex, isRandomlyTickingBlocks);
++        }
++        // Loom end - index randomly ticking chunk sections
++
+         Block newBlock = state.getBlock();
+         this.heightmaps.get(Heightmap.Types.MOTION_BLOCKING).update(localX, y, localZ, state);
+         this.heightmaps.get(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES).update(localX, y, localZ, state);
+@@ -557,6 +577,28 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+         return oldState;
+     }
+ 
++    // Loom start - index randomly ticking chunk sections
++    private void loom$setRandomlyTickingBlockSection(final int sectionIndex, final boolean active) {
++        if (sectionIndex < Long.SIZE) {
++            this.loom$randomlyTickingBlockSections = RandomTickingBlockSectionIndex.setBase(
++                this.loom$randomlyTickingBlockSections, sectionIndex, active
++            );
++            return;
++        }
++        this.loom$randomlyTickingBlockSectionsOverflow = RandomTickingBlockSectionIndex.setOverflow(
++            this.loom$randomlyTickingBlockSectionsOverflow, sectionIndex, active
++        );
++    }
++
++    public final int loom$getNextRandomlyTickingBlockSectionIndex(final int fromSectionIndex) {
++        return RandomTickingBlockSectionIndex.next(
++            this.loom$randomlyTickingBlockSections,
++            this.loom$randomlyTickingBlockSectionsOverflow,
++            fromSectionIndex
++        );
++    }
++    // Loom end - index randomly ticking chunk sections
++
+     @Deprecated
+     @Override
+     public void addEntity(final Entity entity) {
+diff --git a/net/minecraft/world/level/chunk/RandomTickingBlockSectionIndex.java b/net/minecraft/world/level/chunk/RandomTickingBlockSectionIndex.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb84ef15ed19485a82c41517679d8e2a8ab43b05
+--- /dev/null
++++ b/net/minecraft/world/level/chunk/RandomTickingBlockSectionIndex.java
+@@ -0,0 +1,80 @@
++package net.minecraft.world.level.chunk;
++
++import java.util.Arrays;
++import org.jspecify.annotations.Nullable;
++
++final class RandomTickingBlockSectionIndex {
++
++    private static final int BASE_SECTION_COUNT = Long.SIZE;
++
++    private RandomTickingBlockSectionIndex() {
++    }
++
++    static long setBase(final long sections, final int sectionIndex, final boolean active) {
++        final long mask = 1L << sectionIndex;
++        return active ? sections | mask : sections & ~mask;
++    }
++
++    static long @Nullable [] setOverflow(
++        final long @Nullable [] sections,
++        final int sectionIndex,
++        final boolean active
++    ) {
++        final int overflowIndex = sectionIndex - BASE_SECTION_COUNT;
++        final int wordIndex = overflowIndex >>> 6;
++        if (!active && (sections == null || wordIndex >= sections.length)) {
++            return sections;
++        }
++
++        final long[] updated;
++        if (sections == null) {
++            updated = new long[wordIndex + 1];
++        } else if (wordIndex >= sections.length) {
++            updated = Arrays.copyOf(sections, wordIndex + 1);
++        } else {
++            updated = sections;
++        }
++
++        final long mask = 1L << overflowIndex;
++        if (active) {
++            updated[wordIndex] |= mask;
++        } else {
++            updated[wordIndex] &= ~mask;
++        }
++        return updated;
++    }
++
++    static int next(
++        final long baseSections,
++        final long @Nullable [] overflowSections,
++        final int fromSectionIndex
++    ) {
++        final int fromIndex = Math.max(0, fromSectionIndex);
++        if (fromIndex < BASE_SECTION_COUNT) {
++            final long remainingBase = baseSections & (-1L << fromIndex);
++            if (remainingBase != 0L) {
++                return Long.numberOfTrailingZeros(remainingBase);
++            }
++        }
++        if (overflowSections == null) {
++            return -1;
++        }
++
++        final int overflowIndex = Math.max(0, fromIndex - BASE_SECTION_COUNT);
++        int wordIndex = overflowIndex >>> 6;
++        if (wordIndex >= overflowSections.length) {
++            return -1;
++        }
++
++        long remaining = overflowSections[wordIndex] & (-1L << overflowIndex);
++        while (true) {
++            if (remaining != 0L) {
++                return BASE_SECTION_COUNT + (wordIndex << 6) + Long.numberOfTrailingZeros(remaining);
++            }
++            if (++wordIndex >= overflowSections.length) {
++                return -1;
++            }
++            remaining = overflowSections[wordIndex];
++        }
++    }
++}
