@@ -310,6 +310,10 @@
      options.forkOptions.memoryMaximumSize = "1G"
  }
  
++tasks.withType<Test>().configureEach {
++    maxHeapSize = "1G"
++}
++
 +tasks.withType<ProcessResources>().configureEach {
 +    // resources also read from patched paper-server trees
 +    dependsOn("applyAllServerPatches")

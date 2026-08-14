@@ -1341,10 +1341,10 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da40662b1595e721c66c7db9c430875d
      private static CompatibilityTransaction transactionFor(final Plugin plugin) {
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityCallbackTestSuite.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityCallbackTestSuite.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..bd00749124e2d3c2504b51f0214c4beb8fedc5d9
+index 0000000000000000000000000000000000000000..64149c73f8ece0b12e719ce7550f81547e7d17dc
 --- /dev/null
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityCallbackTestSuite.java
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,26 @@
 +package io.papermc.paper.plugin.manager.compat;
 +
 +import org.junit.platform.suite.api.ConfigurationParameter;
@@ -1357,6 +1357,7 @@ index 0000000000000000000000000000000000000000..bd00749124e2d3c2504b51f0214c4beb
 +@SuiteDisplayName("Compatibility callback delivery")
 +@IncludeTags("Normal")
 +@SelectClasses({
++    BukkitFacadeRegistryTest.class,
 +    CompatibilityApartmentTest.class,
 +    CompatibilityChunkBridgeTest.class,
 +    CompatibilityDiagnosticsTest.class,
@@ -1364,6 +1365,7 @@ index 0000000000000000000000000000000000000000..bd00749124e2d3c2504b51f0214c4beb
 +    CompatibilityPluginMatrixTest.class,
 +    CompatibilityServicesManagerTest.class,
 +    CompatibilitySyncBridgeTest.class,
++    CompatibilityTransactionTest.class,
 +    PluginCompatibilityProfileTest.class
 +})
 +@ConfigurationParameter(key = "TestSuite", value = "Normal")
@@ -1810,3 +1812,21 @@ index 0000000000000000000000000000000000000000..1a159748840b363ab92120743f2dcb24
 +@ConfigurationParameter(key = "TestSuite", value = "Normal")
 +public class OwnerDomainExecutorCooperativeWaitTestSuite {
 +}
+diff --git a/src/test/java/org/bukkit/support/suite/NormalTestSuite.java b/src/test/java/org/bukkit/support/suite/NormalTestSuite.java
+index 625d88420c9f0f0828aae1ff9f22103b44ace76e..1292c4595bf0acc5b149e17f4c93da3f8ffbc3f3 100644
+--- a/src/test/java/org/bukkit/support/suite/NormalTestSuite.java
++++ b/src/test/java/org/bukkit/support/suite/NormalTestSuite.java
+@@ -3,4 +3,5 @@
+ import org.junit.platform.suite.api.ConfigurationParameter;
++import org.junit.platform.suite.api.ExcludePackages;
+ import org.junit.platform.suite.api.IncludeTags;
+ import org.junit.platform.suite.api.SelectPackages;
+ import org.junit.platform.suite.api.Suite;
+@@ -9,6 +10,7 @@ import org.junit.platform.suite.api.SuiteDisplayName;
+ @Suite(failIfNoTests = false)
+ @SuiteDisplayName("Test suite for standalone tests, which don't need any registry values present")
+ @IncludeTags("Normal")
++@ExcludePackages("io.papermc.paper.plugin.manager.compat")
+ @SelectPackages({"org.bukkit", "io.papermc.paper", "com.destroystokyo.paper"})
+ @ConfigurationParameter(key = "TestSuite", value = "Normal")
+ public class NormalTestSuite {
