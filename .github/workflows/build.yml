@@ -25,11 +25,15 @@ jobs:
         run: git config --global user.email "actions@github.com" && git config --global user.name "Github Actions"
       - name: Apply Patches
         run: ./gradlew applyAllPatches --stacktrace --no-daemon --max-workers=2
+      - name: Prepare Paper ABI Baseline
+        run: git clone --shared .gradle/caches/paperweight/upstreams/paper "${RUNNER_TEMP}/paper-abi-baseline"
       - name: Build Paper ABI Baseline
-        working-directory: .gradle/caches/paperweight/upstreams/paper
-        run: ./gradlew :paper-api:jar :paper-server:jar --stacktrace --no-daemon --max-workers=2
+        working-directory: ${{ runner.temp }}/paper-abi-baseline
+        run: |
+          ./gradlew :paper-server:applyPatches --stacktrace --no-daemon --max-workers=2
+          ./gradlew :paper-api:jar :paper-server:jar --stacktrace --no-daemon --max-workers=2
       - name: Build
-        run: ./gradlew build :loom-server:createPaperclipJar --stacktrace --no-daemon --max-workers=2
+        run: ./gradlew build :loom-server:createPaperclipJar -PpaperAbiBaselineDir="${RUNNER_TEMP}/paper-abi-baseline" --stacktrace --no-daemon --max-workers=2
       - name: Package Build
         id: package
         shell: bash
