@@ -29,7 +29,7 @@ index a232577ad5167bc673737180fd91d9c0d5cd2331..2f3f8a6d87f10e26ac974de514ca415c
              final ca.spottedleaf.moonrise.common.list.ShortList tickList = ((ca.spottedleaf.moonrise.patches.block_counting.BlockCountingChunkSection)section).moonrise$getTickingBlockList();
  
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
-index 2955550bbc0eb46e31ce88d3e726527dcde9bce6..282072ef35079572de08dc9ad7e00bb856466916 100644
+index cfba1a37e43fe19390972a903152aabbce8204d5..8fa61332352afcc37df69ef4ae3200856e23437e 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
 +++ b/net/minecraft/world/level/chunk/LevelChunk.java
 @@ -96,6 +96,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
@@ -43,7 +43,7 @@ index 2955550bbc0eb46e31ce88d3e726527dcde9bce6..282072ef35079572de08dc9ad7e00bb8
      // CraftBukkit start
      public boolean mustNotSave;
      public boolean needsDecoration;
-@@ -278,6 +282,13 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -268,6 +272,13 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
          this.debug = !empty && this.level.isDebug();
          this.defaultBlockState = empty ? VOID_AIR_BLOCKSTATE : AIR_BLOCKSTATE;
          // Paper end - get block chunk optimisation
@@ -57,7 +57,7 @@ index 2955550bbc0eb46e31ce88d3e726527dcde9bce6..282072ef35079572de08dc9ad7e00bb8
      }
  
      public LevelChunk(final ServerLevel level, final ProtoChunk protoChunk, final LevelChunk.@Nullable PostLoadProcessor postLoad) {
-@@ -472,8 +483,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -462,8 +473,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
      @Override
      public @Nullable BlockState setBlockState(final BlockPos pos, final BlockState state, final @Block.UpdateFlags int flags) {
          int y = pos.getY();
@@ -69,7 +69,7 @@ index 2955550bbc0eb46e31ce88d3e726527dcde9bce6..282072ef35079572de08dc9ad7e00bb8
          if (wasEmpty && state.isAir()) {
              return null;
          }
-@@ -486,6 +499,13 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -476,6 +489,13 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
              return null;
          }
  
@@ -83,7 +83,7 @@ index 2955550bbc0eb46e31ce88d3e726527dcde9bce6..282072ef35079572de08dc9ad7e00bb8
          Block newBlock = state.getBlock();
          this.heightmaps.get(Heightmap.Types.MOTION_BLOCKING).update(localX, y, localZ, state);
          this.heightmaps.get(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES).update(localX, y, localZ, state);
-@@ -557,6 +577,28 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -547,6 +567,28 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
          return oldState;
      }
  

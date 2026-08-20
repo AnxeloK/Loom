@@ -49,10 +49,10 @@ index f344f8794a00c80fe304bf8fdb7b46f2aecccb14..a8f62bd3412cbac0078d859e4d5a540f
              }
              // Loom end - legacy Paper capture-field compatibility
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
-index 08d381c4f23b471bc1c7aea46546b673b670b22e..2955550bbc0eb46e31ce88d3e726527dcde9bce6 100644
+index 59624da6ff9f02759d7229f3dc311b989c0591b7..cfba1a37e43fe19390972a903152aabbce8204d5 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
 +++ b/net/minecraft/world/level/chunk/LevelChunk.java
-@@ -579,7 +579,7 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -569,7 +569,7 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
              ? captureContext.getCapturedBlockEntity(pos)
              : null;
          if (blockEntity == null && this.level.legacyCaptureActive(LevelCaptureContext.BLOCK_STATES)) { // Loom - legacy Paper capture-field compatibility

@@ -194,7 +194,7 @@ index ffc7103102639214c60201a213df3ad042a05c85..0b4f17076ea84112c6ae5b93865f0825
              level,
              owner.chunkX(),
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
-index 72cd3eb5cd0832abccdfb15f985d1ca306bbe49e..1fe13a08b0b4c95cf7b34c654915dae213bd68e2 100644
+index 72cd3eb5cd0832abccdfb15f985d1ca306bbe49e..25f48bec232c33f36a38b36ebccc9ef3790fac33 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
 +++ b/net/minecraft/world/level/chunk/LevelChunk.java
 @@ -11,6 +11,7 @@ import java.util.Collections;
@@ -217,14 +217,15 @@ index 72cd3eb5cd0832abccdfb15f985d1ca306bbe49e..1fe13a08b0b4c95cf7b34c654915dae2
      private ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder chunkAndHolder;
  
      @Override
-@@ -121,6 +125,107 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -121,6 +125,97 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
      public final void moonrise$setChunkHolder(final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder holder) {
          this.chunkAndHolder = holder;
      }
 +
 +    // Loom - generation post-processing can reach the one-chunk halo through neighbour shapes, fluids,
-+    // and block updates. If that halo is not ready, load it asynchronously and resume under one bounded
-+    // REGION owner instead of entering ServerChunkCache's forbidden synchronous wait.
++    // and block updates. Load and retain that halo asynchronously, then run under one bounded REGION owner
++    // instead of entering ServerChunkCache's forbidden synchronous wait. A loaded snapshot is insufficient:
++    // its tickets can disappear before a later neighbour update in the same post-processing pass.
 +    public final boolean moonrise$ensurePostProcessing(final ServerLevel level) {
 +        if (this.postProcessingDone) {
 +            return true;
@@ -235,7 +236,6 @@ index 72cd3eb5cd0832abccdfb15f985d1ca306bbe49e..1fe13a08b0b4c95cf7b34c654915dae2
 +        final int minChunkZ = pos.z() - 1;
 +        final int maxChunkX = pos.x() + 1;
 +        final int maxChunkZ = pos.z() + 1;
-+        final boolean haloReady = this.moonrise$isPostProcessingHaloReady(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
 +        if (!POST_PROCESSING_SCHEDULED.compareAndSet(this, 0, 1)) {
 +            return false;
 +        }
@@ -244,37 +244,27 @@ index 72cd3eb5cd0832abccdfb15f985d1ca306bbe49e..1fe13a08b0b4c95cf7b34c654915dae2
 +            return true;
 +        }
 +
-+        if (haloReady
-+            && net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(
-+                level, minChunkX, minChunkZ, maxChunkX, maxChunkZ
-+            )
-+            && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(
-+                level, minChunkX, minChunkZ, maxChunkX, maxChunkZ
-+            )) {
-+            try {
-+                this.postProcessGeneration(level);
-+            } finally {
-+                POST_PROCESSING_SCHEDULED.set(this, 0);
-+            }
-+            return true;
++        try {
++            net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
++                level,
++                minChunkX,
++                minChunkZ,
++                maxChunkX,
++                maxChunkZ,
++                ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++                "chunk-post-processing",
++                ignored -> this.moonrise$resumePostProcessing(level)
++            ).whenComplete((ignored, throwable) -> {
++                if (throwable != null) {
++                    POST_PROCESSING_SCHEDULED.set(this, 0);
++                    LOGGER.error("Failed to resume post-processing for chunk {}", pos, throwable);
++                }
++            });
++        } catch (final RuntimeException | Error throwable) {
++            POST_PROCESSING_SCHEDULED.set(this, 0);
++            throw throwable;
 +        }
-+
-+        net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
-+            level,
-+            minChunkX,
-+            minChunkZ,
-+            maxChunkX,
-+            maxChunkZ,
-+            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
-+            "chunk-post-processing",
-+            ignored -> this.moonrise$resumePostProcessing(level)
-+        ).whenComplete((ignored, throwable) -> {
-+            if (throwable != null) {
-+                POST_PROCESSING_SCHEDULED.set(this, 0);
-+                LOGGER.error("Failed to resume post-processing for chunk {}", pos, throwable);
-+            }
-+        });
-+        return false;
++        return this.postProcessingDone;
 +    }
 +
 +    private boolean moonrise$isPostProcessingHaloReady(

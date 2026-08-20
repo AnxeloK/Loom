@@ -905,10 +905,10 @@ index 4b87eb54828f422b627e59a2714179e58c8617e8..4f1a8d6f8e5fe8abf624ca212d1c8074
          final TickThread tickThread = TickThread.getCurrentTickThread();
          final boolean previousSkipPush = tickThread.skipHopperPushEvents;
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
-index 1fe13a08b0b4c95cf7b34c654915dae213bd68e2..08d381c4f23b471bc1c7aea46546b673b670b22e 100644
+index 25f48bec232c33f36a38b36ebccc9ef3790fac33..59624da6ff9f02759d7229f3dc311b989c0591b7 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
 +++ b/net/minecraft/world/level/chunk/LevelChunk.java
-@@ -578,6 +578,9 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -568,6 +568,9 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
          BlockEntity blockEntity = captureContext != null && captureContext.hasMode(LevelCaptureContext.BLOCK_STATES)
              ? captureContext.getCapturedBlockEntity(pos)
              : null;
