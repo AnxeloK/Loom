@@ -1018,10 +1018,10 @@ index b9adac0a54e18f7d662e6cd63403a729145b16a4..2886d4c00ab68832eb789ef00f4b7cff
              return NamedTextColor.YELLOW;
          }
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
-index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da40662b1595e721c66c7db9c430875d0fe1d41b 100644
+index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..ee5895f84a78884c06888dee813026974e80417d 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityApartmentTest.java
-@@ -1,9 +1,20 @@
+@@ -1,9 +1,22 @@
  package io.papermc.paper.plugin.manager.compat;
  
 +import ca.spottedleaf.moonrise.common.util.TickThread;
@@ -1029,7 +1029,9 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da40662b1595e721c66c7db9c430875d
 +import java.util.ArrayList;
 +import java.util.Collections;
  import java.util.List;
++import java.util.Queue;
 +import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ConcurrentLinkedQueue;
 +import java.util.concurrent.CountDownLatch;
 +import java.util.concurrent.TimeUnit;
 +import java.util.concurrent.atomic.AtomicInteger;
@@ -1042,7 +1044,7 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da40662b1595e721c66c7db9c430875d
  import org.bukkit.event.Event;
  import org.bukkit.event.HandlerList;
  import org.bukkit.plugin.Plugin;
-@@ -41,11 +52,8 @@ class CompatibilityApartmentTest {
+@@ -41,11 +54,8 @@ class CompatibilityApartmentTest {
  
      @Test
      void sameThreadNestedDifferentTransactionReenters() {
@@ -1056,7 +1058,7 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da40662b1595e721c66c7db9c430875d
          final Plugin plugin = mockPlugin("LegacyPlugin");
          final CompatibilityApartment apartment = new CompatibilityApartment(plugin);
          final CompatibilityTransaction outer = transactionFor(plugin);
-@@ -66,12 +74,279 @@ class CompatibilityApartmentTest {
+@@ -66,12 +76,291 @@ class CompatibilityApartmentTest {
      }
  
      @Test
@@ -1201,10 +1203,22 @@ index c1b9987c7f63f6b0fde0845a8b12d00e62016c80..da40662b1595e721c66c7db9c430875d
 +        final CompatibilityTransaction holderTransaction = transactionFor(plugin);
 +        final CompatibilityTransaction waiterTransaction = transactionFor(plugin);
 +        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
-+        final ServerLevel level = Mockito.mock(ServerLevel.class);
-+        Mockito.when(level.getServer()).thenReturn(server);
-+        Mockito.when(level.dimension()).thenReturn(Level.OVERWORLD);
-+        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.region(level, 6, 8, "compatibility-drain-test");
++        final Queue<Runnable> queuedOwnerTasks = new ConcurrentLinkedQueue<>();
++        Mockito.when(server.enqueueGlobalOwnerTask(Mockito.any(Runnable.class))).thenAnswer(invocation -> {
++            queuedOwnerTasks.add(invocation.getArgument(0));
++            return true;
++        });
++        Mockito.when(server.runQueuedGlobalOwnerTask(Mockito.any())).thenAnswer(invocation -> {
++            final java.util.function.Predicate<Runnable> predicate = invocation.getArgument(0);
++            for (final Runnable candidate : queuedOwnerTasks) {
++                if (predicate.test(candidate) && queuedOwnerTasks.remove(candidate)) {
++                    candidate.run();
++                    return true;
++                }
++            }
++            return false;
++        });
++        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.global(server, "compatibility-drain-test");
 +        final CountDownLatch leaseHeld = new CountDownLatch(1);
 +        final CountDownLatch releaseLease = new CountDownLatch(1);
 +        final CountDownLatch callbackStarted = new CountDownLatch(1);
