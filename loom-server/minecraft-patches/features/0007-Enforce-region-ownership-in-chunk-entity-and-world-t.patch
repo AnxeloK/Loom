@@ -19,10 +19,33 @@ index 0743659c9f1122088adad4992b93649efc9ba873..775cea8b93d13c1687c79359749590f1
          for (final ServerPlayer player : new java.util.ArrayList<>(this.world.players())) {
              final PlayerChunkLoaderData loader = ((ChunkSystemServerPlayer)player).moonrise$getChunkLoader();
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
-index 05d374f679919d082064e8f2bb363a419bc9648e..35a53c633b70a9cf704abf1749da266c5db7a676 100644
+index 05d374f679919d082064e8f2bb363a419bc9648e..196f343f7c660839464ecd6fdcfa23d6444c9ae3 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
-@@ -192,7 +192,7 @@ public final class ChunkHolderManager {
+@@ -40,6 +40,7 @@ import net.minecraft.server.level.FullChunkStatus;
+ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.server.level.Ticket;
+ import net.minecraft.server.level.TicketType;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
+ import net.minecraft.util.SortedArraySet;
+ import net.minecraft.world.level.ChunkPos;
+ import net.minecraft.world.level.chunk.LevelChunk;
+@@ -117,6 +118,14 @@ public final class ChunkHolderManager {
+         this.unloadQueue = new ChunkUnloadQueue(((ChunkSystemServerLevel)world).moonrise$getRegionChunkShift());
+     }
+ 
++    static boolean canProcessPendingFullStatusUpdates(final ServerLevel world) {
++        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.currentOwner();
++        return TickThread.isTickThread()
++            && owner != null
++            && owner.domain() == OwnerDomainExecutor.Domain.GLOBAL_CONTROL
++            && owner.server() == world.getServer();
++    }
++
+     public boolean processTicketUpdates(final int chunkX, final int chunkZ) {
+         final int ticketShift = ThreadedTicketLevelPropagator.SECTION_SHIFT;
+         final int ticketMask = (1 << ticketShift) - 1;
+@@ -192,7 +201,7 @@ public final class ChunkHolderManager {
      }
  
      public void close(final boolean save, final boolean halt) {
@@ -31,7 +54,20 @@ index 05d374f679919d082064e8f2bb363a419bc9648e..35a53c633b70a9cf704abf1749da266c
          if (halt) {
              LOGGER.info("Waiting 60s for chunk system to halt for world '" + WorldUtil.getWorldName(this.world) + "'");
              if (!this.taskScheduler.halt(true, TimeUnit.SECONDS.toNanos(60L))) {
-@@ -1150,7 +1150,7 @@ public final class ChunkHolderManager {
+@@ -1129,9 +1138,9 @@ public final class ChunkHolderManager {
+         if (changedFullStatus.isEmpty()) {
+             return;
+         }
+-        if (!TickThread.isTickThread()) {
+-            // These will be handled on the next ServerChunkCache$MainThreadExecutor#pollTask, as it runs the distance manager update
+-            // which will invoke processTicketUpdates
++        if (!canProcessPendingFullStatusUpdates(this.world)) {
++            // The serial pending queue covers the whole world. Bounded region owners and asynchronous producers
++            // hand changes to the concurrent queue for the next global distance-manager update.
+             this.offThreadPendingFullLoadUpdate.addAll(changedFullStatus);
+         } else {
+             final ArrayDeque<NewChunkHolder> pendingFullLoadUpdate = this.pendingFullLoadUpdate;
+@@ -1150,7 +1159,7 @@ public final class ChunkHolderManager {
  
      // note: never call while inside the chunk system, this will absolutely break everything
      public void processUnloads() {
@@ -40,7 +76,7 @@ index 05d374f679919d082064e8f2bb363a419bc9648e..35a53c633b70a9cf704abf1749da266c
  
          if (BLOCK_TICKET_UPDATES.get() == Boolean.TRUE) {
              throw new IllegalStateException("Cannot unload chunks recursively");
-@@ -1422,7 +1422,7 @@ public final class ChunkHolderManager {
+@@ -1422,7 +1431,7 @@ public final class ChunkHolderManager {
          final boolean isTickThread = TickThread.isTickThread();
  
          if (!PlatformHooks.get().allowAsyncTicketUpdates() && isTickThread) {
@@ -49,6 +85,25 @@ index 05d374f679919d082064e8f2bb363a419bc9648e..35a53c633b70a9cf704abf1749da266c
          }
  
          boolean ret = false;
+@@ -1448,7 +1457,7 @@ public final class ChunkHolderManager {
+             }
+         }
+ 
+-        if (isTickThread) {
++        if (canProcessPendingFullStatusUpdates(this.world)) {
+             ret |= this.processPendingFullUpdate();
+         }
+ 
+@@ -1474,6 +1483,9 @@ public final class ChunkHolderManager {
+ 
+     // only call on tick thread
+     private boolean processPendingFullUpdate() {
++        if (!canProcessPendingFullStatusUpdates(this.world)) {
++            throw new IllegalStateException("Cannot process pending full status updates outside the global owner");
++        }
+         this.processOffThreadFullUpdates();
+ 
+         final ArrayDeque<NewChunkHolder> pendingFullLoadUpdate = this.pendingFullLoadUpdate;
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
 index 640548d78b87653871dd1f7b0f84574c5e205fe8..e2fa3cfd9361880ff23dfb3e2935f7416e2a4647 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java

@@ -1,0 +1,63 @@
+--- /dev/null
++++ b/src/test/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManagerOwnerRoutingTest.java
+@@ -1,0 +_,60 @@
++package ca.spottedleaf.moonrise.patches.chunk_system.scheduling;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class ChunkHolderManagerOwnerRoutingTest {
++
++    @Test
++    void boundedRegionCannotDrainWorldFullStatusQueue() throws InterruptedException {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++
++        runOnTickThread(() -> {
++            try (OwnerDomainExecutor.Scope global = OwnerDomainExecutor.enterGlobal(server, "full-status-test")) {
++                Assertions.assertTrue(ChunkHolderManager.canProcessPendingFullStatusUpdates(level));
++                try (OwnerDomainExecutor.Scope region = OwnerDomainExecutor.enterRegion(level, 4, 8, 4, 8, "full-status-test")) {
++                    Assertions.assertFalse(ChunkHolderManager.canProcessPendingFullStatusUpdates(level));
++                }
++                Assertions.assertTrue(ChunkHolderManager.canProcessPendingFullStatusUpdates(level));
++            }
++        });
++    }
++
++    @Test
++    void ownerTokenDoesNotMakeAnAsyncThreadAFullStatusDrainer() {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++
++        try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enterGlobal(server, "full-status-test")) {
++            Assertions.assertFalse(ChunkHolderManager.canProcessPendingFullStatusUpdates(level));
++        }
++    }
++
++    private static void runOnTickThread(final Runnable action) throws InterruptedException {
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread thread = new TickThread(() -> {
++            try {
++                action.run();
++            } catch (final Throwable throwable) {
++                failure.set(throwable);
++            }
++        }, "chunk-full-status-owner-test");
++        thread.start();
++        thread.join(5_000L);
++        Assertions.assertFalse(thread.isAlive(), "Owner-routing test did not finish");
++        if (failure.get() != null) {
++            Assertions.fail(failure.get());
++        }
++    }
++}
