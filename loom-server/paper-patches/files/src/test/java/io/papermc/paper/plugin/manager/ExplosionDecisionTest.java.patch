@@ -1,0 +1,128 @@
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/ExplosionDecisionTest.java
+@@ -1,0 +_,125 @@
++package io.papermc.paper.plugin.manager;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.logging.Logger;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.RegionTickStaging;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import org.bukkit.ExplosionResult;
++import org.bukkit.Location;
++import org.bukkit.Server;
++import org.bukkit.block.Block;
++import org.bukkit.entity.Entity;
++import org.bukkit.event.Cancellable;
++import org.bukkit.event.Event;
++import org.bukkit.event.EventPriority;
++import org.bukkit.event.Listener;
++import org.bukkit.event.block.BlockExplodeEvent;
++import org.bukkit.event.block.BlockIgniteEvent;
++import org.bukkit.event.block.TNTPrimeEvent;
++import org.bukkit.event.entity.EntityExplodeEvent;
++import org.bukkit.event.entity.ExplosionPrimeEvent;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.RegisteredListener;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++import static org.junit.jupiter.api.Assertions.*;
++
++@Normal
++class ExplosionDecisionTest {
++    @Test
++    void cancellationReachesCallerDuringStaging() {
++        for (Event event : decisions()) {
++            dispatch(event, true, e -> ((Cancellable) e).setCancelled(true));
++            assertTrue(((Cancellable) event).isCancelled(), event.getEventName());
++        }
++    }
++
++    @Test
++    void cancellationReachesCallerOnBoundedOwnerWithoutStaging() {
++        for (Event event : decisions()) {
++            dispatch(event, false, e -> ((Cancellable) e).setCancelled(true));
++            assertTrue(((Cancellable) event).isCancelled(), event.getEventName());
++        }
++    }
++
++    @Test
++    void explosionUsesFilteredBlocksAndYieldBeforeReturning() {
++        for (boolean staging : List.of(false, true)) {
++            Block protectedBlock = Mockito.mock(Block.class);
++            Block unprotectedBlock = Mockito.mock(Block.class);
++            EntityExplodeEvent entity = new EntityExplodeEvent(Mockito.mock(Entity.class),
++                new Location(null, 0, 64, 0), new ArrayList<>(List.of(protectedBlock, unprotectedBlock)),
++                1.0f, ExplosionResult.DESTROY);
++            dispatch(entity, staging, e -> {
++                entity.blockList().remove(protectedBlock);
++                entity.setYield(0.25f);
++            });
++            assertEquals(List.of(unprotectedBlock), entity.blockList());
++            assertEquals(0.25f, entity.getYield());
++            assertFalse(entity.isCancelled());
++            BlockExplodeEvent block = new BlockExplodeEvent(Mockito.mock(Block.class),
++                Mockito.mock(org.bukkit.block.BlockState.class),
++                new ArrayList<>(List.of(protectedBlock, unprotectedBlock)), 1.0f, ExplosionResult.DESTROY);
++            dispatch(block, staging, e -> { block.blockList().clear(); block.setYield(0); });
++            assertTrue(block.blockList().isEmpty());
++            assertEquals(0, block.getYield());
++        }
++    }
++
++    @Test
++    void primingUsesListenerRadiusAndFireBeforeReturning() {
++        for (boolean staging : List.of(false, true)) {
++            ExplosionPrimeEvent event = new ExplosionPrimeEvent(Mockito.mock(Entity.class), 4, true);
++            dispatch(event, staging, e -> { event.setRadius(0); event.setFire(false); });
++            assertEquals(0, event.getRadius());
++            assertFalse(event.getFire());
++        }
++    }
++
++    private static List<Event> decisions() {
++        Block block = Mockito.mock(Block.class);
++        Entity entity = Mockito.mock(Entity.class);
++        return List.of(
++            new ExplosionPrimeEvent(entity, 4, false),
++            new EntityExplodeEvent(entity, new Location(null, 0, 64, 0), new ArrayList<>(), 1, ExplosionResult.DESTROY),
++            new BlockExplodeEvent(block, Mockito.mock(org.bukkit.block.BlockState.class), new ArrayList<>(), 1, ExplosionResult.DESTROY),
++            new TNTPrimeEvent(block, TNTPrimeEvent.PrimeCause.EXPLOSION, entity, null),
++            new BlockIgniteEvent(block, BlockIgniteEvent.IgniteCause.EXPLOSION, entity)
++        );
++    }
++
++    private static void dispatch(Event event, boolean staging, java.util.function.Consumer<Event> callback) {
++        Server server = Mockito.mock(Server.class);
++        Mockito.when(server.isPrimaryThread()).thenReturn(true);
++        Mockito.when(server.getLogger()).thenReturn(Logger.getLogger("ExplosionDecisionTest"));
++        PaperEventManager manager = new PaperEventManager(server);
++        PluginMeta meta = Mockito.mock(PluginMeta.class);
++        Mockito.when(meta.getName()).thenReturn("ExplosionProtection");
++        Mockito.when(meta.getMainClass()).thenReturn("example.ExplosionProtection");
++        Mockito.when(meta.getVersion()).thenReturn("1.0");
++        Mockito.when(meta.getPluginDependencies()).thenReturn(List.of());
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Plugin plugin = Mockito.mock(Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(plugin.getName()).thenReturn("ExplosionProtection");
++        Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger("ExplosionDecisionTest"));
++        Mockito.when(plugin.isEnabled()).thenReturn(true);
++        RegisteredListener listener = new RegisteredListener(new Listener() {}, (l, e) -> callback.accept(e),
++            EventPriority.NORMAL, plugin, false);
++        event.getHandlers().register(listener);
++        ServerLevel level = Mockito.mock(ServerLevel.class);
++        Mockito.doReturn(Mockito.mock(MinecraftServer.class)).when(level).getServer();
++        try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enterRegion(level, 0, 0, 0, 0, "explosion-test")) {
++            if (staging) RegionTickStaging.begin(RegionTickStaging.newSession());
++            manager.callEvent(event);
++        } finally {
++            RegionTickStaging.end();
++            event.getHandlers().unregister(listener);
++        }
++    }
++}

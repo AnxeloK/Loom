@@ -1,0 +1,16 @@
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/ExplosionDecisionTestSuite.java
+@@ -1,0 +_,13 @@
++package io.papermc.paper.plugin.manager;
++
++import org.junit.platform.suite.api.ConfigurationParameter;
++import org.junit.platform.suite.api.IncludeTags;
++import org.junit.platform.suite.api.SelectClasses;
++import org.junit.platform.suite.api.Suite;
++
++@Suite
++@IncludeTags("Normal")
++@SelectClasses(ExplosionDecisionTest.class)
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class ExplosionDecisionTestSuite {
++}
