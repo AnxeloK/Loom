@@ -30,7 +30,7 @@ index 05d374f679919d082064e8f2bb363a419bc9648e..196f343f7c660839464ecd6fdcfa23d6
  import net.minecraft.util.SortedArraySet;
  import net.minecraft.world.level.ChunkPos;
  import net.minecraft.world.level.chunk.LevelChunk;
-@@ -117,6 +118,14 @@ public final class ChunkHolderManager {
+@@ -117,6 +118,17 @@ public final class ChunkHolderManager {
          this.unloadQueue = new ChunkUnloadQueue(((ChunkSystemServerLevel)world).moonrise$getRegionChunkShift());
      }
  
@@ -38,8 +38,11 @@ index 05d374f679919d082064e8f2bb363a419bc9648e..196f343f7c660839464ecd6fdcfa23d6
 +        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.currentOwner();
 +        return TickThread.isTickThread()
 +            && owner != null
-+            && owner.domain() == OwnerDomainExecutor.Domain.GLOBAL_CONTROL
-+            && owner.server() == world.getServer();
++            && (owner.domain() == OwnerDomainExecutor.Domain.GLOBAL_CONTROL && owner.server() == world.getServer()
++                || owner.domain() == OwnerDomainExecutor.Domain.REGION
++                    && owner.level() == world
++                    && owner.minChunkX() == Integer.MIN_VALUE && owner.minChunkZ() == Integer.MIN_VALUE
++                    && owner.maxChunkX() == Integer.MAX_VALUE && owner.maxChunkZ() == Integer.MAX_VALUE);
 +    }
 +
      public boolean processTicketUpdates(final int chunkX, final int chunkZ) {
@@ -63,7 +66,7 @@ index 05d374f679919d082064e8f2bb363a419bc9648e..196f343f7c660839464ecd6fdcfa23d6
 -            // which will invoke processTicketUpdates
 +        if (!canProcessPendingFullStatusUpdates(this.world)) {
 +            // The serial pending queue covers the whole world. Bounded region owners and asynchronous producers
-+            // hand changes to the concurrent queue for the next global distance-manager update.
++            // hand changes to the concurrent queue for the next global or full-world distance-manager update.
              this.offThreadPendingFullLoadUpdate.addAll(changedFullStatus);
          } else {
              final ArrayDeque<NewChunkHolder> pendingFullLoadUpdate = this.pendingFullLoadUpdate;
@@ -99,7 +102,7 @@ index 05d374f679919d082064e8f2bb363a419bc9648e..196f343f7c660839464ecd6fdcfa23d6
      // only call on tick thread
      private boolean processPendingFullUpdate() {
 +        if (!canProcessPendingFullStatusUpdates(this.world)) {
-+            throw new IllegalStateException("Cannot process pending full status updates outside the global owner");
++            throw new IllegalStateException("Cannot process pending full status updates without ownership of the whole world");
 +        }
          this.processOffThreadFullUpdates();
  

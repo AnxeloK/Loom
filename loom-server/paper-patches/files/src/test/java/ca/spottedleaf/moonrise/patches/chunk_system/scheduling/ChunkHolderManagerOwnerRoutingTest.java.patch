@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/src/test/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManagerOwnerRoutingTest.java
-@@ -1,0 +_,60 @@
+@@ -1,0 +_,104 @@
 +package ca.spottedleaf.moonrise.patches.chunk_system.scheduling;
 +
 +import ca.spottedleaf.moonrise.common.util.TickThread;
@@ -42,6 +42,50 @@
 +        try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enterGlobal(server, "full-status-test")) {
 +            Assertions.assertFalse(ChunkHolderManager.canProcessPendingFullStatusUpdates(level));
 +        }
++    }
++
++    @Test
++    void fullWorldOwnerDrainsQueuedTransitionsDuringWorldInitialization() throws InterruptedException {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++        final ChunkTaskScheduler scheduler = Mockito.mock(ChunkTaskScheduler.class);
++        final ChunkHolderManager manager = new ChunkHolderManager(level, scheduler);
++        final NewChunkHolder holder = Mockito.mock(NewChunkHolder.class);
++        Mockito.when(holder.handleFullStatusChange(Mockito.anyList())).thenReturn(true);
++
++        runOnTickThread(() -> {
++            try (OwnerDomainExecutor.Scope global = OwnerDomainExecutor.enterGlobal(server, "world-init-test")) {
++                try (OwnerDomainExecutor.Scope bounded = OwnerDomainExecutor.enterRegion(level, 0, 0, 0, 0, "producer-test")) {
++                    manager.addChangedStatuses(java.util.List.of(holder));
++                    Assertions.assertFalse(manager.processTicketUpdates());
++                    Mockito.verifyNoInteractions(holder);
++                }
++                try (OwnerDomainExecutor.Scope world = OwnerDomainExecutor.enterRegion(
++                    level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, "world-init-test"
++                )) {
++                    Assertions.assertTrue(manager.processTicketUpdates(), "World-init polling must complete pending full transitions");
++                    Mockito.verify(holder).handleFullStatusChange(Mockito.anyList());
++                    Assertions.assertFalse(manager.processTicketUpdates(), "A transition must be drained only once");
++                }
++            }
++        });
++    }
++
++    @Test
++    void fullWorldOwnerCannotDrainAnotherWorld() throws InterruptedException {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        final ServerLevel other = Mockito.mock(ServerLevel.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++        Mockito.when(other.getServer()).thenReturn(server);
++        runOnTickThread(() -> {
++            try (OwnerDomainExecutor.Scope world = OwnerDomainExecutor.enterRegion(
++                other, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, "other-world-test"
++            )) {
++                Assertions.assertFalse(ChunkHolderManager.canProcessPendingFullStatusUpdates(level));
++            }
++        });
 +    }
 +
 +    private static void runOnTickThread(final Runnable action) throws InterruptedException {
