@@ -48,7 +48,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
      private final Server server;
      private final CompatibilityKernel compatibilityKernel;
  
-@@ -70,13 +54,15 @@ class PaperEventManager {
+@@ -70,13 +54,18 @@ class PaperEventManager {
 +        // Explosion callers consume cancellation, radius, yield and the mutable block list before
 +        // returning. Use the owner/compatibility dispatch below so listeners decide before side effects.
 +        final boolean explosionDecision = event instanceof org.bukkit.event.entity.ExplosionPrimeEvent
@@ -56,6 +56,9 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
 +            || event instanceof org.bukkit.event.block.BlockExplodeEvent
 +            || event instanceof org.bukkit.event.block.TNTPrimeEvent
 +            || event instanceof org.bukkit.event.block.BlockIgniteEvent;
++        if (explosionDecision) {
++            net.minecraft.server.threading.RegionTickStaging.stageDecisionBoundary();
++        }
 -        if (!event.isAsynchronous() && net.minecraft.server.threading.RegionTickStaging.stageEvent(event)) {
 +        if (!event.isAsynchronous() && !explosionDecision && net.minecraft.server.threading.RegionTickStaging.stageEvent(event)) {
              return;

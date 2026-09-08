@@ -275,7 +275,7 @@ index b5b9cd93d6c5e2fcf66a552256ae9843ed689d39..b15b37f876e22b35c1a43e710c688a91
  
      public InteractionResult useItem(final ServerPlayer player, final Level level, final ItemStack itemStack, final InteractionHand hand) {
 diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
-index da74fc87491bed529212f6a2f6143026ca616bca..185abbc450eb03cf285854b0decd7950a7925f27 100644
+index da74fc87491bed529212f6a2f6143026ca616bca..35ce29ef63d83228aad9d75aec838dfc353cbb89 100644
 --- a/net/minecraft/server/threading/RegionTickStaging.java
 +++ b/net/minecraft/server/threading/RegionTickStaging.java
 @@ -1,6 +1,7 @@
@@ -294,7 +294,7 @@ index da74fc87491bed529212f6a2f6143026ca616bca..185abbc450eb03cf285854b0decd7950
  import net.minecraft.world.level.block.state.BlockState;
  import net.minecraft.world.ticks.LevelTicks;
  import net.minecraft.world.ticks.ScheduledTick;
-@@ -53,11 +55,78 @@ public final class RegionTickStaging {
+@@ -53,11 +55,82 @@ public final class RegionTickStaging {
      private record StagedRemove(EntityLookup.EntityCallback callback, Entity.RemovalReason reason) {
      }
  
@@ -315,6 +315,10 @@ index da74fc87491bed529212f6a2f6143026ca616bca..185abbc450eb03cf285854b0decd7950
 +    }
 +
 +    private record StagedEvent(org.bukkit.event.Event event, int writesStart, int ticksStart, int spawnsStart) implements StagedDecision {
++    }
++
++    // A decision already delivered inline only closes the preceding staged veto span.
++    private record StagedBoundary(int writesStart, int ticksStart, int spawnsStart) implements StagedDecision {
 +    }
 +
 +    // Tree growth has two sequential owner-side decisions. BlockFertilizeEvent inherits the result of the
@@ -378,7 +382,7 @@ index da74fc87491bed529212f6a2f6143026ca616bca..185abbc450eb03cf285854b0decd7950
      }
  
      private static final class Buffer {
-@@ -66,7 +135,8 @@ public final class RegionTickStaging {
+@@ -66,7 +139,8 @@ public final class RegionTickStaging {
          List<StagedWrite> writes;
          List<StagedTick> ticks;
          List<StagedSpawn> spawns;
@@ -388,10 +392,21 @@ index da74fc87491bed529212f6a2f6143026ca616bca..185abbc450eb03cf285854b0decd7950
          // Deferred entity moves, COALESCED per entity: an entity may setPos() many times in one tick, but a
          // single applyMove() at replay reads its current (final) position and re-sections it once. The callback
          // carries the last staging-session id it joined, so this ordered list needs neither hashing nor one map
-@@ -233,6 +303,48 @@ public final class RegionTickStaging {
+@@ -233,6 +307,59 @@ public final class RegionTickStaging {
          return true;
      }
  
++    public static void stageDecisionBoundary() {
++        final Buffer buffer = CURRENT.get();
++        if (buffer == null) {
++            return;
++        }
++        if (buffer.events == null) {
++            buffer.events = new ArrayList<>();
++        }
++        buffer.events.add(new StagedBoundary(size(buffer.writes), size(buffer.ticks), size(buffer.spawns)));
++    }
++
 +    // Stage a tree-growth decision without synchronously crossing back to the owner. Both events are optional:
 +    // natural growth only has StructureGrowEvent, while a growth operation without a known tree type may have
 +    // only BlockFertilizeEvent (or neither event but still needs an ordered owner-side commit). When both are
@@ -437,7 +452,7 @@ index da74fc87491bed529212f6a2f6143026ca616bca..185abbc450eb03cf285854b0decd7950
      private static int size(final List<?> list) {
          return list == null ? 0 : list.size();
      }
-@@ -350,13 +462,18 @@ public final class RegionTickStaging {
+@@ -350,13 +477,21 @@ public final class RegionTickStaging {
          // is allocated until a replayed event actually cancels.
          it.unimi.dsi.fastutil.longs.LongOpenHashSet vetoed = null;
          for (Buffer buffer = buffers; buffer != null; buffer = buffer.next) {
@@ -450,6 +465,9 @@ index da74fc87491bed529212f6a2f6143026ca616bca..185abbc450eb03cf285854b0decd7950
 -                final StagedEvent mark = events.get(i);
 -                final org.bukkit.event.Event event = mark.event();
 +                final StagedDecision mark = events.get(i);
++                if (mark instanceof StagedBoundary) {
++                    continue;
++                }
 +                if (mark instanceof StagedTreeDecision treeDecision) {
 +                    replayTreeDecision(treeDecision);
 +                    continue;
@@ -459,7 +477,7 @@ index da74fc87491bed529212f6a2f6143026ca616bca..185abbc450eb03cf285854b0decd7950
                  try {
                      org.bukkit.Bukkit.getPluginManager().callEvent(event);
                  } catch (final Throwable t) {
-@@ -411,21 +528,68 @@ public final class RegionTickStaging {
+@@ -411,21 +546,68 @@ public final class RegionTickStaging {
                  }
              }
          }
@@ -540,7 +558,7 @@ index da74fc87491bed529212f6a2f6143026ca616bca..185abbc450eb03cf285854b0decd7950
          }
          if (VETO_DEBUG && vetoedWrites > 0) {
              LOGGER.info("Loom parallel veto: skipped {} staged writes from cancelled events this phase", vetoedWrites);
-@@ -498,6 +662,205 @@ public final class RegionTickStaging {
+@@ -498,6 +680,205 @@ public final class RegionTickStaging {
          }
      }
  

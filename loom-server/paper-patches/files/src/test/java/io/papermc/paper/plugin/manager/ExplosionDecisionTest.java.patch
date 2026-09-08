@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/src/test/java/io/papermc/paper/plugin/manager/ExplosionDecisionTest.java
-@@ -1,0 +_,125 @@
+@@ -1,0 +_,160 @@
 +package io.papermc.paper.plugin.manager;
 +
 +import io.papermc.paper.plugin.configuration.PluginMeta;
@@ -82,6 +82,41 @@
 +            assertEquals(0, event.getRadius());
 +            assertFalse(event.getFire());
 +        }
++    }
++
++    @Test
++    void cancelledNeighborCannotVetoAnImmediateExplosion() {
++        final net.minecraft.world.level.Level level = Mockito.mock(net.minecraft.world.level.Level.class);
++        final net.minecraft.world.level.block.state.BlockState state = Mockito.mock(net.minecraft.world.level.block.state.BlockState.class);
++        final net.minecraft.core.BlockPos cancelledPos = new net.minecraft.core.BlockPos(0, 64, 0);
++        final net.minecraft.core.BlockPos explosionPos = new net.minecraft.core.BlockPos(1, 64, 0);
++        final org.bukkit.event.entity.EntityChangeBlockEvent neighbor = Mockito.mock(org.bukkit.event.entity.EntityChangeBlockEvent.class);
++        Mockito.when(neighbor.isCancelled()).thenReturn(true);
++        Mockito.doReturn(Mockito.mock(Block.class)).when(neighbor).getBlock();
++        final RegionTickStaging.Session session = RegionTickStaging.newSession();
++        final ExplosionPrimeEvent prime = new ExplosionPrimeEvent(Mockito.mock(Entity.class), 4, false);
++        final java.util.concurrent.atomic.AtomicInteger callbacks = new java.util.concurrent.atomic.AtomicInteger();
++        RegionTickStaging.begin(session);
++        try {
++            assertTrue(RegionTickStaging.stageEvent(neighbor));
++            assertTrue(RegionTickStaging.stageSetBlock(level, cancelledPos, state, 3, 512));
++            dispatch(prime, true, event -> {
++                callbacks.incrementAndGet();
++                assertTrue(RegionTickStaging.stageSetBlock(level, explosionPos, state, 3, 512));
++            });
++        } finally {
++            RegionTickStaging.end();
++        }
++        final org.bukkit.plugin.PluginManager plugins = Mockito.mock(org.bukkit.plugin.PluginManager.class);
++        try (org.mockito.MockedStatic<org.bukkit.Bukkit> bukkit = Mockito.mockStatic(org.bukkit.Bukkit.class)) {
++            bukkit.when(org.bukkit.Bukkit::getPluginManager).thenReturn(plugins);
++            RegionTickStaging.applyAndClear(session, null);
++        }
++        Mockito.verify(level, Mockito.never()).setBlock(cancelledPos, state, 3, 512);
++        Mockito.verify(level).setBlock(explosionPos, state, 3, 512);
++        Mockito.verify(plugins).callEvent(neighbor);
++        Mockito.verifyNoMoreInteractions(plugins);
++        assertEquals(1, callbacks.get(), "The immediate explosion listener must not replay");
 +    }
 +
 +    private static List<Event> decisions() {
