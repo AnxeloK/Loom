@@ -1,0 +1,304 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Wed, 9 Sep 2026 17:22:10 +0300
+Subject: [PATCH] Trace owner-domain tick phases
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index fb3ee08f9a7bf8112a3ee5e4b44d7c8191ce98aa..62f5bf034554d7b330644ad9224d84e7cb18c04f 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1961,6 +1961,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     }
+ 
+     protected void tickServer(final BooleanSupplier haveTime) {
++        try (var trace = net.minecraft.server.threading.LoomProfileTrace.begin("server", "tick", "", MinecraftServer.currentTick)) {
++            tickServerTraced(haveTime);
++        }
++    }
++
++    protected void tickServerTraced(final BooleanSupplier haveTime) {
+         org.spigotmc.WatchdogThread.tick(); // Spigot
+         long nano = Util.getNanos();
+         int emptyTickThreshold = this.pauseWhenEmptySeconds() * 20;
+diff --git a/net/minecraft/server/level/LoomTickSectionDiagnostics.java b/net/minecraft/server/level/LoomTickSectionDiagnostics.java
+index 59646a42ece4492d027baa0c2c182dd2d4a5d57a..8bfca8043c6a3f068591fb0d18db53ca0c367c16 100644
+--- a/net/minecraft/server/level/LoomTickSectionDiagnostics.java
++++ b/net/minecraft/server/level/LoomTickSectionDiagnostics.java
+@@ -6,7 +6,7 @@ import java.util.Locale;
+ import org.slf4j.Logger;
+ 
+ final class LoomTickSectionDiagnostics {
+-    static final boolean ENABLED = Boolean.getBoolean("Loom.TickSectionDiagnostics");
++    static final boolean ENABLED = Boolean.getBoolean("Loom.TickSectionDiagnostics") || net.minecraft.server.threading.LoomProfileTrace.ENABLED;
+ 
+     static final int WORLD_SETUP = 0;
+     static final int PENDING_TICKS = 1;
+@@ -94,6 +94,7 @@ final class LoomTickSectionDiagnostics {
+         if (nanos <= 0L) {
+             return;
+         }
++        net.minecraft.server.threading.LoomProfileTrace.section(SECTION_NAMES[section], nanos, net.minecraft.server.MinecraftServer.currentTick);
+         this.currentNanos[section] += nanos;
+         this.totalNanos[section] += nanos;
+         this.maxNanos[section] = Math.max(this.maxNanos[section], nanos);
+diff --git a/net/minecraft/server/threading/LoomProfileTrace.java b/net/minecraft/server/threading/LoomProfileTrace.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..75775c51898cce856c6e7d02025fc747aef31e08
+--- /dev/null
++++ b/net/minecraft/server/threading/LoomProfileTrace.java
+@@ -0,0 +1,121 @@
++package net.minecraft.server.threading;
++
++import java.util.concurrent.atomic.AtomicLong;
++import jdk.jfr.Category;
++import jdk.jfr.Enabled;
++import jdk.jfr.Event;
++import jdk.jfr.Label;
++import jdk.jfr.Name;
++import jdk.jfr.StackTrace;
++import jdk.jfr.Timespan;
++
++/** Opt-in correlation spans. Disabled execution does not allocate or read thread-local state. */
++public final class LoomProfileTrace {
++    public static final boolean ENABLED = Boolean.getBoolean("Loom.ProfileTrace");
++    private static final AtomicLong IDS = new AtomicLong();
++    private static final ThreadLocal<Span> CURRENT = new ThreadLocal<>();
++
++    private LoomProfileTrace() {}
++
++    public static long nextId() { return ENABLED ? IDS.incrementAndGet() : 0L; }
++    public static long currentId() {
++        if (!ENABLED) return 0L;
++        final Span span = CURRENT.get();
++        return span == null ? 0L : span.event.id;
++    }
++    public static String currentWorld() {
++        if (!ENABLED) return "";
++        final Span span = CURRENT.get();
++        return span == null ? "" : span.event.world;
++    }
++
++    public static Span begin(final String phase, final String operation, final String world, final long tick) {
++        return begin(phase, operation, world, tick, currentId(), 0L, -1, 0, 0L);
++    }
++
++    public static Span begin(final String phase, final String operation, final String world, final long tick,
++                             final long parent, final long batch, final int task, final int count, final long submittedNanos) {
++        if (!ENABLED) return null;
++        final PhaseEvent event = new PhaseEvent();
++        if (!event.isEnabled()) return null;
++        event.id = nextId();
++        event.parent = parent;
++        event.batch = batch;
++        event.task = task;
++        event.count = count;
++        event.phase = phase;
++        event.operation = operation;
++        event.world = world.isEmpty() ? currentWorld() : world;
++        event.tick = tick;
++        event.queueNanos = submittedNanos == 0L ? 0L : Math.max(0L, System.nanoTime() - submittedNanos);
++        final Span span = new Span(event, CURRENT.get());
++        CURRENT.set(span);
++        event.begin();
++        return span;
++    }
++
++    public static void section(final String operation, final long elapsedNanos, final long tick) {
++        if (!ENABLED) return;
++        final SectionEvent event = new SectionEvent();
++        if (!event.isEnabled()) return;
++        event.parent = currentId();
++        event.world = currentWorld();
++        event.operation = operation;
++        event.tick = tick;
++        event.elapsedNanos = elapsedNanos;
++        event.commit();
++    }
++
++    public static final class Span implements AutoCloseable {
++        private final PhaseEvent event;
++        private final Span previous;
++        private boolean closed;
++        private Span(final PhaseEvent event, final Span previous) {
++            this.event = event;
++            this.previous = previous;
++        }
++        public void bounds(final int minX, final int minZ, final int maxX, final int maxZ) {
++            this.event.minChunkX = minX;
++            this.event.minChunkZ = minZ;
++            this.event.maxChunkX = maxX;
++            this.event.maxChunkZ = maxZ;
++        }
++        @Override public void close() {
++            if (this.closed) return;
++            this.closed = true;
++            this.event.end();
++            if (this.previous == null) CURRENT.remove(); else CURRENT.set(this.previous);
++            this.event.commit();
++        }
++    }
++
++    @Name("loom.TickPhase") @Label("Tick phase") @Category({"Loom", "Ticking"})
++    @Enabled(true) @StackTrace(false)
++    public static final class PhaseEvent extends Event {
++        public long id;
++        public long parent;
++        public long batch;
++        public long tick;
++        public int task;
++        public int count;
++        public int minChunkX;
++        public int minChunkZ;
++        public int maxChunkX;
++        public int maxChunkZ;
++        public String phase;
++        public String operation;
++        public String world;
++        @Timespan(Timespan.NANOSECONDS) public long queueNanos;
++    }
++
++    // Section timers overlap by design; elapsedNanos is an inclusive duration ending at this event.
++    @Name("loom.TickSection") @Label("Tick section") @Category({"Loom", "Ticking"})
++    @Enabled(true) @StackTrace(false)
++    public static final class SectionEvent extends Event {
++        public long parent;
++        public long tick;
++        public String world;
++        public String operation;
++        @Timespan(Timespan.NANOSECONDS) public long elapsedNanos;
++    }
++}
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index ab2624d9f23633c322ad66d4dea8fc9c891414f9..ecfcc549ee95b301b89205786b04e296ea23db01 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -847,6 +847,13 @@ public class TickRegions {
+     }
+ 
+     private static boolean helpComplete(final ParallelTaskBatch batch) {
++        try (var trace = LoomProfileTrace.begin("completion", batch.stageName, batch.traceWorld, batch.traceTick,
++                batch.traceParent, batch.traceId, -1, batch.count, 0L)) {
++            return helpCompleteTraced(batch);
++        }
++    }
++
++    private static boolean helpCompleteTraced(final ParallelTaskBatch batch) {
+         if (CURRENT_CONTEXT.get() != null) {
+             throw new IllegalStateException("Cannot cooperatively dispatch while retaining a region lease");
+         }
+@@ -918,7 +925,10 @@ public class TickRegions {
+ 
+     private static void parkIfIncomplete(final ParallelTaskBatch batch) {
+         if (!batch.isComplete()) {
+-            LockSupport.park(batch);
++            try (var trace = LoomProfileTrace.begin("park", batch.stageName, batch.traceWorld, batch.traceTick,
++                    LoomProfileTrace.currentId(), batch.traceId, -1, batch.count, 0L)) {
++                LockSupport.park(batch);
++            }
+         }
+     }
+ 
+@@ -946,6 +956,11 @@ public class TickRegions {
+     }
+ 
+     private static final class ParallelTaskBatch implements Runnable {
++        private final long traceId = LoomProfileTrace.nextId();
++        private final long traceParent = LoomProfileTrace.currentId();
++        private final String traceWorld = LoomProfileTrace.currentWorld();
++        private final long traceTick = MinecraftServer.currentTick;
++        private final long traceSubmitted = LoomProfileTrace.ENABLED ? System.nanoTime() : 0L;
+         private final int count;
+         private final IntConsumer action;
+         private final String stageName;
+@@ -1026,7 +1041,10 @@ public class TickRegions {
+                 RUNNING_WORLD_TICK.set(Boolean.TRUE);
+             }
+             try {
+-                this.action.accept(index);
++                try (var trace = LoomProfileTrace.begin("task", this.stageName, this.traceWorld, this.traceTick,
++                        this.traceParent, this.traceId, index, this.count, this.traceSubmitted)) {
++                    this.action.accept(index);
++                }
+             } catch (final Throwable throwable) {
+                 this.recordFailure(index, throwable);
+             } finally {
+@@ -1567,6 +1585,12 @@ public class TickRegions {
+     // region work but do not recursively enter another world tick. Failures remain deterministic by world
+     // list order, with Error taking priority after every world has completed.
+     public static void tickWorldsInParallel(final List<ServerLevel> worlds, final java.util.function.Consumer<ServerLevel> worldTick) {
++        try (var trace = LoomProfileTrace.begin("world-batch", "worldTick", "", MinecraftServer.currentTick)) {
++            tickWorldsInParallelTraced(worlds, worldTick);
++        }
++    }
++
++    private static void tickWorldsInParallelTraced(final List<ServerLevel> worlds, final java.util.function.Consumer<ServerLevel> worldTick) {
+         if (RUNNING_WORLD_TICK.get()) {
+             throw new IllegalStateException("Cannot recursively enter a parallel world tick");
+         }
+@@ -1576,7 +1600,9 @@ public class TickRegions {
+                 RUNNING_WORLD_TICK.set(Boolean.TRUE);
+                 try {
+                     for (final ServerLevel world : worlds) {
+-                        worldTick.accept(world);
++                        try (var trace = LoomProfileTrace.begin("world", "worldTick", LoomProfileTrace.ENABLED ? world.dimension().identifier().toString() : "", MinecraftServer.currentTick)) {
++                            worldTick.accept(world);
++                        }
+                     }
+                 } finally {
+                     RUNNING_WORLD_TICK.set(previousWorldTick);
+@@ -1586,7 +1612,12 @@ public class TickRegions {
+         }
+         final ParallelTaskBatch batch = new ParallelTaskBatch(
+             worlds.size(),
+-            i -> worldTick.accept(worlds.get(i)),
++            i -> {
++                final ServerLevel world = worlds.get(i);
++                try (var trace = LoomProfileTrace.begin("world", "worldTick", LoomProfileTrace.ENABLED ? world.dimension().identifier().toString() : "", MinecraftServer.currentTick)) {
++                    worldTick.accept(world);
++                }
++            },
+             "worldTick",
+             true
+         );
+@@ -3053,9 +3084,19 @@ public class TickRegions {
+         }
+ 
+         private void run(final String stageName) {
++            try (var trace = LoomProfileTrace.begin("region", stageName,
++                    LoomProfileTrace.ENABLED ? this.world.dimension().identifier().toString() : "", MinecraftServer.currentTick)) {
++                if (trace != null) trace.bounds(this.minChunkX, this.minChunkZ, this.maxChunkX, this.maxChunkZ);
++                runTraced(stageName);
++            }
++        }
++
++        private void runTraced(final String stageName) {
+             final RegionContext context;
+             try {
+-                context = pushRegionContext(this.world, this.minChunkX, this.minChunkZ, this.maxChunkX, this.maxChunkZ);
++                try (var trace = LoomProfileTrace.begin("ownership", stageName, "", MinecraftServer.currentTick)) {
++                    context = pushRegionContext(this.world, this.minChunkX, this.minChunkZ, this.maxChunkX, this.maxChunkZ);
++                }
+             } catch (final IllegalStateException ex) {
+                 throw new IllegalStateException(
+                     "Failed to claim region context for stage '" + stageName + "' in world "
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index b17465ccf1ca5ab6b05c73181b7faba9a702cccb..0e5591104a1b7d749f21ccb362dae030230edac4 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -449,6 +449,15 @@ public final class OwnerDomainExecutor {
+     public static <T> T awaitCooperatively(
+         final Supplier<? extends CompletableFuture<T>> futureSupplier,
+         final String operation
++    ) {
++        try (var trace = net.minecraft.server.threading.LoomProfileTrace.begin("owner-wait", operation, "", MinecraftServer.currentTick)) {
++            return awaitCooperativelyTraced(futureSupplier, operation);
++        }
++    }
++
++    private static <T> T awaitCooperativelyTraced(
++        final Supplier<? extends CompletableFuture<T>> futureSupplier,
++        final String operation
+     ) {
+         Objects.requireNonNull(futureSupplier, "futureSupplier");
+         Objects.requireNonNull(operation, "operation");
