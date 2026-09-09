@@ -1,0 +1,234 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Wed, 9 Sep 2026 20:12:01 +0300
+Subject: [PATCH] Test packet flush batching and completion
+
+---
+ .../server/network/PacketFlushTest.java       | 194 ++++++++++++++++++
+ .../server/network/PacketFlushTestSuite.java  |  13 ++
+ 2 files changed, 207 insertions(+)
+ create mode 100644 src/test/java/net/minecraft/server/network/PacketFlushTest.java
+ create mode 100644 src/test/java/net/minecraft/server/network/PacketFlushTestSuite.java
+
+diff --git a/src/test/java/net/minecraft/server/network/PacketFlushTest.java b/src/test/java/net/minecraft/server/network/PacketFlushTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..013373fe3785ecdd26c9a4c7507dee8e604a1e2c
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/network/PacketFlushTest.java
+@@ -0,0 +1,194 @@
++package net.minecraft.server.network;
++
++import io.netty.channel.ChannelFuture;
++import io.netty.channel.ChannelHandlerContext;
++import io.netty.channel.ChannelOutboundHandlerAdapter;
++import io.netty.channel.ChannelPromise;
++import io.netty.channel.embedded.EmbeddedChannel;
++import io.netty.handler.flush.FlushConsolidationHandler;
++import java.util.ArrayList;
++import java.util.List;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++@Normal
++class PacketFlushTest {
++    private static final class Fixture implements AutoCloseable {
++        final EmbeddedChannel channel = new EmbeddedChannel();
++        int flushes;
++
++        Fixture(boolean baseline) {
++            if (baseline) channel.pipeline().addFirst(new FlushConsolidationHandler());
++            else ServerConnectionListener.configureFlushConsolidation(channel.pipeline());
++            channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
++                @Override
++                public void flush(ChannelHandlerContext context) {
++                    ++flushes;
++                    context.flush();
++                }
++            });
++        }
++
++        void inOneEventLoopTurn(Runnable action) {
++            // EmbeddedChannel otherwise drains tasks after each unsafe write. Keep one outer
++            // operation active while producing the burst, just as a real event-loop task does.
++            ChannelOutboundHandlerAdapter turn = new ChannelOutboundHandlerAdapter() {
++                @Override public void write(ChannelHandlerContext context, Object message, ChannelPromise promise) {
++                    if (message == action) {
++                        action.run();
++                        promise.setSuccess();
++                    } else context.write(message, promise);
++                }
++            };
++            channel.pipeline().addLast(turn);
++            try {
++                ChannelFuture future = channel.write(action);
++                assertTrue(future.isSuccess(), () -> String.valueOf(future.cause()));
++            } finally {
++                channel.pipeline().remove(turn);
++            }
++        }
++
++        ChannelFuture send(int value) {
++            // Enter through the pipeline: EmbeddedChannel convenience methods also drain its event loop.
++            return channel.pipeline().writeAndFlush(value);
++        }
++
++        void expect(int... values) {
++            for (int value : values) assertEquals(value, (Integer) channel.readOutbound());
++            assertNull(channel.readOutbound());
++        }
++
++        @Override public void close() { channel.finishAndReleaseAll(); }
++    }
++
++    @Test
++    void workerBurstUsesOneFlushAndPreservesWriteCompletionOrder() {
++        try (Fixture baseline = new Fixture(true); Fixture candidate = new Fixture(false)) {
++            List<Integer> completions = new ArrayList<>();
++            for (int i = 0; i < 64; ++i) baseline.send(i);
++            assertEquals(64, baseline.flushes);
++            candidate.inOneEventLoopTurn(() -> {
++                for (int i = 0; i < 64; ++i) {
++                    int value = i;
++                    candidate.send(value).addListener(future -> {
++                        assertTrue(future.isSuccess());
++                        completions.add(value);
++                    });
++                }
++                assertEquals(0, candidate.flushes);
++                assertTrue(completions.isEmpty());
++            });
++            assertEquals(1, candidate.flushes);
++            for (int i = 0; i < 64; ++i) {
++                assertEquals(i, completions.get(i));
++                assertEquals(i, (Integer) candidate.channel.readOutbound());
++            }
++            assertEquals(64, completions.size());
++            assertNull(candidate.channel.readOutbound());
++        }
++    }
++
++    @Test
++    void isolatedPacketCompletesWithoutAnIncomingReadOrAnotherPacket() {
++        try (Fixture f = new Fixture(false)) {
++            ChannelFuture sent = f.send(7);
++            assertFalse(sent.isDone());
++            f.channel.runPendingTasks();
++            assertTrue(sent.isSuccess());
++            assertEquals(1, f.flushes);
++            f.expect(7);
++        }
++    }
++
++    @Test
++    void writeWithoutFlushRemainsPendingUntilExplicitFlush() {
++        try (Fixture f = new Fixture(false)) {
++            ChannelFuture sent = f.channel.pipeline().write(9);
++            f.channel.runPendingTasks();
++            assertFalse(sent.isDone());
++            assertEquals(0, f.flushes);
++            f.channel.pipeline().flush();
++            f.channel.runPendingTasks();
++            assertTrue(sent.isSuccess());
++            f.expect(9);
++        }
++    }
++
++    @Test
++    void flushThresholdBoundsAnUninterruptedBurst() {
++        try (Fixture f = new Fixture(false)) {
++            f.inOneEventLoopTurn(() -> {
++                for (int i = 0; i < FlushConsolidationHandler.DEFAULT_EXPLICIT_FLUSH_AFTER_FLUSHES; ++i) f.send(i);
++                assertEquals(1, f.flushes);
++            });
++            assertEquals(1, f.flushes);
++            f.channel.runPendingTasks();
++            assertEquals(1, f.flushes);
++        }
++    }
++
++    @Test
++    void backpressureFlushesBeforeAnotherEventLoopTurn() {
++        try (Fixture f = new Fixture(false)) {
++            f.channel.pipeline().fireChannelRead(0);
++            ChannelFuture sent = f.send(11);
++            f.channel.unsafe().outboundBuffer().setUserDefinedWritability(1, false);
++            f.channel.runPendingTasks();
++            assertTrue(sent.isSuccess());
++            assertEquals(1, f.flushes);
++            f.expect(11);
++            assertEquals(0, (Integer) f.channel.readInbound());
++        }
++    }
++
++    @Test
++    void closeAndHandlerRemovalFlushPendingWrites() {
++        for (boolean close : List.of(false, true)) {
++            try (Fixture f = new Fixture(false)) {
++                ChannelFuture sent = f.send(13);
++                if (close) f.channel.pipeline().close();
++                else f.channel.pipeline().remove(FlushConsolidationHandler.class);
++                assertTrue(sent.isSuccess());
++                assertEquals(1, f.flushes);
++                f.expect(13);
++            }
++        }
++    }
++
++    @Test
++    void completionCallbackCanSendAndThenDisconnect() {
++        try (Fixture f = new Fixture(false)) {
++            List<Integer> completed = new ArrayList<>();
++            f.send(17).addListener(first -> {
++                assertTrue(first.isSuccess());
++                completed.add(17);
++                f.send(19).addListener(second -> {
++                    assertTrue(second.isSuccess());
++                    completed.add(19);
++                    f.channel.close();
++                });
++            });
++            f.channel.runPendingTasks();
++            assertEquals(List.of(17, 19), completed);
++            assertFalse(f.channel.isOpen());
++            f.expect(17, 19);
++        }
++    }
++
++    @Test
++    void inboundReadCompletionStillFlushesResponses() {
++        try (Fixture f = new Fixture(false)) {
++            f.channel.pipeline().fireChannelRead(23);
++            ChannelFuture sent = f.send(29);
++            f.channel.runPendingTasks();
++            assertFalse(sent.isDone());
++            f.channel.pipeline().fireChannelReadComplete();
++            assertTrue(sent.isSuccess());
++            assertEquals(1, f.flushes);
++            f.expect(29);
++            assertEquals(23, (Integer) f.channel.readInbound());
++        }
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/network/PacketFlushTestSuite.java b/src/test/java/net/minecraft/server/network/PacketFlushTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..89614addf5dc39cdf740e0001d23e343b0d179dd
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/network/PacketFlushTestSuite.java
+@@ -0,0 +1,13 @@
++package net.minecraft.server.network;
++
++import org.junit.platform.suite.api.ConfigurationParameter;
++import org.junit.platform.suite.api.IncludeTags;
++import org.junit.platform.suite.api.SelectClasses;
++import org.junit.platform.suite.api.Suite;
++
++@Suite
++@IncludeTags("Normal")
++@SelectClasses(PacketFlushTest.class)
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class PacketFlushTestSuite {
++}
+-- 
+2.43.0
+

@@ -526,7 +526,7 @@ index f99c2b69ed8022914a18fd286274a67354ea82a2..d8ec7c332174f32a6991001ddc8526de
  
      @Override
 diff --git a/net/minecraft/server/network/ServerConnectionListener.java b/net/minecraft/server/network/ServerConnectionListener.java
-index e84e243f35b09691d03e9a9cf3de0c093b1d5cfb..735873cdf172f190e1a0ea7b33dacffe5934baf0 100644
+index e84e243f35b09691d03e9a9cf3de0c093b1d5cfb..f7a56effca963c6a335f4cce19b15e44e91dfb9c 100644
 --- a/net/minecraft/server/network/ServerConnectionListener.java
 +++ b/net/minecraft/server/network/ServerConnectionListener.java
 @@ -37,6 +37,7 @@ import net.minecraft.network.chat.Component;
@@ -537,16 +537,34 @@ index e84e243f35b09691d03e9a9cf3de0c093b1d5cfb..735873cdf172f190e1a0ea7b33dacffe
  import org.jspecify.annotations.Nullable;
  import org.slf4j.Logger;
  
-@@ -98,7 +99,7 @@ public class ServerConnectionListener {
+@@ -66,6 +67,15 @@ public class ServerConnectionListener {
+     }
+     // Paper end - prevent blocking on adding a new connection while the server is ticking
+ 
++    static void configureFlushConsolidation(final ChannelPipeline pipeline) {
++        if (!disableFlushConsolidation) {
++            // Region-generated packets arrive outside the read loop. Batch their flushes until the
++            // next event-loop turn; Netty still flushes on the threshold, backpressure and close.
++            pipeline.addFirst(new io.netty.handler.flush.FlushConsolidationHandler(
++                io.netty.handler.flush.FlushConsolidationHandler.DEFAULT_EXPLICIT_FLUSH_AFTER_FLUSHES, true));
++        }
++    }
++
+     public void startTcpServerListener(final @Nullable InetAddress address, final int port) throws IOException {
+         // Paper start - Unix domain socket support
+         this.startTcpServerListener(new java.net.InetSocketAddress(address, port));
+@@ -97,8 +107,8 @@ public class ServerConnectionListener {
+                                     } catch (ChannelException var5) {
                                      }
  
-                                     if (!disableFlushConsolidation) channel.pipeline().addFirst(new io.netty.handler.flush.FlushConsolidationHandler()); // Paper - Optimize network
+-                                    if (!disableFlushConsolidation) channel.pipeline().addFirst(new io.netty.handler.flush.FlushConsolidationHandler()); // Paper - Optimize network
 -                                    ChannelPipeline pipeline = channel.pipeline().addLast(HandlerNames.TIMEOUT, new ReadTimeoutHandler(30));
++                                    configureFlushConsolidation(channel.pipeline()); // Loom - batch region-generated writes on the event loop
 +                                    ChannelPipeline pipeline = channel.pipeline().addLast(HandlerNames.TIMEOUT, new ReadTimeoutHandler(Connection.READ_TIMEOUT_SECONDS));
                                      if (ServerConnectionListener.this.server.repliesToStatus()) {
                                          pipeline.addLast(HandlerNames.LEGACY_QUERY, new LegacyQueryHandler(ServerConnectionListener.this.getServer()));
                                      }
-@@ -261,7 +262,7 @@ public class ServerConnectionListener {
+@@ -261,7 +271,7 @@ public class ServerConnectionListener {
              // Spigot start
              this.addPending(); // Paper - prevent blocking on adding a new connection while the server is ticking
              // This prevents players from 'gaming' the server, and strategically relogging to increase their position in the tick order
@@ -555,7 +573,7 @@ index e84e243f35b09691d03e9a9cf3de0c093b1d5cfb..735873cdf172f190e1a0ea7b33dacffe
                  Collections.shuffle(this.connections);
              }
              // Spigot end
-@@ -271,13 +272,6 @@ public class ServerConnectionListener {
+@@ -271,13 +281,6 @@ public class ServerConnectionListener {
                  Connection connection = iterator.next();
                  if (!connection.isConnecting()) {
                      if (connection.isConnected()) {
@@ -569,7 +587,7 @@ index e84e243f35b09691d03e9a9cf3de0c093b1d5cfb..735873cdf172f190e1a0ea7b33dacffe
                          try {
                              connection.tick();
                          } catch (Exception e) {
-@@ -293,7 +287,7 @@ public class ServerConnectionListener {
+@@ -293,7 +296,7 @@ public class ServerConnectionListener {
                      } else {
                          if (connection.preparing) continue; // Spigot - Fix a race condition where a Connection could be unregistered just before connection
                          iterator.remove();
