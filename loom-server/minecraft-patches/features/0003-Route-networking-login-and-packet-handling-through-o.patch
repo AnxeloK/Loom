@@ -43,7 +43,7 @@ index 66d6af2833d76af28fbeb2ce70c194a559572460..7a260cf3b908b1752031d2feb35d9b95
  
              for (KeepAliveResponse response : this.responses) {
 diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
-index 01e5ff70c70dd7fab089d8965bd1c237fa239f45..45673626b7acd09cac5111cc24d2ed997d484c5d 100644
+index 01e5ff70c70dd7fab089d8965bd1c237fa239f45..e663de682d7a0e0bcc6622e8e608a407ab9178ab 100644
 --- a/net/minecraft/network/Connection.java
 +++ b/net/minecraft/network/Connection.java
 @@ -43,6 +43,7 @@ import net.minecraft.network.protocol.handshake.ServerHandshakePacketListener;
@@ -62,7 +62,23 @@ index 01e5ff70c70dd7fab089d8965bd1c237fa239f45..45673626b7acd09cac5111cc24d2ed99
      public static final Marker ROOT_MARKER = MarkerFactory.getMarker("NETWORK");
      public static final Marker PACKET_MARKER = Util.make(MarkerFactory.getMarker("NETWORK_PACKETS"), m -> m.add(ROOT_MARKER));
      public static final Marker PACKET_RECEIVED_MARKER = Util.make(MarkerFactory.getMarker("PACKET_RECEIVED"), m -> m.add(PACKET_MARKER));
-@@ -553,23 +555,59 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -463,6 +465,15 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+         if (listener != null) {
+             future = flush ? this.channel.writeAndFlush(packet) : this.channel.write(packet); // Paper - Optimize network
+             future.addListener(listener);
++            // Loom - callbacks can change codecs before the next packet is encoded (login compression).
++            // Preserve that boundary while ordinary packet writes remain consolidated.
++            if (flush) {
++                final io.netty.channel.ChannelHandlerContext consolidation = this.channel.pipeline()
++                    .context(io.netty.handler.flush.FlushConsolidationHandler.class);
++                if (consolidation != null) {
++                    consolidation.flush();
++                }
++            }
+         } else if (flush) {
+             future = this.channel.writeAndFlush(packet, this.channel.voidPromise()); // Paper - Optimize network
+         } else {
+@@ -553,23 +564,59 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
      private static final int MAX_PER_TICK = io.papermc.paper.configuration.GlobalConfiguration.get().misc.maxJoinsPerTick; // Paper - Buffer joins to world
      private static int joinAttemptsThisTick; // Paper - Buffer joins to world
      private static int currTick; // Paper - Buffer joins to world
@@ -128,7 +144,7 @@ index 01e5ff70c70dd7fab089d8965bd1c237fa239f45..45673626b7acd09cac5111cc24d2ed99
              } finally {
                  net.minecraft.network.PacketProcessor.packetProcessing.pop();
              } // Paper end - detailed watchdog information
-@@ -577,7 +615,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -577,7 +624,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          }
  
          if (!this.isConnected() && !this.disconnectionHandled) {
@@ -137,7 +153,7 @@ index 01e5ff70c70dd7fab089d8965bd1c237fa239f45..45673626b7acd09cac5111cc24d2ed99
          }
  
          if (this.channel != null) {
-@@ -663,7 +701,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -663,7 +710,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
                  } catch (ChannelException var3) {
                  }
  
@@ -146,7 +162,7 @@ index 01e5ff70c70dd7fab089d8965bd1c237fa239f45..45673626b7acd09cac5111cc24d2ed99
                  Connection.configureSerialization(pipeline, PacketFlow.CLIENTBOUND, false, connection.bandwidthDebugMonitor);
                  connection.configurePacketHandler(pipeline);
              }
-@@ -858,6 +896,12 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -858,6 +905,12 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          }
      }
  

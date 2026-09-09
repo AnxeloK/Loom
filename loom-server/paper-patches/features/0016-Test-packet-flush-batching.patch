@@ -4,18 +4,18 @@ Date: Wed, 9 Sep 2026 20:12:01 +0300
 Subject: [PATCH] Test packet flush batching and completion
 
 ---
- .../server/network/PacketFlushTest.java       | 194 ++++++++++++++++++
+ .../server/network/PacketFlushTest.java       | 219 ++++++++++++++++++
  .../server/network/PacketFlushTestSuite.java  |  13 ++
- 2 files changed, 207 insertions(+)
+ 2 files changed, 232 insertions(+)
  create mode 100644 src/test/java/net/minecraft/server/network/PacketFlushTest.java
  create mode 100644 src/test/java/net/minecraft/server/network/PacketFlushTestSuite.java
 
 diff --git a/src/test/java/net/minecraft/server/network/PacketFlushTest.java b/src/test/java/net/minecraft/server/network/PacketFlushTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..013373fe3785ecdd26c9a4c7507dee8e604a1e2c
+index 0000000000000000000000000000000000000000..ebe810e2168e448e1a0e19ec1b1514b82c445fc8
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/network/PacketFlushTest.java
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,219 @@
 +package net.minecraft.server.network;
 +
 +import io.netty.channel.ChannelFuture;
@@ -192,6 +192,31 @@ index 0000000000000000000000000000000000000000..013373fe3785ecdd26c9a4c7507dee8e
 +            assertEquals(List.of(17, 19), completed);
 +            assertFalse(f.channel.isOpen());
 +            f.expect(17, 19);
++        }
++    }
++
++    @Test
++    void packetCallbackChangesCodecBeforeTheFollowingPacketIsEncoded() {
++        io.papermc.paper.configuration.GlobalConfigTestingBase.setupGlobalConfigForTest(
++            net.minecraft.core.RegistryAccess.EMPTY);
++        try (Fixture f = new Fixture(false)) {
++            net.minecraft.network.Connection connection = new net.minecraft.network.Connection(
++                net.minecraft.network.protocol.PacketFlow.SERVERBOUND);
++            connection.channel = f.channel;
++            boolean[] compressed = {false};
++            f.channel.pipeline().addLast(new ChannelOutboundHandlerAdapter() {
++                @Override public void write(ChannelHandlerContext context, Object message, ChannelPromise promise) {
++                    if (message instanceof net.minecraft.network.protocol.Packet<?>) {
++                        context.write(compressed[0] ? 1 : 0, promise);
++                    } else context.write(message, promise);
++                }
++            });
++            f.inOneEventLoopTurn(() -> {
++                connection.send(new net.minecraft.network.protocol.login.ClientboundLoginCompressionPacket(256),
++                    future -> compressed[0] = true);
++                connection.send(new net.minecraft.network.protocol.login.ClientboundLoginCompressionPacket(256));
++            });
++            f.expect(0, 1);
 +        }
 +    }
 +
