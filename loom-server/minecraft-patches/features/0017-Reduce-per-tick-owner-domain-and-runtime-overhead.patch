@@ -5,10 +5,10 @@ Subject: [PATCH] Reduce per-tick owner-domain and runtime overhead
 
 
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 43250d1bfa34892045a475d8cc5664d35405186d..f17c6922a73b86a1af9fb8d8ca0bfb484f643ae0 100644
+index 32040364d000ce683dbaf8a6498c00cc0d53af55..903b075d3e76bf22970422626b91260edb7e3a8d 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -548,7 +548,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -550,7 +550,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      @Override
      public final void moonrise$markChunkForPlayerTicking(final LevelChunk chunk) {
          final ChunkPos pos = chunk.getPos();
@@ -17,7 +17,7 @@ index 43250d1bfa34892045a475d8cc5664d35405186d..f17c6922a73b86a1af9fb8d8ca0bfb48
              return;
          }
  
-@@ -589,6 +589,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -591,6 +591,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          final int val = this.playerTickingRequests.addTo(chunkKey, -1);
  
          if (val <= 0) {
@@ -25,7 +25,7 @@ index 43250d1bfa34892045a475d8cc5664d35405186d..f17c6922a73b86a1af9fb8d8ca0bfb48
              throw new IllegalStateException("Negative counter");
          }
  
-@@ -597,6 +598,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -599,6 +600,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              return;
          }
  
@@ -34,7 +34,7 @@ index 43250d1bfa34892045a475d8cc5664d35405186d..f17c6922a73b86a1af9fb8d8ca0bfb48
          final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder chunkHolder = ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)(ServerLevel)(Object)this).moonrise$getChunkTaskScheduler()
              .chunkHolderManager.getChunkHolder(chunkKey);
  
-@@ -968,6 +971,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -975,6 +978,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
                  loomDiagnostics.record(LoomTickSectionDiagnostics.BLOCK_ENTITIES, System.nanoTime() - loomBlockEntitiesStart);
              }
              profiler.pop();
@@ -408,10 +408,10 @@ index b9748a392c9f76e61a1b673085b4dd74c007c70d..fb859a35f5267ed00828f2df2d5b8f57
 +    }
  }
 diff --git a/net/minecraft/world/level/NaturalSpawner.java b/net/minecraft/world/level/NaturalSpawner.java
-index 86584f626fd4abf38ee9abf51fa6912790cad637..81592b26a9d45d45fe591df89a3b6bf828515b42 100644
+index 49e6e732e593f0d034db88cc3832f57e4b29472d..75bcee8cfc88c91c121217d00e3195e2af84c35e 100644
 --- a/net/minecraft/world/level/NaturalSpawner.java
 +++ b/net/minecraft/world/level/NaturalSpawner.java
-@@ -308,7 +308,7 @@ public final class NaturalSpawner {
+@@ -302,7 +302,7 @@ public final class NaturalSpawner {
                              }
  
                              // Paper start - PreCreatureSpawnEvent
@@ -420,7 +420,7 @@ index 86584f626fd4abf38ee9abf51fa6912790cad637..81592b26a9d45d45fe591df89a3b6bf8
                              // Paper start - per player mob count backoff
                              if (doSpawning == PreSpawnStatus.ABORT || doSpawning == PreSpawnStatus.CANCELLED) {
                                  level.getChunkSource().chunkMap.updateFailurePlayerMobTypeMap(pos.getX() >> 4, pos.getZ() >> 4, mobCategory);
-@@ -392,7 +392,8 @@ public final class NaturalSpawner {
+@@ -386,7 +386,8 @@ public final class NaturalSpawner {
          final ChunkGenerator generator,
          final MobSpawnSettings.SpawnerData currentSpawnData,
          final BlockPos.MutableBlockPos pos,
@@ -430,7 +430,7 @@ index 86584f626fd4abf38ee9abf51fa6912790cad637..81592b26a9d45d45fe591df89a3b6bf8
      ) {
          // Paper start - PreCreatureSpawnEvent
          EntityType<?> type = currentSpawnData.type();
-@@ -412,7 +413,7 @@ public final class NaturalSpawner {
+@@ -406,7 +407,7 @@ public final class NaturalSpawner {
              && type.canSummon()
              && canSpawnMobAt(level, structureManager, generator, mobCategory, currentSpawnData, pos)
              && SpawnPlacements.isSpawnPositionOk(type, level, pos)
@@ -439,7 +439,7 @@ index 86584f626fd4abf38ee9abf51fa6912790cad637..81592b26a9d45d45fe591df89a3b6bf8
              && level.noCollision(type.getSpawnAABB(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5));
          return success ? PreSpawnStatus.SUCCESS : PreSpawnStatus.FAIL; // Paper - PreCreatureSpawnEvent
      }
-@@ -491,8 +492,11 @@ public final class NaturalSpawner {
+@@ -480,8 +481,11 @@ public final class NaturalSpawner {
      }
  
      private static BlockPos getRandomPosWithin(final Level level, final LevelChunk chunk) {

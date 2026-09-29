@@ -6,10 +6,10 @@ Subject: [PATCH] Parallelize spawn chunk filtering
 Player-spawn chunk filtering scans every player-ticking chunk before the parallel chunk phase. Cache its spatial plan and filter independent player clusters under bounded region leases, then preserve the original chunk order when collecting the results.
 
 diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
-index 3e6b05efce804e012e281dddb48f010d169e0a16..c31a31aa8e50e16dce42ed15bad500c9a80d388b 100644
+index 4fdcf59ae3e9dda3155506f53c97e44bc6573c39..33263ee18ee3590f07fb0f362b7f120599cf5552 100644
 --- a/net/minecraft/server/level/ChunkMap.java
 +++ b/net/minecraft/server/level/ChunkMap.java
-@@ -739,6 +739,8 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -738,6 +738,8 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
      }
      // Paper end - optimise chunk tick iteration
  
@@ -18,7 +18,7 @@ index 3e6b05efce804e012e281dddb48f010d169e0a16..c31a31aa8e50e16dce42ed15bad500c9
      public void collectSpawningChunks(final List<LevelChunk> output) {
          // Paper start - optimise chunk tick iteration
          final ca.spottedleaf.moonrise.common.list.ReferenceList<net.minecraft.world.level.chunk.LevelChunk> tickingChunks = ((ca.spottedleaf.moonrise.patches.chunk_tick_iteration.ChunkTickServerLevel)this.level).moonrise$getPlayerTickingChunks();
-@@ -747,6 +749,18 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -746,6 +748,18 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
          final int size = tickingChunks.size();
  
          Objects.checkFromToIndex(0, size, raw.length);
@@ -37,7 +37,7 @@ index 3e6b05efce804e012e281dddb48f010d169e0a16..c31a31aa8e50e16dce42ed15bad500c9
          for (int i = 0; i < size; ++i) {
              final LevelChunk levelChunk = raw[i];
  
-@@ -759,6 +773,154 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -758,6 +772,154 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
          // Paper end - optimise chunk tick iteration
      }
  

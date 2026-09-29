@@ -41,10 +41,10 @@ index 0d5805a9002854ea2666ef3bc792e61f016ffd34..cc55597996d1c84a1a345dac110c68c1
          y = !Float.isInfinite(y) && !Float.isNaN(y) ? y % 360.0F : 0.0F;
          z = !Float.isInfinite(z) && !Float.isNaN(z) ? z % 360.0F : 0.0F;
 diff --git a/net/minecraft/core/dispenser/DispenseItemBehavior.java b/net/minecraft/core/dispenser/DispenseItemBehavior.java
-index 162d7890f204315b0476467e757de5c9dd84aeca..2a1af17ec551f31feb8896717afa72fc38a2f402 100644
+index c650f26d3ecdeb94a4d0f40637c07c59a6cbdfa6..529c18491378529516a3721debfdf387928adc08 100644
 --- a/net/minecraft/core/dispenser/DispenseItemBehavior.java
 +++ b/net/minecraft/core/dispenser/DispenseItemBehavior.java
-@@ -291,47 +291,45 @@ public interface DispenseItemBehavior {
+@@ -292,47 +292,45 @@ public interface DispenseItemBehavior {
                      return result;
                  }
                  // Paper end - Call BlockDispenseEvent
@@ -128,10 +128,10 @@ index 162d7890f204315b0476467e757de5c9dd84aeca..2a1af17ec551f31feb8896717afa72fc
                  return dispensed;
              }
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index d8a64e4c2ab81ccd5feaa53d6bf97682df77d88e..97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39 100644
+index e1fcad4540cfb80add3881b16eccb7c24ff3cb16..622ca4115986b9202f0fca2c4347388af53ead9a 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2027,6 +2027,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2008,6 +2008,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
                  net.minecraft.server.threading.TickRegions.pushLevelContext(level);
  
              try {
@@ -140,10 +140,10 @@ index d8a64e4c2ab81ccd5feaa53d6bf97682df77d88e..97fb4dee3f3f89798c9c536f2b0eaf3d
              } catch (Throwable throwable) {
                  CrashReport report = CrashReport.forThrowable(throwable, "Exception ticking world");
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 00695adb4abeb8e80652b7ecfdaca69c5150ddf1..48ed1659e4e7499dcecadc9654536da1b2870559 100644
+index c24a8a2b926601cba21daffce336efcd3e3cc54d..b03932562cd61caac3088cd64061eedd77e3fed6 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -941,7 +941,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -948,7 +948,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
                  loomDiagnostics.record(LoomTickSectionDiagnostics.BLOCK_ENTITIES, System.nanoTime() - loomBlockEntitiesStart);
              }
              profiler.pop();
@@ -152,7 +152,7 @@ index 00695adb4abeb8e80652b7ecfdaca69c5150ddf1..48ed1659e4e7499dcecadc9654536da1
          }
  
          loomSectionStart = loomDiagnostics == null ? 0L : System.nanoTime();
-@@ -1923,8 +1923,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1927,8 +1927,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          } else {
              if (entity instanceof net.minecraft.world.entity.item.ItemEntity item && item.getItem().isEmpty()) return false; // Paper - Prevent empty items from being added
              // Paper start - capture all item additions to the world
@@ -162,7 +162,7 @@ index 00695adb4abeb8e80652b7ecfdaca69c5150ddf1..48ed1659e4e7499dcecadc9654536da1
                  return true;
              }
              // Paper end - capture all item additions to the world
-@@ -2180,13 +2179,13 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2184,13 +2183,13 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              return;
          }
          // CraftBukkit end
@@ -179,10 +179,10 @@ index 00695adb4abeb8e80652b7ecfdaca69c5150ddf1..48ed1659e4e7499dcecadc9654536da1
      }
  
 diff --git a/net/minecraft/server/level/ServerPlayerGameMode.java b/net/minecraft/server/level/ServerPlayerGameMode.java
-index b5b9cd93d6c5e2fcf66a552256ae9843ed689d39..b15b37f876e22b35c1a43e710c688a914fbe4aca 100644
+index b7ba905dda5328c090b769622f1d417a375f58d0..e151d30fdbdbbdb2da35cdf2a2fdfdf5dd75882f 100644
 --- a/net/minecraft/server/level/ServerPlayerGameMode.java
 +++ b/net/minecraft/server/level/ServerPlayerGameMode.java
-@@ -391,52 +391,52 @@ public class ServerPlayerGameMode {
+@@ -417,52 +417,52 @@ public class ServerPlayerGameMode {
  
          // CraftBukkit start
          org.bukkit.block.BlockState bState = bblock.getState();
@@ -857,10 +857,10 @@ index a67bae67a5c85fd13509cfaa161fc3375334bbf9..6b7cad2ff1b2490090e18925e4380d32
              level,
              owner.chunkX(),
 diff --git a/net/minecraft/world/entity/item/PrimedTnt.java b/net/minecraft/world/entity/item/PrimedTnt.java
-index 237d579c4fa760e6f6c8f8e747873b115d04d1bd..9a998d332b20c72f9f2d0d64e162de0973408882 100644
+index df35f161c3e487872075a5833463e9b12914a2b5..615a339dff62d72d8298188a5beef0fc6cb02a33 100644
 --- a/net/minecraft/world/entity/item/PrimedTnt.java
 +++ b/net/minecraft/world/entity/item/PrimedTnt.java
-@@ -104,7 +104,7 @@ public class PrimedTnt extends Entity implements TraceableEntity {
+@@ -105,7 +105,7 @@ public class PrimedTnt extends Entity implements TraceableEntity {
  
      @Override
      public void tick() {
@@ -870,84 +870,72 @@ index 237d579c4fa760e6f6c8f8e747873b115d04d1bd..9a998d332b20c72f9f2d0d64e162de09
          this.applyGravity();
          this.move(MoverType.SELF, this.getDeltaMovement());
 diff --git a/net/minecraft/world/item/ItemStack.java b/net/minecraft/world/item/ItemStack.java
-index 44a7590558fa73fb570f76ba7a4e7db1415d08f7..8f72f1c4879ab3c7bb55cc47b47eaa68ad687294 100644
+index 00861318771cd184c9f75a9a036deee9ec2ba310..02972211853fec1a2433e7f044a1308ff25de89f 100644
 --- a/net/minecraft/world/item/ItemStack.java
 +++ b/net/minecraft/world/item/ItemStack.java
-@@ -382,35 +382,27 @@ public final class ItemStack implements DataComponentHolder, ItemInstance {
-         ServerLevel level = (ServerLevel) context.getLevel();
-         boolean isBonemeal = usedItem == Items.BONE_MEAL;
+@@ -383,30 +383,22 @@ public final class ItemStack implements DataComponentHolder, ItemInstance {
+             ServerLevel level = (ServerLevel) context.getLevel();
+             boolean isBonemeal = usedItem == Items.BONE_MEAL;
  
--        if (!(usedItem instanceof BucketItem)) {
--            level.captureBlockStates = true;
--            level.captureTreeGeneration = isBonemeal;
--        }
+-            if (!(usedItem instanceof BucketItem)) {
+-                level.captureBlockStates = true;
+-                level.captureTreeGeneration = isBonemeal;
+-            }
 -
--        List<org.bukkit.craftbukkit.block.CraftBlockState> capturedBlockStates;
--        List<net.minecraft.world.level.block.entity.BlockEntity> capturedBlockEntities;
--        org.bukkit.TreeType treeType;
--        InteractionResult result;
-+        net.minecraft.world.level.LevelCaptureContext.Scope captureScope = null;
-         try {
--            result = usedItem.useOn(context);
--        } finally {
--            level.captureBlockStates = false;
--            level.captureTreeGeneration = false;
+-            List<org.bukkit.craftbukkit.block.CraftBlockState> capturedBlockStates;
+-            List<net.minecraft.world.level.block.entity.BlockEntity> capturedBlockEntities;
+-            org.bukkit.TreeType treeType;
+-            InteractionResult result;
++            net.minecraft.world.level.LevelCaptureContext.Scope captureScope = null;
+             try {
+-                result = usedItem.useOn(context);
+-            } finally {
+-                level.captureBlockStates = false;
+-                level.captureTreeGeneration = false;
 -
--            capturedBlockStates = new java.util.ArrayList<>(level.capturedBlockStates.values());
--            level.capturedBlockStates.clear();
+-                capturedBlockStates = new java.util.ArrayList<>(level.capturedBlockStates.values());
+-                level.capturedBlockStates.clear();
 -
--            capturedBlockEntities = new java.util.ArrayList<>(level.capturedBlockEntities.values());
--            level.capturedBlockEntities.clear();
+-                capturedBlockEntities = new java.util.ArrayList<>(level.capturedBlockEntities.values());
+-                level.capturedBlockEntities.clear();
 -
--            treeType = net.minecraft.world.level.block.SaplingBlock.treeType;
--            net.minecraft.world.level.block.SaplingBlock.treeType = null;
--        }
--
--        DataComponentPatch newPatch = this.components.asPatch();
--        int newCount = this.getCount();
--        this.setCount(previousCount);
--        this.restorePatch(previousPatch);
-+            if (!(usedItem instanceof BucketItem)) {
-+                final int captureModes = net.minecraft.world.level.LevelCaptureContext.BLOCK_STATES
-+                    | (isBonemeal ? net.minecraft.world.level.LevelCaptureContext.TREE : 0);
-+                captureScope = level.beginCaptureContext(captureModes);
+-                treeType = net.minecraft.world.level.block.SaplingBlock.treeType;
+-                net.minecraft.world.level.block.SaplingBlock.treeType = null;
+-            }
++                if (!(usedItem instanceof BucketItem)) {
++                    final int captureModes = net.minecraft.world.level.LevelCaptureContext.BLOCK_STATES
++                        | (isBonemeal ? net.minecraft.world.level.LevelCaptureContext.TREE : 0);
++                    captureScope = level.beginCaptureContext(captureModes);
++                }
++                InteractionResult result = usedItem.useOn(context);
++                final net.minecraft.world.level.LevelCaptureContext.Result captured = captureScope == null ? null : captureScope.freeze();
++                List<org.bukkit.craftbukkit.block.CraftBlockState> capturedBlockStates = captured == null
++                    ? new java.util.ArrayList<>()
++                    : new java.util.ArrayList<>(captured.blockStates().values());
++                List<net.minecraft.world.level.block.entity.BlockEntity> capturedBlockEntities = captured == null
++                    ? new java.util.ArrayList<>()
++                    : new java.util.ArrayList<>(captured.blockEntities().values());
++                org.bukkit.TreeType treeType = captured == null ? null : captured.treeType();
+ 
+             DataComponentPatch newPatch = this.components.asPatch();
+             int newCount = this.getCount();
+@@ -515,6 +507,11 @@ public final class ItemStack implements DataComponentHolder, ItemInstance {
+             } else {
+                 return result;
+             }
++            } finally {
++                if (captureScope != null) {
++                    captureScope.close();
++                }
 +            }
-+            InteractionResult result = usedItem.useOn(context);
-+            final net.minecraft.world.level.LevelCaptureContext.Result captured = captureScope == null ? null : captureScope.freeze();
-+            List<org.bukkit.craftbukkit.block.CraftBlockState> capturedBlockStates = captured == null
-+                ? new java.util.ArrayList<>()
-+                : new java.util.ArrayList<>(captured.blockStates().values());
-+            List<net.minecraft.world.level.block.entity.BlockEntity> capturedBlockEntities = captured == null
-+                ? new java.util.ArrayList<>()
-+                : new java.util.ArrayList<>(captured.blockEntities().values());
-+            org.bukkit.TreeType treeType = captured == null ? null : captured.treeType();
-+
-+            DataComponentPatch newPatch = this.components.asPatch();
-+            int newCount = this.getCount();
-+            this.setCount(previousCount);
-+            this.restorePatch(previousPatch);
- 
-         if (result.consumesAction() && isBonemeal && !capturedBlockStates.isEmpty()) {
-             org.bukkit.Location location = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(pos, level);
-@@ -509,7 +501,12 @@ public final class ItemStack implements DataComponentHolder, ItemInstance {
          }
-         // CraftBukkit end
- 
--        return result;
-+            return result;
-+        } finally {
-+            if (captureScope != null) {
-+                captureScope.close();
-+            }
-+        }
      }
  
-     public float getDestroySpeed(final BlockState state) {
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index 482ddd7194bf876b805482036ada7050392eb455..428a9b90b218431bcdb9ed18316865654ca9bd75 100644
+index 4ed9d1548211a3bea0f569c795740a3493b30a93..1e341e5cb45b1920afc4471f1a52ecac4cfd9ba1 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
-@@ -150,12 +150,6 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -148,12 +148,6 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      private final CraftWorld world;
      public org.bukkit.generator.@Nullable ChunkGenerator generator;
  
@@ -960,7 +948,7 @@ index 482ddd7194bf876b805482036ada7050392eb455..428a9b90b218431bcdb9ed1831686565
      public final it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<SpawnCategory> ticksPerSpawnCategory = new it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<>();
      // Paper start - EAR 2
      public final java.util.concurrent.atomic.AtomicInteger wakeupInactiveRemainingAnimals = new java.util.concurrent.atomic.AtomicInteger();
-@@ -184,6 +178,45 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -182,6 +176,45 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      public CraftServer getCraftServer() {
          return (CraftServer) org.bukkit.Bukkit.getServer();
      }
@@ -1006,7 +994,7 @@ index 482ddd7194bf876b805482036ada7050392eb455..428a9b90b218431bcdb9ed1831686565
      // Paper start - Use getChunkIfLoadedImmediately
      @Override
      public boolean hasChunk(int chunkX, int chunkZ) {
-@@ -992,8 +1025,9 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -990,8 +1023,9 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      @Nullable
      public final BlockState getBlockStateIfLoaded(BlockPos pos) {
          // CraftBukkit start - tree generation
@@ -1018,7 +1006,7 @@ index 482ddd7194bf876b805482036ada7050392eb455..428a9b90b218431bcdb9ed1831686565
              if (previous != null) {
                  return previous.getHandle();
              }
-@@ -1055,27 +1089,29 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1048,27 +1082,29 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
  
      @Override
      public boolean setBlock(final BlockPos pos, final BlockState blockState, final @Block.UpdateFlags int updateFlags, final int updateLimit) {
@@ -1057,7 +1045,7 @@ index 482ddd7194bf876b805482036ada7050392eb455..428a9b90b218431bcdb9ed1831686565
          if (!this.isInValidBounds(pos)) {
              return false;
          }
-@@ -1088,14 +1124,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1081,14 +1117,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
          Block block = blockState.getBlock();
          // CraftBukkit start - capture blockstates
          boolean captured = false;
@@ -1076,7 +1064,7 @@ index 482ddd7194bf876b805482036ada7050392eb455..428a9b90b218431bcdb9ed1831686565
              }
              snapshot.setFlags(updateFlags); // Paper - always set the flag of the most recent call to mitigate issues with multiple update at the same pos with different flags
          }
-@@ -1104,8 +1138,8 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1097,8 +1131,8 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
          this.chunkPacketBlockController.onBlockChange(this, pos, blockState, oldState, updateFlags, updateLimit); // Paper - Anti-Xray
          if (oldState == null) {
              // CraftBukkit start - remove blockstate if failed (or the same)
@@ -1087,7 +1075,7 @@ index 482ddd7194bf876b805482036ada7050392eb455..428a9b90b218431bcdb9ed1831686565
              }
              // CraftBukkit end
              return false;
-@@ -1143,7 +1177,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1136,7 +1170,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
          */ // CraftBukkit
  
          // CraftBukkit start
@@ -1096,7 +1084,7 @@ index 482ddd7194bf876b805482036ada7050392eb455..428a9b90b218431bcdb9ed1831686565
              // Modularize client and physic updates
              // Spigot start
              try {
-@@ -1315,8 +1349,9 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1305,8 +1339,9 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      @Override
      public BlockState getBlockState(final BlockPos pos) {
          // CraftBukkit start - tree generation
@@ -1108,7 +1096,7 @@ index 482ddd7194bf876b805482036ada7050392eb455..428a9b90b218431bcdb9ed1831686565
              if (previous != null) {
                  return previous.getHandle();
              }
-@@ -1744,12 +1779,15 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1745,12 +1780,15 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
  
      @Override
      public @Nullable BlockEntity getBlockEntity(final BlockPos pos) {
@@ -1129,7 +1117,7 @@ index 482ddd7194bf876b805482036ada7050392eb455..428a9b90b218431bcdb9ed1831686565
          if (!this.isInValidBounds(pos)) {
              return null;
          } else {
-@@ -1763,8 +1801,9 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1764,8 +1802,9 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
          BlockPos pos = blockEntity.getBlockPos();
          if (this.isInValidBounds(pos)) {
              // CraftBukkit start
@@ -1479,10 +1467,10 @@ index 0000000000000000000000000000000000000000..1ebba24d14416afad1f8fd156c42bbb9
 +    }
 +}
 diff --git a/net/minecraft/world/level/block/Block.java b/net/minecraft/world/level/block/Block.java
-index 29f5182c8528bfdced6a3c2c145e58721e723777..e371526429c2a63bc6d0fa0e3dace8b7949e0a14 100644
+index 1b89d481168347f8edd078a8ac190b38a4390a6f..c8643992de0ef1a70cab071764b24ab2a882bba4 100644
 --- a/net/minecraft/world/level/block/Block.java
 +++ b/net/minecraft/world/level/block/Block.java
-@@ -486,9 +486,7 @@ public class Block extends BlockBehaviour implements ItemLike {
+@@ -482,9 +482,7 @@ public class Block extends BlockBehaviour implements ItemLike {
              ItemEntity entity = entityFactory.get();
              entity.setDefaultPickUpDelay();
              // CraftBukkit start
@@ -1494,10 +1482,10 @@ index 29f5182c8528bfdced6a3c2c145e58721e723777..e371526429c2a63bc6d0fa0e3dace8b7
              }
              // CraftBukkit end
 diff --git a/net/minecraft/world/level/block/MushroomBlock.java b/net/minecraft/world/level/block/MushroomBlock.java
-index 8d466e5a3e187cb151a7513de3e78d3350b32277..ffb8c7de28699d299a77ed83c938ac63f3532165 100644
+index c0779cb3c237e4399a53a7e6fc95bb2d88483bca..da6829b816a7233b083cc73e89abaf863bf75be4 100644
 --- a/net/minecraft/world/level/block/MushroomBlock.java
 +++ b/net/minecraft/world/level/block/MushroomBlock.java
-@@ -94,7 +94,7 @@ public class MushroomBlock extends VegetationBlock implements BonemealableBlock
+@@ -83,7 +83,7 @@ public class MushroomBlock extends VegetationBlock implements BonemealableBlock
          }
  
          level.removeBlock(pos, false);
@@ -1507,10 +1495,10 @@ index 8d466e5a3e187cb151a7513de3e78d3350b32277..ffb8c7de28699d299a77ed83c938ac63
              return true;
          }
 diff --git a/net/minecraft/world/level/block/NetherFungusBlock.java b/net/minecraft/world/level/block/NetherFungusBlock.java
-index 82ab930bf438e988d637786bdde88e34ea073a2f..1c65a7217d4999195317da5ad965b824e5a45e87 100644
+index fefb4e7a3bf922be16cf7fb6b70c0689867dd963..7b6797ca591dd16f34e142ab687006e071076850 100644
 --- a/net/minecraft/world/level/block/NetherFungusBlock.java
 +++ b/net/minecraft/world/level/block/NetherFungusBlock.java
-@@ -84,9 +84,9 @@ public class NetherFungusBlock extends VegetationBlock implements BonemealableBl
+@@ -64,9 +64,9 @@ public class NetherFungusBlock extends VegetationBlock implements BonemealableBl
              // CraftBukkit start
              .map((value) -> {
                  if (this == Blocks.WARPED_FUNGUS) {
@@ -1523,18 +1511,18 @@ index 82ab930bf438e988d637786bdde88e34ea073a2f..1c65a7217d4999195317da5ad965b824
                  return value;
              })
 diff --git a/net/minecraft/world/level/block/SaplingBlock.java b/net/minecraft/world/level/block/SaplingBlock.java
-index cbf7845ca64f1b716af3e50ac8716373d2ae3755..e3398cfef77c306f03a16f03e1234489e10a33b7 100644
+index 5564a54f23aab158b9506325953ec70cab55c961..f018b65da028934a75bdb7fe40cd589d581377ef 100644
 --- a/net/minecraft/world/level/block/SaplingBlock.java
 +++ b/net/minecraft/world/level/block/SaplingBlock.java
-@@ -24,7 +24,6 @@ public class SaplingBlock extends VegetationBlock implements BonemealableBlock {
-     public static final IntegerProperty STAGE = BlockStateProperties.STAGE;
+@@ -21,7 +21,6 @@ public class SaplingBlock extends VegetationBlock implements BonemealableBlock {
+     public static final int TICK_CHANCE_FOR_SAPLING_GROWTH = 7;
      private static final VoxelShape SHAPE = Block.column(12.0, 0.0, 12.0);
      protected final TreeGrower treeGrower;
 -    public static org.bukkit.@org.jspecify.annotations.Nullable TreeType treeType; // CraftBukkit
  
-     @Override
-     public MapCodec<? extends SaplingBlock> codec() {
-@@ -54,34 +53,36 @@ public class SaplingBlock extends VegetationBlock implements BonemealableBlock {
+     protected SaplingBlock(final TreeGrower treeGrower, final BlockBehaviour.Properties properties) {
+         super(properties);
+@@ -46,34 +45,36 @@ public class SaplingBlock extends VegetationBlock implements BonemealableBlock {
              level.setBlock(pos, state.cycle(STAGE), Block.UPDATE_NONE);
          } else {
              // CraftBukkit start
@@ -1597,10 +1585,10 @@ index cbf7845ca64f1b716af3e50ac8716373d2ae3755..e3398cfef77c306f03a16f03e1234489
                      }
                  }
 diff --git a/net/minecraft/world/level/block/WitherSkullBlock.java b/net/minecraft/world/level/block/WitherSkullBlock.java
-index 65da2aae8bbddebe829e9b44b36152fdb76d507d..dfa21caf1ae1bb620f0644a76cab8cc2a41f0d1a 100644
+index ad7303e83a3a33b263d182097c082887b3afce2f..49f523b1a30c55d7b570d3790674461829d9f8fd 100644
 --- a/net/minecraft/world/level/block/WitherSkullBlock.java
 +++ b/net/minecraft/world/level/block/WitherSkullBlock.java
-@@ -43,12 +43,13 @@ public class WitherSkullBlock extends SkullBlock {
+@@ -36,12 +36,13 @@ public class WitherSkullBlock extends SkullBlock {
      }
  
      public static void checkSpawn(final Level level, final BlockPos pos) {
@@ -1616,10 +1604,10 @@ index 65da2aae8bbddebe829e9b44b36152fdb76d507d..dfa21caf1ae1bb620f0644a76cab8cc2
              BlockState blockState = placedSkull.getBlockState();
              boolean correctBlock = blockState.is(Blocks.WITHER_SKELETON_SKULL) || blockState.is(Blocks.WITHER_SKELETON_WALL_SKULL);
 diff --git a/net/minecraft/world/level/block/entity/SculkCatalystBlockEntity.java b/net/minecraft/world/level/block/entity/SculkCatalystBlockEntity.java
-index 4aa2d141eba2596e782fc4ab4890c5e2d80eb811..c6fec2004967793dd8a85063edb3f62ca1ab384e 100644
+index a1b0168077b83575f16dd377da2e1ba520d3bd19..015465ee2b48dead306716109554db0d94e2c990 100644
 --- a/net/minecraft/world/level/block/entity/SculkCatalystBlockEntity.java
 +++ b/net/minecraft/world/level/block/entity/SculkCatalystBlockEntity.java
-@@ -44,9 +44,12 @@ public class SculkCatalystBlockEntity extends BlockEntity implements GameEventLi
+@@ -43,9 +43,12 @@ public class SculkCatalystBlockEntity extends BlockEntity implements GameEventLi
      // Paper end - Fix NPE in SculkBloomEvent world access
  
      public static void serverTick(final Level level, final BlockPos pos, final BlockState state, final SculkCatalystBlockEntity entity) {
@@ -1636,33 +1624,33 @@ index 4aa2d141eba2596e782fc4ab4890c5e2d80eb811..c6fec2004967793dd8a85063edb3f62c
  
      @Override
 diff --git a/net/minecraft/world/level/block/grower/TreeGrower.java b/net/minecraft/world/level/block/grower/TreeGrower.java
-index 2a537a329b635d48865e59c03589b89594ef012e..e7d3b18c9c1c2eb8d82142d99ec15a46f9e6d8d4 100644
+index 95ac67eeee1c5c12fd709fe44288d6de9a28b3a1..0fdc8ba2a3333a513fc2c3dac4ae800a1902f507 100644
 --- a/net/minecraft/world/level/block/grower/TreeGrower.java
 +++ b/net/minecraft/world/level/block/grower/TreeGrower.java
-@@ -132,7 +132,7 @@ public final class TreeGrower {
-                 .get(megaFeatureKey)
-                 .orElse(null);
+@@ -115,7 +115,7 @@ public final class TreeGrower {
+         if (megaFeatureKey != null) {
+             Holder<Feature> featureHolder = level.registryAccess().lookupOrThrow(Registries.FEATURE).get(megaFeatureKey).orElse(null);
              if (featureHolder != null) {
 -                this.setTreeType(featureHolder); // CraftBukkit
 +                this.setTreeType(level, featureHolder); // CraftBukkit
-                 for (int dx = 0; dx >= -1; dx--) {
-                     for (int dz = 0; dz >= -1; dz--) {
-                         if (isTwoByTwoSapling(state, level, pos, dx, dz)) {
-@@ -167,7 +167,7 @@ public final class TreeGrower {
+                 Optional<TreeGrower.TwoByTwoSaplingPos> twoByTwoSaplingPos = findTwoByTwoSaplingPos(level, state, pos);
+                 if (twoByTwoSaplingPos.isPresent()) {
+                     int dx = twoByTwoSaplingPos.get().offsetX();
+@@ -143,7 +143,7 @@ public final class TreeGrower {
              return false;
          }
  
 -        this.setTreeType(featureHolder); // CraftBukkit
 +        this.setTreeType(level, featureHolder); // CraftBukkit
-         ConfiguredFeature<?, ?> feature = featureHolder.value();
-         BlockState emptyBlock = level.getFluidState(pos).createLegacyBlock();
-         level.setBlock(pos, emptyBlock, Block.UPDATE_NONE);
-@@ -214,53 +214,53 @@ public final class TreeGrower {
+         Feature feature = featureHolder.value();
+         removeSapling(level, pos);
+         if (feature.place(level, generator, random, pos)) {
+@@ -233,55 +233,55 @@ public final class TreeGrower {
      }
  
      // CraftBukkit start
--    private void setTreeType(Holder<ConfiguredFeature<?, ?>> feature) {
-+    private void setTreeType(ServerLevel level, Holder<ConfiguredFeature<?, ?>> feature) {
+-    private void setTreeType(Holder<Feature> feature) {
++    private void setTreeType(ServerLevel level, Holder<Feature> feature) {
          if (feature.is(TreeFeatures.OAK) || feature.is(TreeFeatures.OAK_BEES_005)) {
 -            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.TREE;
 +            level.setCapturedTreeType(org.bukkit.TreeType.TREE);
@@ -1732,14 +1720,17 @@ index 2a537a329b635d48865e59c03589b89594ef012e..e7d3b18c9c1c2eb8d82142d99ec15a46
          } else if (feature.is(TreeFeatures.PALE_OAK_CREAKING)) {
 -            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.PALE_OAK_CREAKING;
 +            level.setCapturedTreeType(org.bukkit.TreeType.PALE_OAK_CREAKING);
-         } else {
+         } else if (feature.is(TreeFeatures.RED_POPLAR) || feature.is(TreeFeatures.ORANGE_POPLAR) || feature.is(TreeFeatures.YELLOW_POPLAR)) {
+-            net.minecraft.world.level.block.SaplingBlock.treeType = org.bukkit.TreeType.POPLAR;
++            level.setCapturedTreeType(org.bukkit.TreeType.POPLAR);
+         }  else {
              throw new IllegalArgumentException("Unknown tree generator " + feature);
          }
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
-index 681563230061212afa7994c8eb16c068754db5dd..72cd3eb5cd0832abccdfb15f985d1ca306bbe49e 100644
+index af4106497a69f9b311970197016c6157475a7d85..ff5dde4a8ca50e9bcfcb58914ea2c4a57ff5250f 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
 +++ b/net/minecraft/world/level/chunk/LevelChunk.java
-@@ -33,6 +33,7 @@ import net.minecraft.util.profiling.ProfilerFiller;
+@@ -32,6 +32,7 @@ import net.minecraft.util.profiling.ProfilerFiller;
  import net.minecraft.world.entity.Entity;
  import net.minecraft.world.level.ChunkPos;
  import net.minecraft.world.level.Level;
@@ -1747,7 +1738,7 @@ index 681563230061212afa7994c8eb16c068754db5dd..72cd3eb5cd0832abccdfb15f985d1ca3
  import net.minecraft.world.level.block.BaseRailBlock;
  import net.minecraft.world.level.block.Block;
  import net.minecraft.world.level.block.Blocks;
-@@ -424,7 +425,7 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -423,7 +424,7 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
              return null;
          }
  
@@ -1756,7 +1747,7 @@ index 681563230061212afa7994c8eb16c068754db5dd..72cd3eb5cd0832abccdfb15f985d1ca3
              state.onPlace(this.level, pos, oldState, movedByPiston);
          }
  
-@@ -468,7 +469,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -467,7 +468,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
  
      public @Nullable BlockEntity getBlockEntity(final BlockPos pos, final LevelChunk.EntityCreationType creationType) {
          // CraftBukkit start
@@ -1769,10 +1760,10 @@ index 681563230061212afa7994c8eb16c068754db5dd..72cd3eb5cd0832abccdfb15f985d1ca3
              blockEntity = this.blockEntities.get(pos);
          }
 diff --git a/net/minecraft/world/level/levelgen/structure/StructurePiece.java b/net/minecraft/world/level/levelgen/structure/StructurePiece.java
-index a04be389ba8c0cd968837d2a381fe61f5a6a0f0f..ed7e541b422ef4cc8e86cc397b17311bafb5ae6f 100644
+index dc17f0ab266a6370ffec5e42342a60710df39886..c44ffe6c53f5a3030c8e53c64bae9d75cfbf5da6 100644
 --- a/net/minecraft/world/level/levelgen/structure/StructurePiece.java
 +++ b/net/minecraft/world/level/levelgen/structure/StructurePiece.java
-@@ -318,8 +318,9 @@ public abstract class StructurePiece {
+@@ -319,8 +319,9 @@ public abstract class StructurePiece {
              for (int x = x0; x <= x1; x++) {
                  for (int z = z0; z <= z1; z++) {
                      if (!skipAir || !this.getBlock(level, x, y, z, chunkBB).isAir()) {
@@ -1784,7 +1775,7 @@ index a04be389ba8c0cd968837d2a381fe61f5a6a0f0f..ed7e541b422ef4cc8e86cc397b17311b
                      }
                  }
              }
-@@ -626,12 +627,6 @@ public abstract class StructurePiece {
+@@ -627,12 +628,6 @@ public abstract class StructurePiece {
      }
  
      public abstract static class BlockSelector {
@@ -1799,7 +1790,7 @@ index a04be389ba8c0cd968837d2a381fe61f5a6a0f0f..ed7e541b422ef4cc8e86cc397b17311b
      }
  }
 diff --git a/net/minecraft/world/level/levelgen/structure/structures/JungleTemplePiece.java b/net/minecraft/world/level/levelgen/structure/structures/JungleTemplePiece.java
-index a9da88f3865b98a80388ef82332df326fdb10b40..a1fd4b1214644d898fc4b6ae8d7cc3714951b088 100644
+index 9ebdc091dd7151ca77484328a836c8a6dcad0168..cd74cc88f39b7f8f51a8776432624d4e86b4a703 100644
 --- a/net/minecraft/world/level/levelgen/structure/structures/JungleTemplePiece.java
 +++ b/net/minecraft/world/level/levelgen/structure/structures/JungleTemplePiece.java
 @@ -392,11 +392,11 @@ public class JungleTemplePiece extends ScatteredFeaturePiece {
@@ -1818,10 +1809,10 @@ index a9da88f3865b98a80388ef82332df326fdb10b40..a1fd4b1214644d898fc4b6ae8d7cc371
          }
      }
 diff --git a/net/minecraft/world/level/levelgen/structure/structures/NetherFortressPieces.java b/net/minecraft/world/level/levelgen/structure/structures/NetherFortressPieces.java
-index a225d3571f400ad6c2f4f29a0965829cfd32cb39..583d5ef32e08032153bb0dbad1c197c078a472ff 100644
+index fbdd3496e1ade98bd008ce2fa0086b1cc62f3d08..ead00b52ba23d7c286299975e094daf5a64c62e5 100644
 --- a/net/minecraft/world/level/levelgen/structure/structures/NetherFortressPieces.java
 +++ b/net/minecraft/world/level/levelgen/structure/structures/NetherFortressPieces.java
-@@ -1516,6 +1516,10 @@ public class NetherFortressPieces {
+@@ -1461,6 +1461,10 @@ public class NetherFortressPieces {
              this(pieceClass, weight, maxPlaceCount, false);
          }
  
@@ -1832,7 +1823,7 @@ index a225d3571f400ad6c2f4f29a0965829cfd32cb39..583d5ef32e08032153bb0dbad1c197c0
          public boolean doPlace(final int depth) {
              return this.maxPlaceCount == 0 || this.placeCount < this.maxPlaceCount;
          }
-@@ -1682,13 +1686,11 @@ public class NetherFortressPieces {
+@@ -1613,13 +1617,11 @@ public class NetherFortressPieces {
              super(west, north, getRandomHorizontalDirection(random));
  
              for (NetherFortressPieces.PieceWeight piece : NetherFortressPieces.BRIDGE_PIECE_WEIGHTS) {
@@ -1849,7 +1840,7 @@ index a225d3571f400ad6c2f4f29a0965829cfd32cb39..583d5ef32e08032153bb0dbad1c197c0
          }
  
 diff --git a/net/minecraft/world/level/levelgen/structure/structures/StrongholdPieces.java b/net/minecraft/world/level/levelgen/structure/structures/StrongholdPieces.java
-index e0cc438e2f9a6cddde9f55bcd74d8792ec225611..a4648518002feab94f5aa4a98cbdb09815c7e458 100644
+index db024371e565bfa1047590903d2c01c19f95821d..3c16cf37c5add4562b5db67c55c6c1792cf1f50b 100644
 --- a/net/minecraft/world/level/levelgen/structure/structures/StrongholdPieces.java
 +++ b/net/minecraft/world/level/levelgen/structure/structures/StrongholdPieces.java
 @@ -55,48 +55,19 @@ public class StrongholdPieces {
@@ -1904,8 +1895,8 @@ index e0cc438e2f9a6cddde9f55bcd74d8792ec225611..a4648518002feab94f5aa4a98cbdb098
 -
      private static StrongholdPieces.@Nullable StrongholdPiece findAndCreatePieceFactory(
          final Class<? extends StrongholdPieces.StrongholdPiece> pieceClass,
-         final StructurePieceAccessor structurePieceAccessor,
-@@ -145,15 +116,16 @@ public class StrongholdPieces {
+         final StructurePiecesBuilder builder,
+@@ -145,13 +116,16 @@ public class StrongholdPieces {
          final Direction direction,
          final int depth
      ) {
@@ -1916,17 +1907,17 @@ index e0cc438e2f9a6cddde9f55bcd74d8792ec225611..a4648518002feab94f5aa4a98cbdb098
          }
  
 -        if (imposedPiece != null) {
-+        if (assemblyState.imposedPiece != null) {
-             StrongholdPieces.StrongholdPiece strongholdPiece = findAndCreatePieceFactory(
--                imposedPiece, structurePieceAccessor, random, footX, footY, footZ, direction, depth
-+                assemblyState.imposedPiece, structurePieceAccessor, random, footX, footY, footZ, direction, depth
-             );
+-            StrongholdPieces.StrongholdPiece strongholdPiece = findAndCreatePieceFactory(imposedPiece, builder, random, footX, footY, footZ, direction, depth);
 -            imposedPiece = null;
++        if (assemblyState.imposedPiece != null) {
++            StrongholdPieces.StrongholdPiece strongholdPiece = findAndCreatePieceFactory(
++                assemblyState.imposedPiece, builder, random, footX, footY, footZ, direction, depth
++            );
 +            assemblyState.imposedPiece = null;
              if (strongholdPiece != null) {
                  return strongholdPiece;
              }
-@@ -163,23 +135,23 @@ public class StrongholdPieces {
+@@ -161,23 +135,23 @@ public class StrongholdPieces {
  
          while (numAttempts < 5) {
              numAttempts++;
@@ -1944,8 +1935,8 @@ index e0cc438e2f9a6cddde9f55bcd74d8792ec225611..a4648518002feab94f5aa4a98cbdb098
                      }
  
                      StrongholdPieces.StrongholdPiece strongholdPiece = findAndCreatePieceFactory(
--                        piece.pieceClass, structurePieceAccessor, random, footX, footY, footZ, direction, depth
-+                        piece.definition.pieceClass, structurePieceAccessor, random, footX, footY, footZ, direction, depth
+-                        piece.pieceClass, builder, random, footX, footY, footZ, direction, depth
++                        piece.definition.pieceClass, builder, random, footX, footY, footZ, direction, depth
                      );
                      if (strongholdPiece != null) {
                          piece.placeCount++;
@@ -1957,7 +1948,7 @@ index e0cc438e2f9a6cddde9f55bcd74d8792ec225611..a4648518002feab94f5aa4a98cbdb098
                          }
  
                          return strongholdPiece;
-@@ -754,7 +726,6 @@ public class StrongholdPieces {
+@@ -741,7 +715,6 @@ public class StrongholdPieces {
      private static class PieceWeight {
          public final Class<? extends StrongholdPieces.StrongholdPiece> pieceClass;
          public final int weight;
@@ -1965,7 +1956,7 @@ index e0cc438e2f9a6cddde9f55bcd74d8792ec225611..a4648518002feab94f5aa4a98cbdb098
          public final int maxPlaceCount;
  
          public PieceWeight(final Class<? extends StrongholdPieces.StrongholdPiece> pieceClass, final int weight, final int maxPlaceCount) {
-@@ -763,12 +734,57 @@ public class StrongholdPieces {
+@@ -750,12 +723,57 @@ public class StrongholdPieces {
              this.maxPlaceCount = maxPlaceCount;
          }
  
@@ -1973,8 +1964,10 @@ index e0cc438e2f9a6cddde9f55bcd74d8792ec225611..a4648518002feab94f5aa4a98cbdb098
 -            return this.maxPlaceCount == 0 || this.placeCount < this.maxPlaceCount;
 +        public boolean doPlace(final int depth, final int placeCount) {
 +            return this.maxPlaceCount == 0 || placeCount < this.maxPlaceCount;
-+        }
-+
+         }
+ 
+-        public boolean isValid() {
+-            return this.maxPlaceCount == 0 || this.placeCount < this.maxPlaceCount;
 +        public boolean isValid(final int placeCount) {
 +            return this.maxPlaceCount == 0 || placeCount < this.maxPlaceCount;
 +        }
@@ -2007,10 +2000,8 @@ index e0cc438e2f9a6cddde9f55bcd74d8792ec225611..a4648518002feab94f5aa4a98cbdb098
 +            for (StrongholdPieces.PieceWeight piece : STRONGHOLD_PIECE_WEIGHTS) {
 +                this.currentPieces.add(new StrongholdPieces.PieceState(piece));
 +            }
-         }
- 
--        public boolean isValid() {
--            return this.maxPlaceCount == 0 || this.placeCount < this.maxPlaceCount;
++        }
++
 +        private boolean updatePieceWeight() {
 +            boolean hasAnyPieces = false;
 +            this.totalWeight = 0;
@@ -2027,7 +2018,7 @@ index e0cc438e2f9a6cddde9f55bcd74d8792ec225611..a4648518002feab94f5aa4a98cbdb098
          }
      }
  
-@@ -1215,20 +1231,20 @@ public class StrongholdPieces {
+@@ -1191,20 +1209,20 @@ public class StrongholdPieces {
  
      private static class SmoothStoneSelector extends StructurePiece.BlockSelector {
          @Override
@@ -2054,16 +2045,16 @@ index e0cc438e2f9a6cddde9f55bcd74d8792ec225611..a4648518002feab94f5aa4a98cbdb098
              }
          }
      }
-@@ -1271,7 +1287,7 @@ public class StrongholdPieces {
+@@ -1247,7 +1265,7 @@ public class StrongholdPieces {
          @Override
-         public void addChildren(final StructurePiece startPiece, final StructurePieceAccessor structurePieceAccessor, final RandomSource random) {
+         public void addChildren(final StructurePiece startPiece, final StructurePiecesBuilder builder, final RandomSource random) {
              if (this.isSource) {
 -                StrongholdPieces.imposedPiece = StrongholdPieces.FiveCrossing.class;
 +                ((StrongholdPieces.StartPiece)startPiece).assemblyState.imposedPiece = StrongholdPieces.FiveCrossing.class;
              }
  
-             this.generateSmallDoorChildForward((StrongholdPieces.StartPiece)startPiece, structurePieceAccessor, random, 1, 1);
-@@ -1326,7 +1342,7 @@ public class StrongholdPieces {
+             this.generateSmallDoorChildForward((StrongholdPieces.StartPiece)startPiece, builder, random, 1, 1);
+@@ -1300,7 +1318,7 @@ public class StrongholdPieces {
      }
  
      public static class StartPiece extends StrongholdPieces.StairsDown {

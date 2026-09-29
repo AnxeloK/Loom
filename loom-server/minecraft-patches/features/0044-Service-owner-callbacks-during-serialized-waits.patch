@@ -5,10 +5,10 @@ Subject: [PATCH] Service owner callbacks during serialized waits
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 598afbf5c2dd2b0afa5c8fd3cf5d05cbf4e8722c..03953a7e19d9fc286d8f085aa2ed89ef049a71d1 100644
+index 4fb36b76751acaa0ae5737d57a4cc080a4f5aec2..12f39182c5093528a9aae0fe6b8fc9ac803dab20 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2633,6 +2633,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2629,6 +2629,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          return true;
      }
  
@@ -41,10 +41,10 @@ index b6ee28a357d6689e8870d47b677772520d8a842c..bc3e88158f57288a32444066758c634c
      public void run() {
          this.runnable.run();
 diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
-index 185abbc450eb03cf285854b0decd7950a7925f27..5974592669221273ef99aa192428e7a2a7683d3f 100644
+index 35ce29ef63d83228aad9d75aec838dfc353cbb89..4d9074cda04825ba8d144b489a8b2ca3a6162a12 100644
 --- a/net/minecraft/server/threading/RegionTickStaging.java
 +++ b/net/minecraft/server/threading/RegionTickStaging.java
-@@ -349,13 +349,11 @@ public final class RegionTickStaging {
+@@ -364,13 +364,11 @@ public final class RegionTickStaging {
          return list == null ? 0 : list.size();
      }
  

@@ -325,10 +325,10 @@ index 9c6b2c44ef97cee2d7de8c94a5004e608b7dd966..58eab7e0724f7d88b647310131422a44
  
      public record Diagnostics(
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index 3a800d1f1256a793c229a4a1ae22979278119f68..785e91ad0c9d5a76ae1927dc24f13cbb9383754b 100644
+index 66aff157c552db2d633b3f6857f4da83435cd587..c78f4048805b613497d2da67207f9720a34a5e21 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
-@@ -1361,30 +1361,24 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1351,30 +1351,24 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
          final int chunkZ = pos.getZ() >> 4;
          final net.minecraft.world.level.chunk.LevelChunk loaded =
              serverLevel.getChunkSource().getChunkAtIfLoadedImmediately(chunkX, chunkZ);

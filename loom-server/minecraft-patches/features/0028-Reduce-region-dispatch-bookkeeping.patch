@@ -6,10 +6,10 @@ Subject: [PATCH] Reduce region dispatch bookkeeping
 Reuse covering ownership and stable region partitions so region dispatch performs less lease and bucket work on every tick.
 
 diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
-index 0a0ee851a4889dbc4f09f5a1098c1ddef39b4cfb..3e540926d9cdc773a5f4030d2c68f675fca94137 100644
+index 148fb355e2ef31a4c49973375bb2d995e4a41365..73d90a78d760ad7108e587ac4ebe496e61e829b1 100644
 --- a/net/minecraft/server/level/ChunkMap.java
 +++ b/net/minecraft/server/level/ChunkMap.java
-@@ -1420,6 +1420,13 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -1471,6 +1471,13 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
              if (player.level() != ChunkMap.this.level) {
                  return ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(player);
              }
@@ -24,10 +24,10 @@ index 0a0ee851a4889dbc4f09f5a1098c1ddef39b4cfb..3e540926d9cdc773a5f4030d2c68f675
              final ChunkPos playerChunk = player.chunkPosition();
              return net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(ChunkMap.this.level, entityChunk.x(), entityChunk.z())
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
-index e49147a4ae0288148da1cb0a0f2378fa519739ee..a92080137a8a8d698b0e5854bee6820b40cd8b3c 100644
+index ba7894cce76ead632003429bbaa9ba8731f92eed..3da0149ce35c19b21668946121e12124b98afcd2 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
-@@ -195,6 +195,10 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+@@ -199,6 +199,10 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
                  net.minecraft.server.threading.RegionTickStaging.newSession();
              final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(byRegion.size());
              for (final java.util.List<net.minecraft.world.level.chunk.LevelChunk> regionChunks : byRegion.values()) {

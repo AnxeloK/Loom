@@ -5,10 +5,10 @@ Subject: [PATCH] Actorize global-control services under owner-domain checks
 
 
 diff --git a/net/minecraft/server/ServerScoreboard.java b/net/minecraft/server/ServerScoreboard.java
-index 7ffd683c42557052d7bfa963d87e68f4e8f62d6c..ebafabd16b6244da3354c29e201e7aa03395ea2f 100644
+index 3c1d3c873e857a16ed33dcd77ab937017256776c..7f03a5717c58e30712acd73484f4473b2a60f076 100644
 --- a/net/minecraft/server/ServerScoreboard.java
 +++ b/net/minecraft/server/ServerScoreboard.java
-@@ -211,9 +211,17 @@ public class ServerScoreboard extends Scoreboard {
+@@ -214,9 +214,17 @@ public class ServerScoreboard extends Scoreboard {
      }
  
      protected void setDirty() {
@@ -105,148 +105,6 @@ index a218431bd53512e1073a2df080d522026a541264..4a59e437a898fb10b08126b62f76be6c
      private int salt() {
          return this.salt;
      }
-diff --git a/net/minecraft/world/clock/ServerClockManager.java b/net/minecraft/world/clock/ServerClockManager.java
-index 436ed3d95c21b8590664a125785545e0d07375fd..c6bdff28889a68dd96e7e810cf6b8276642a3e2c 100644
---- a/net/minecraft/world/clock/ServerClockManager.java
-+++ b/net/minecraft/world/clock/ServerClockManager.java
-@@ -30,7 +30,6 @@ public class ServerClockManager extends SavedData implements ClockManager {
-     );
-     private final PackedClockStates packedClockStates;
-     private MinecraftServer server;
--    private @org.jspecify.annotations.Nullable ServerLevel level; // Paper - per-world time
-     private final Map<Holder<WorldClock>, ServerClockManager.ClockInstance> clocks = new HashMap<>();
- 
-     private ServerClockManager(final PackedClockStates packedClockStates) {
-@@ -38,12 +37,6 @@ public class ServerClockManager extends SavedData implements ClockManager {
-     }
- 
-     public void init(final MinecraftServer server) {
--        // Paper start - per-world time
--        this.init(server, null);
--    }
--    public void init(final MinecraftServer server, @org.jspecify.annotations.Nullable final ServerLevel level) {
--        this.level = level;
--        // Paper end - per-world time
-         this.server = server;
-         server.registryAccess()
-             .lookupOrThrow(Registries.WORLD_CLOCK)
-@@ -68,7 +61,8 @@ public class ServerClockManager extends SavedData implements ClockManager {
-     }
- 
-     public void tick() {
--        boolean advanceTime = this.advanceTime(); // Paper - per-world time
-+        this.ensureGlobalOwner("tick");
-+        boolean advanceTime = this.server.getGlobalGameRules().get(GameRules.ADVANCE_TIME);
-         if (advanceTime) {
-             this.clocks.values().forEach(ServerClockManager.ClockInstance::tick);
-             this.setDirty();
-@@ -126,20 +120,16 @@ public class ServerClockManager extends SavedData implements ClockManager {
-     }
- 
-     private void modifyClock(final Holder<WorldClock> clock, final Consumer<? super ServerClockManager.ClockInstance> action) {
-+        this.ensureGlobalOwner("modify");
-         ServerClockManager.ClockInstance instance = this.getInstance(clock);
-         action.accept(instance);
--        // Paper start - per-world time
--        this.broadcastUpdates(clock, instance);
-+        Map<Holder<WorldClock>, ClockNetworkState> updates = Map.of(clock, instance.packNetworkState(this.server));
-+        this.server.getPlayerList().broadcastAll(new ClientboundSetTimePacket(this.getGameTime(), updates)); // TODO 26.1 per-player time
-         this.setDirty();
- 
--        if (this.level != null) {
--            this.level.environmentAttributes().invalidateTickCache();
--        } else {
-         for (ServerLevel level : this.server.getAllLevels()) {
-             level.environmentAttributes().invalidateTickCache();
-         }
--        }
--        // Paper end - per-world time
-     }
- 
-     @Override
-@@ -147,49 +137,41 @@ public class ServerClockManager extends SavedData implements ClockManager {
-         return this.getInstance(definition).totalTicks;
-     }
- 
--    public ClientboundSetTimePacket createFullSyncPacket() {
--        // Paper start - per-player time
--        return this.createFullSyncPacket(null);
-+    // Paper start
-+    // TODO: once upstream access allows it, expose the inner class and accessors directly.
-+    public boolean isPaused(final Holder<WorldClock> definition) {
-+        return this.getInstance(definition).paused;
-     }
- 
--    public ClientboundSetTimePacket createFullSyncPacket(final net.minecraft.server.level.ServerPlayer player) {
--        final Map<Holder<WorldClock>, ClockNetworkState> updates = new HashMap<>(this.clocks.size());
--        this.clocks.forEach((clock, instance) -> updates.put(clock, this.packNetworkState(clock, instance, player)));
--        return new ClientboundSetTimePacket(this.getGameTime(), updates);
--        // Paper end - per-player time
-+    public float partialTick(final Holder<WorldClock> definition) {
-+        return this.getInstance(definition).partialTick;
-     }
- 
--    private long getGameTime() {
--        return this.level != null ? this.level.getGameTime() : this.server.overworld().getGameTime(); // Paper - per-world time
-+    public float rate(final Holder<WorldClock> definition) {
-+        return this.getInstance(definition).rate;
-     }
-+    // Paper end
- 
--    // Paper start - per-world time; per-player time
--    private void broadcastUpdates(final Holder<WorldClock> clock, final ServerClockManager.ClockInstance instance) {
--        for (final net.minecraft.server.level.ServerPlayer player : this.level != null ? this.level.players() : this.server.getPlayerList().getPlayers()) {
--            final var packet = new net.minecraft.network.protocol.game.ClientboundSetTimePacket(
--                this.getGameTime(),
--                java.util.Map.of(clock, this.packNetworkState(clock, instance, player))
--            );
--            player.connection.send(packet);
--        }
-+    public ClientboundSetTimePacket createFullSyncPacket() {
-+        // TODO: restore per-player time sync for 26.1.
-+        return new ClientboundSetTimePacket(this.getGameTime(), Util.mapValues(this.clocks, clock -> clock.packNetworkState(this.server)));
-     }
- 
--    private ClockNetworkState packNetworkState(
--        final Holder<WorldClock> clock,
--        final ServerClockManager.ClockInstance instance,
--        final net.minecraft.server.level.ServerPlayer player
--    ) {
--        if (player != null && player.level().dimensionType().defaultClock().filter(clock::equals).isPresent()) {
--            final boolean paused = !player.relativeTime || instance.paused || !this.advanceTime();
--            return new ClockNetworkState(player.getPlayerTime(), instance.partialTick, paused ? 0.0F : instance.rate);
-+    public void broadcastFullSyncPacket() {
-+        this.ensureGlobalOwner("broadcast full sync packet");
-+        this.server.getPlayerList().broadcastAll(this.createFullSyncPacket());
-+    }
-+
-+    private void ensureGlobalOwner(final String operation) {
-+        if (this.server == null) {
-+            return;
-         }
--        return instance.packNetworkState(this.advanceTime());
-+        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "server clock operation: " + operation);
-     }
- 
--    private boolean advanceTime() {
--        return this.level != null ? this.level.getGameRules().get(GameRules.ADVANCE_TIME) : this.server.getGlobalGameRules().get(GameRules.ADVANCE_TIME);
-+    private long getGameTime() {
-+        return this.server.overworld().getGameTime();
-     }
--    // Paper end - per-world time; per-player time
- 
-     public boolean isAtTimeMarker(final Holder<WorldClock> clock, final ResourceKey<ClockTimeMarker> timeMarkerId) {
-         ServerClockManager.ClockInstance clockInstance = this.getInstance(clock);
-@@ -228,7 +210,8 @@ public class ServerClockManager extends SavedData implements ClockManager {
-             return new ClockState(this.totalTicks, this.partialTick, this.rate, this.paused);
-         }
- 
--        public ClockNetworkState packNetworkState(final boolean advanceTime) { // Paper - per-world time
-+        public ClockNetworkState packNetworkState(final MinecraftServer server) {
-+            boolean advanceTime = server.getGlobalGameRules().get(GameRules.ADVANCE_TIME);
-             boolean paused = this.paused || !advanceTime;
-             return new ClockNetworkState(this.totalTicks, this.partialTick, paused ? 0.0F : this.rate);
-         }
 diff --git a/net/minecraft/world/entity/raid/Raid.java b/net/minecraft/world/entity/raid/Raid.java
 index 16d789ffce1f645505f51a1e61944cd2bc0672c5..23c550c282b4fe6ec62d1c0fb25bf34ce1cdf468 100644
 --- a/net/minecraft/world/entity/raid/Raid.java
@@ -297,10 +155,10 @@ index bc0f31a16f7b055e85f10eda377026a927032535..fa03cb63f3f6904432b4d481d0a1f302
          for (Entry<Raid> entry : this.raidMap.int2ObjectEntrySet()) {
              if (entry.getValue() == raid) {
 diff --git a/net/minecraft/world/item/crafting/RecipeManager.java b/net/minecraft/world/item/crafting/RecipeManager.java
-index 6812ade4d9de26d507234b8357b109ec7e5cbb50..534b59f6bf3597f83e8ab4f2c4a1851f1b8faf06 100644
+index 1cb69160c792dc59621d87061831d73876662606..a6ec3f77070466d9c207a16c9759eaf0e4c12af1 100644
 --- a/net/minecraft/world/item/crafting/RecipeManager.java
 +++ b/net/minecraft/world/item/crafting/RecipeManager.java
-@@ -89,7 +89,10 @@ public class RecipeManager extends SimplePreparableReloadListener<RecipeMap> imp
+@@ -61,7 +61,10 @@ public class RecipeManager implements RecipeAccess {
  
      // CraftBukkit start
      public void addRecipe(RecipeHolder<?> holder) {
@@ -339,7 +197,7 @@ index a211de15d9a41291f384fc457bcf38146bbd4e42..cd85b5b2272a1a1c9539d471235e0507
          this.extent = this.extent.update();
      }
 diff --git a/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java b/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
-index f05ab5fdab4cb587974e2864e859e49375f8165e..a30d3a8e5c6deaaa14ae19f03e1fdfe618b2ec2f 100644
+index 1c8b9c0a1f615dedca9028379a1d8f60e9c39947..7dd31ace04ac6d34e619d13188ad41ace1e5d437 100644
 --- a/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
 +++ b/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
 @@ -7,6 +7,7 @@ import com.mojang.serialization.Codec;
@@ -350,7 +208,7 @@ index f05ab5fdab4cb587974e2864e859e49375f8165e..a30d3a8e5c6deaaa14ae19f03e1fdfe6
  import java.util.Collection;
  import java.util.Iterator;
  import java.util.List;
-@@ -69,6 +70,7 @@ public class MapItemSavedData extends SavedData {
+@@ -68,6 +69,7 @@ public class MapItemSavedData extends SavedData {
      public byte scale;
      public byte[] colors = new byte[16384];
      public boolean locked;
@@ -358,7 +216,7 @@ index f05ab5fdab4cb587974e2864e859e49375f8165e..a30d3a8e5c6deaaa14ae19f03e1fdfe6
      private final org.bukkit.craftbukkit.map.RenderData vanillaRender = new org.bukkit.craftbukkit.map.RenderData(); // Paper - Use Vanilla map renderer when possible
      public final List<MapItemSavedData.HoldingPlayer> carriedBy = Lists.newArrayList();
      public final Map<Player, MapItemSavedData.HoldingPlayer> carriedByPlayers = Maps.newHashMap();
-@@ -158,6 +160,35 @@ public class MapItemSavedData extends SavedData {
+@@ -157,6 +159,35 @@ public class MapItemSavedData extends SavedData {
          this.vanillaRender.buffer = colors.array(); // Paper - Use Vanilla map renderer when possible
      }
  
@@ -394,7 +252,7 @@ index f05ab5fdab4cb587974e2864e859e49375f8165e..a30d3a8e5c6deaaa14ae19f03e1fdfe6
      public static MapItemSavedData createFresh(
          final double originX,
          final double originY,
-@@ -654,6 +685,9 @@ public class MapItemSavedData extends SavedData {
+@@ -640,6 +671,9 @@ public class MapItemSavedData extends SavedData {
      private record MapDecorationLocation(Holder<MapDecorationType> type, byte x, byte y, byte rot) {
      }
  
@@ -404,7 +262,7 @@ index f05ab5fdab4cb587974e2864e859e49375f8165e..a30d3a8e5c6deaaa14ae19f03e1fdfe6
      public record MapPatch(int startX, int startY, int width, int height, byte[] mapColors) {
          public static final StreamCodec<ByteBuf, Optional<MapItemSavedData.MapPatch>> STREAM_CODEC = StreamCodec.of(
              MapItemSavedData.MapPatch::write, MapItemSavedData.MapPatch::read
-@@ -760,4 +794,5 @@ public class MapItemSavedData extends SavedData {
+@@ -746,4 +780,5 @@ public class MapItemSavedData extends SavedData {
          };
      }
      // Paper end - store target world by uuid in addition to dimension

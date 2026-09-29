@@ -5,10 +5,10 @@ Subject: [PATCH] Route result-bearing entity ticks
 
 
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index d8078e95c18a8efa59ebfba70e8ca3ecb479be46..00695adb4abeb8e80652b7ecfdaca69c5150ddf1 100644
+index 1b10a17b09d62423ec70044b740cf5b3a5726c12..c24a8a2b926601cba21daffce336efcd3e3cc54d 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -1483,13 +1483,25 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1491,13 +1491,25 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          this.guardEntityTick(this.tickNonPassengerConsumer, entity);
      }
  
@@ -40,7 +40,7 @@ index d8078e95c18a8efa59ebfba70e8ca3ecb479be46..00695adb4abeb8e80652b7ecfdaca69c
      }
  
      // Tick entities bucketed by region, running non-adjacent regions concurrently. The non-adjacency
-@@ -1614,7 +1626,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1622,7 +1634,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              loomEntityDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_REPLAY, System.nanoTime() - loomReplayStart);
          }
          // The parallel phase has joined; we are back on the world-owning thread holding the full-level lease.
@@ -50,10 +50,10 @@ index d8078e95c18a8efa59ebfba70e8ca3ecb479be46..00695adb4abeb8e80652b7ecfdaca69c
              for (int i = 0, n = ownerTick.size(); i < n; ++i) {
                  this.tickOneEntity(ownerTick.get(i));
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index 25bfa5319d4089bff778d3856df4acea15c40212..6796ef6ec20b5b707ca369aa3a55eaecd86e4043 100644
+index ce4306652209372e68243ecdbf73f82832b57d40..a1b5815050cc6100739eb4848ded4160635e9eb0 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
-@@ -716,6 +716,15 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -723,6 +723,15 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
          return new ServerItemCooldowns(this);
      }
  
@@ -70,10 +70,10 @@ index 25bfa5319d4089bff778d3856df4acea15c40212..6796ef6ec20b5b707ca369aa3a55eaec
      public void tick() {
          // CraftBukkit start
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 7086fdca5c6f6ea27c0a638bdab84e1dfff6cfe5..e0b846154b87c7bbfeed836ad1fc45d75a1c7ecd 100644
+index e25eebd203ed32c8708b16524cdcaa3a411e9cc8..435b625e67ffa02947b8f094820ccc9028f32ca2 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -5382,6 +5382,12 @@ public abstract class Entity
+@@ -5545,6 +5545,12 @@ public abstract class Entity
          return false;
      }
  

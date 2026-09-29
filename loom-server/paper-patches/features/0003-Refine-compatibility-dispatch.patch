@@ -62,10 +62,10 @@ index 2c36922658ff18555c4f3dcbbf027501b49a7435..d149bf927c61b7844443cd67c9863aa5
  
      public static TickThread getCurrentTickThread() {
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-index fb62c3167fd7ddf22cbbe2433f610c48cab1b555..63e0196fefb712c545116ebea8a80c99a4e233ee 100644
+index 95ccccb24ba7f75d5b84e84ba3962c78e8963bae..c2dc1b0f8b245345a7c16c9aea4fe9a55e9c36c7 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-@@ -35,6 +35,14 @@ import org.jetbrains.annotations.NotNull;
+@@ -34,6 +34,14 @@ import org.jetbrains.annotations.NotNull;
  
  class PaperEventManager {
  
@@ -80,7 +80,7 @@ index fb62c3167fd7ddf22cbbe2433f610c48cab1b555..63e0196fefb712c545116ebea8a80c99
      private final Server server;
      private final CompatibilityKernel compatibilityKernel;
  
-@@ -79,17 +87,24 @@ class PaperEventManager {
+@@ -78,17 +86,24 @@ class PaperEventManager {
          }
  
          final CompatibilityTransaction transaction = this.compatibilityKernel.beginTransaction(event, listeners);
@@ -109,7 +109,7 @@ index fb62c3167fd7ddf22cbbe2433f610c48cab1b555..63e0196fefb712c545116ebea8a80c99
                  final EventSemanticIndex.Lane lane = EventSemanticIndex.lane(registration.getPriority());
                  profile.noteLaneUsage(plan.lane());
  
-@@ -185,20 +200,18 @@ class PaperEventManager {
+@@ -184,20 +199,18 @@ class PaperEventManager {
          final String path
      ) throws Throwable {
          final CompatibilityApartment apartment = this.compatibilityKernel.apartmentFor(registration.getPlugin());
@@ -137,7 +137,7 @@ index fb62c3167fd7ddf22cbbe2433f610c48cab1b555..63e0196fefb712c545116ebea8a80c99
                      this.compatibilityKernel.diagnostics().recordTransientRefusal(
                          profile,
                          "transient apartment contention for " + event.getEventName() + " lane=" + registration.getPriority()
-@@ -239,6 +252,43 @@ class PaperEventManager {
+@@ -238,6 +251,43 @@ class PaperEventManager {
          }
      }
  
@@ -433,10 +433,10 @@ index cea50b424187f9a6003cfc798a5e16a32e8f08f4..138397dff76ee7f66e7d27b5063a24e6
                  throw new IllegalStateException("Compatibility service cycle detected: " + graphEntry.cyclePath());
              }
 diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
-index cdccc7308335a3f7d51abf4e36c9cda58dfd19a3..9d4ec8381e0de6c0aa9272b3f694b346500c3ecb 100644
+index 3bcaf9e04aca29114228650227d3526595c11d0c..06fa3d20c7f9b8606983dd2df3de1bcee7c65c64 100644
 --- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
 +++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
-@@ -2056,7 +2056,13 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+@@ -2064,7 +2064,13 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
  
      @Override
      public boolean canSee(org.bukkit.entity.Entity entity) {

@@ -5,7 +5,7 @@ Subject: [PATCH] Budget Loom runtime drains for tail latency
 
 
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
-index bed702a5df280d0b76b7d967d7616c64630b0100..15c2d98a1cd6d56dabb4186cbe5e6fdc853774e6 100644
+index f59046b4df39107b378a8acdab660363c524d932..42d673d45f5a7788cc1a7356ee6ed53bfdb4573a 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
 @@ -52,6 +52,48 @@ public final class RegionizedPlayerChunkLoader {
@@ -601,10 +601,10 @@ index ae5d61788e44603ab3031435817f0359aed95e99..2900503c1278e339eac992d81c402b67
                  if (this.listener.shouldHandleMessage(this.packet)) {
                      try {
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 41c5b0d8915d81d1b51de769252a7d83aca6276f..b8ca941fcf03019c6ee2871ca1bf25914c34a70c 100644
+index 3bae538f6a1ebf59a74903506499c6eebd43f352..fbe5d25dd1e2fe0e4be46d6663942cc04e798a73 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -197,6 +197,19 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -195,6 +195,19 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      public static final String VANILLA_BRAND = "vanilla";
      private static final float AVERAGE_TICK_TIME_SMOOTHING = 0.8F;
      private static final int TICK_STATS_SPAN = 100;
@@ -624,7 +624,7 @@ index 41c5b0d8915d81d1b51de769252a7d83aca6276f..b8ca941fcf03019c6ee2871ca1bf2591
      private static final long OVERLOADED_THRESHOLD_NANOS = 30L * TimeUtil.NANOSECONDS_PER_SECOND / 20L; // CraftBukkit
      private static final int OVERLOADED_TICKS_THRESHOLD = 20;
      private static final long OVERLOADED_WARNING_INTERVAL_NANOS = 10L * TimeUtil.NANOSECONDS_PER_SECOND;
-@@ -1180,8 +1193,49 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1161,8 +1174,49 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.addTickTime(time);
      }
  
@@ -674,7 +674,7 @@ index 41c5b0d8915d81d1b51de769252a7d83aca6276f..b8ca941fcf03019c6ee2871ca1bf2591
  
          // note: To avoid possibly spinning forever, only execute tasks that are roughly available at the beginning
          //       of this call. Packet processing and chunk system tasks are possibly always being queued.
-@@ -1200,10 +1254,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1181,10 +1235,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              // draining is large - chunk system and packet processing may be latency sensitive
  
              ((ca.spottedleaf.moonrise.patches.chunk_system.server.ChunkSystemMinecraftServer)this).moonrise$executeMidTickTasks(); // Paper - rewrite chunk system
@@ -687,7 +687,7 @@ index 41c5b0d8915d81d1b51de769252a7d83aca6276f..b8ca941fcf03019c6ee2871ca1bf2591
              // execute possibly latency sensitive chunk system tasks (see above)
              ((ca.spottedleaf.moonrise.patches.chunk_system.server.ChunkSystemMinecraftServer)this).moonrise$executeMidTickTasks(); // Paper - rewrite chunk system
          }
-@@ -1233,6 +1287,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1214,6 +1268,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          profiler.pop(); // moonrise:run_all_chunk
          profiler.pop(); // moonrise:run_all_tasks
  

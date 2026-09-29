@@ -6,10 +6,10 @@ Subject: [PATCH] Move command execution and suggestions to owner-domain
 
 
 diff --git a/net/minecraft/commands/Commands.java b/net/minecraft/commands/Commands.java
-index d210f991366796d84e947df0a057c1adc62824f8..452546c8eca9de2a5a297d9594e20a48b200bb2e 100644
+index fb816ac65e382eac207afd56185a73c440c6245a..e04338b27463088a16120a890059799dce851290 100644
 --- a/net/minecraft/commands/Commands.java
 +++ b/net/minecraft/commands/Commands.java
-@@ -367,9 +367,9 @@ public class Commands {
+@@ -371,9 +371,9 @@ public class Commands {
      }
  
      public void performCommand(final ParseResults<CommandSourceStack> command, final String commandString, final boolean throwCommandError) {
@@ -89,10 +89,10 @@ index c8c8ee85004d965f77a00edb033e1863fc03833a..4f4722bfc709e3cf78487658a9626a95
              throw ERROR_FAILED.create();
          }
 diff --git a/net/minecraft/server/commands/KillCommand.java b/net/minecraft/server/commands/KillCommand.java
-index ceef214b551114ba030f0f4b4aaf28aaa8013a3f..62d6c60deba45b63a8fa524cf9563e157fe805e9 100644
+index 0b4040aab19c3d131bb12e2b5a146a1380c242a5..2b23a6972fad3d4229d71604678b87106dc1ebcc 100644
 --- a/net/minecraft/server/commands/KillCommand.java
 +++ b/net/minecraft/server/commands/KillCommand.java
-@@ -7,7 +7,11 @@ import net.minecraft.commands.CommandSourceStack;
+@@ -8,7 +8,11 @@ import net.minecraft.commands.CommandSourceStack;
  import net.minecraft.commands.Commands;
  import net.minecraft.commands.arguments.EntityArgument;
  import net.minecraft.network.chat.Component;
@@ -103,19 +103,17 @@ index ceef214b551114ba030f0f4b4aaf28aaa8013a3f..62d6c60deba45b63a8fa524cf9563e15
 +import net.minecraft.world.level.Level;
  
  public class KillCommand {
-     public static void register(final CommandDispatcher<CommandSourceStack> dispatcher) {
-@@ -21,7 +25,7 @@ public class KillCommand {
+     private static final CommandResponseTracker.Messages<Entity> RESPONSE_KILL = CommandResponseTracker.messages(
+@@ -29,10 +33,21 @@ public class KillCommand {
+         CommandResponseTracker<Entity> tracker = CommandResponseTracker.create();
  
-     private static int kill(final CommandSourceStack source, final Collection<? extends Entity> victims) {
          for (Entity entity : victims) {
 -            entity.kill(source.getLevel());
 +            runWithEntityContext(entity, () -> entity.kill(entity.level() instanceof ServerLevel serverLevel ? serverLevel : source.getLevel()));
+             tracker.track(entity);
          }
  
-         if (victims.size() == 1) {
-@@ -32,4 +36,15 @@ public class KillCommand {
- 
-         return victims.size();
+         return tracker.sendFeedback(source, true, RESPONSE_KILL);
      }
 +
 +    private static void runWithEntityContext(final Entity entity, final Runnable action) {
@@ -167,7 +165,7 @@ index 785112128803792e1ce821d3da37d6bac6cd3f44..d924f096953ced6babf907dab47812be
              throw ERROR_FAILED.create();
          }
 diff --git a/net/minecraft/server/commands/TeleportCommand.java b/net/minecraft/server/commands/TeleportCommand.java
-index 290547abf7037c5c88736c66765b2ee8f575c53b..4ecd70b4209926b66136e9ad137f688bbae4b9de 100644
+index 97acb0c6ff95a04405eeebc9835ddb84f818128d..5530c1df469a081789faa058c4e64c8fa03b14d7 100644
 --- a/net/minecraft/server/commands/TeleportCommand.java
 +++ b/net/minecraft/server/commands/TeleportCommand.java
 @@ -9,6 +9,7 @@ import java.util.Collections;
@@ -199,10 +197,10 @@ index 290547abf7037c5c88736c66765b2ee8f575c53b..4ecd70b4209926b66136e9ad137f688b
      private static final SimpleCommandExceptionType INVALID_POSITION = new SimpleCommandExceptionType(
          Component.translatable("commands.teleport.invalidPosition")
      );
-@@ -149,33 +153,49 @@ public class TeleportCommand {
-     }
+@@ -162,21 +166,25 @@ public class TeleportCommand {
  
      private static int teleportToEntity(final CommandSourceStack source, final Collection<? extends Entity> entities, final Entity destination) throws CommandSyntaxException {
+         CommandResponseTracker<Entity> tracker = CommandResponseTracker.create();
 +        final ServerLevel level = (ServerLevel)destination.level();
 +        final double x = destination.getX();
 +        final double y = destination.getY();
@@ -210,9 +208,7 @@ index 290547abf7037c5c88736c66765b2ee8f575c53b..4ecd70b4209926b66136e9ad137f688b
 +        final float yRot = destination.getYRot();
 +        final float xRot = destination.getXRot();
 +        validateTeleportTarget(x, y, z);
-+
-+        int successCount = 0;
-+        Entity firstSuccess = null;
+ 
          for (Entity entity : entities) {
 -            performTeleport(
 -                source,
@@ -231,46 +227,19 @@ index 290547abf7037c5c88736c66765b2ee8f575c53b..4ecd70b4209926b66136e9ad137f688b
 +                z,
 +                () -> performTeleport(source, entity, level, x, y, z, EnumSet.noneOf(Relative.class), yRot, xRot, null)
              );
+-            tracker.track(entity);
 +            if (teleport.getAsBoolean()) {
-+                ++successCount;
-+                if (firstSuccess == null) {
-+                    firstSuccess = entity;
-+                }
++                tracker.track(entity);
 +            }
          }
  
--        if (entities.size() == 1) {
-+        if (successCount == 0) {
-+            return 0;
-+        }
-+        if (successCount == 1) {
-+            final Entity teleported = firstSuccess;
-             source.sendSuccess(
-                 () -> Component.translatable(
--                    "commands.teleport.success.entity.single", entities.iterator().next().getDisplayName(), destination.getDisplayName()
-+                    "commands.teleport.success.entity.single", teleported.getDisplayName(), destination.getDisplayName()
-                 ),
-                 true
-             );
-         } else {
--            source.sendSuccess(() -> Component.translatable("commands.teleport.success.entity.multiple", entities.size(), destination.getDisplayName()), true);
-+            final int teleported = successCount;
-+            source.sendSuccess(() -> Component.translatable("commands.teleport.success.entity.multiple", teleported, destination.getDisplayName()), true);
-         }
- 
--        return entities.size();
-+        return successCount;
-     }
- 
-     private static int teleportToPos(
-@@ -188,21 +208,35 @@ public class TeleportCommand {
-     ) throws CommandSyntaxException {
+         return tracker.sendFeedback(source, true, RESPONSE_TELEPORT_TO_ENTITY, destination);
+@@ -193,16 +201,19 @@ public class TeleportCommand {
+         CommandResponseTracker<Entity> tracker = CommandResponseTracker.create();
          Vec3 pos = destination.getPosition(source);
          Vec2 rot = rotation == null ? null : rotation.getRotation(source);
 +        validateTeleportTarget(pos.x, pos.y, pos.z);
  
-+        int successCount = 0;
-+        Entity firstSuccess = null;
          for (Entity entity : entities) {
 -            Set<Relative> relatives = getRelatives(destination, rotation, entity.level().dimension() == level.dimension());
 -            if (rot == null) {
@@ -285,47 +254,14 @@ index 290547abf7037c5c88736c66765b2ee8f575c53b..4ecd70b4209926b66136e9ad137f688b
 +                return performTeleport(source, entity, level, pos.x, pos.y, pos.z, relatives, rot.y, rot.x, lookAt);
 +            });
 +            if (teleport.getAsBoolean()) {
-+                ++successCount;
-+                if (firstSuccess == null) {
-+                    firstSuccess = entity;
-+                }
++                tracker.track(entity);
              }
+-
+-            tracker.track(entity);
          }
  
--        if (entities.size() == 1) {
-+        if (successCount == 0) {
-+            return 0;
-+        }
-+        if (successCount == 1) {
-+            final Entity teleported = firstSuccess;
-             source.sendSuccess(
-                 () -> Component.translatable(
-                     "commands.teleport.success.location.single",
--                    entities.iterator().next().getDisplayName(),
-+                    teleported.getDisplayName(),
-                     formatDouble(pos.x),
-                     formatDouble(pos.y),
-                     formatDouble(pos.z)
-@@ -210,15 +244,16 @@ public class TeleportCommand {
-                 true
-             );
-         } else {
-+            final int teleported = successCount;
-             source.sendSuccess(
-                 () -> Component.translatable(
--                    "commands.teleport.success.location.multiple", entities.size(), formatDouble(pos.x), formatDouble(pos.y), formatDouble(pos.z)
-+                    "commands.teleport.success.location.multiple", teleported, formatDouble(pos.x), formatDouble(pos.y), formatDouble(pos.z)
-                 ),
-                 true
-             );
-         }
- 
--        return entities.size();
-+        return successCount;
-     }
- 
-     private static Set<Relative> getRelatives(final Coordinates destination, final @Nullable Coordinates rotation, final boolean sameDimension) {
-@@ -232,7 +267,89 @@ public class TeleportCommand {
+         return tracker.sendFeedback(source, true, RESPONSE_TELEPORT_TO_POS, pos);
+@@ -219,7 +230,89 @@ public class TeleportCommand {
          return String.format(Locale.ROOT, "%f", value);
      }
  
@@ -416,7 +352,7 @@ index 290547abf7037c5c88736c66765b2ee8f575c53b..4ecd70b4209926b66136e9ad137f688b
          final CommandSourceStack source,
          final Entity victim,
          final ServerLevel level,
-@@ -243,12 +360,7 @@ public class TeleportCommand {
+@@ -230,12 +323,7 @@ public class TeleportCommand {
          final float yRot,
          final float xRot,
          final @Nullable LookAt lookAt
@@ -430,7 +366,7 @@ index 290547abf7037c5c88736c66765b2ee8f575c53b..4ecd70b4209926b66136e9ad137f688b
          double relativeOrAbsoluteX = relatives.contains(Relative.X) ? x - victim.getX() : x;
          double relativeOrAbsoluteY = relatives.contains(Relative.Y) ? y - victim.getY() : y;
          double relativeOrAbsoluteZ = relatives.contains(Relative.Z) ? z - victim.getZ() : z;
-@@ -256,19 +368,22 @@ public class TeleportCommand {
+@@ -243,19 +331,22 @@ public class TeleportCommand {
          float relativeOrAbsoluteXRot = relatives.contains(Relative.X_ROT) ? xRot - victim.getXRot() : xRot;
          float newYRot = Mth.wrapDegrees(relativeOrAbsoluteYRot);
          float newXRot = Mth.wrapDegrees(relativeOrAbsoluteXRot);
@@ -465,10 +401,10 @@ index 290547abf7037c5c88736c66765b2ee8f575c53b..4ecd70b4209926b66136e9ad137f688b
      }
  }
 diff --git a/net/minecraft/server/commands/TimeCommand.java b/net/minecraft/server/commands/TimeCommand.java
-index 27ec27001aad55c9e1c691e3910c08a57b3322c9..ec3880f5d9be7b175a96819213e5176438c3b45c 100644
+index 74f108f18bc98ae579cbcc1eb879e2f2f3a4c16e..6d07e954de331eec888fcc26701dc60f4c249be3 100644
 --- a/net/minecraft/server/commands/TimeCommand.java
 +++ b/net/minecraft/server/commands/TimeCommand.java
-@@ -120,7 +120,7 @@ public class TimeCommand {
+@@ -135,7 +135,7 @@ public class TimeCommand {
          final CommandSourceStack source, final SuggestionsBuilder builder, final Holder<WorldClock> clock
      ) {
          return SharedSuggestionProvider.suggestResource(
@@ -477,16 +413,7 @@ index 27ec27001aad55c9e1c691e3910c08a57b3322c9..ec3880f5d9be7b175a96819213e51764
          );
      }
  
-@@ -142,7 +142,7 @@ public class TimeCommand {
-     }
- 
-     private static int queryTime(final CommandSourceStack source, final Holder<WorldClock> clock) {
--        ServerClockManager clockManager = source.getLevel().clockManager(); // Paper - per-world time
-+        ServerClockManager clockManager = source.getServer().clockManager();
-         long totalTicks = clockManager.getTotalTicks(clock);
-         source.sendSuccess(() -> Component.translatable("commands.time.query.absolute", clock.getRegisteredName(), totalTicks), false);
-         return wrapTime(totalTicks);
-@@ -153,7 +153,7 @@ public class TimeCommand {
+@@ -168,7 +168,7 @@ public class TimeCommand {
              throw ERROR_WRONG_TIMELINE_FOR_CLOCK.create(clock.getRegisteredName(), timeline.getRegisteredName());
          }
  
@@ -495,7 +422,7 @@ index 27ec27001aad55c9e1c691e3910c08a57b3322c9..ec3880f5d9be7b175a96819213e51764
          long currentTicks = timeline.value().getCurrentTicks(clockManager);
          source.sendSuccess(() -> Component.translatable("commands.time.query.timeline", timeline.getRegisteredName(), currentTicks), false);
          return wrapTime(currentTicks);
-@@ -164,7 +164,7 @@ public class TimeCommand {
+@@ -179,13 +179,14 @@ public class TimeCommand {
              throw ERROR_WRONG_TIMELINE_FOR_CLOCK.create(clock.getRegisteredName(), timeline.getRegisteredName());
          }
  
@@ -504,55 +431,55 @@ index 27ec27001aad55c9e1c691e3910c08a57b3322c9..ec3880f5d9be7b175a96819213e51764
          long repetitions = timeline.value().getPeriodCount(clockManager);
          source.sendSuccess(() -> Component.translatable("commands.time.query.timeline.repetitions", timeline.getRegisteredName(), repetitions), false);
          return wrapTime(repetitions);
-@@ -172,6 +172,7 @@ public class TimeCommand {
+     }
  
-     // Paper start - per-world time
-     private static int setTotalTicks(final CommandSourceStack source, final Holder<WorldClock> clock, final int totalTicks) {
+     private static int setTotalTicks(final CommandSourceStack source, final Holder<WorldClock> clock, final int totalTicks) throws CommandSyntaxException {
 +        ensureSynchronousContext(source, "time command set");
+         // Paper start - per-world time
          ServerClockManager clockManager = source.getLevel().clockManager();
-         long currentTotalTicks = clockManager.getTotalTicks(clock);
-         org.bukkit.event.world.ClockTimeSkipEvent event = org.bukkit.craftbukkit.event.CraftEventFactory.createTimeSkipEvent(source, totalTicks - currentTotalTicks);
-@@ -180,13 +181,14 @@ public class TimeCommand {
+         long currentTotalTicks = clockManager.getInstance(clock).totalTicks();
+@@ -195,7 +196,7 @@ public class TimeCommand {
              newTotalTicks = currentTotalTicks + event.getSkipAmount();
              clockManager.setTotalTicks(clock, newTotalTicks);
          } else {
 -            newTotalTicks = totalTicks; // just pass it through
 +            newTotalTicks = totalTicks;
          }
-         source.sendSuccess(() -> Component.translatable("commands.time.set.absolute", clock.getRegisteredName(), newTotalTicks), true);
-         return wrapTime(newTotalTicks);
+         if (currentTotalTicks == newTotalTicks) {
+             throw ERROR_ALREADY_AT_TIME.create(clock.getRegisteredName(), newTotalTicks);
+@@ -208,6 +209,7 @@ public class TimeCommand {
      }
  
      private static int addTime(final CommandSourceStack source, final Holder<WorldClock> clock, final int time) {
 +        ensureSynchronousContext(source, "time command add");
+         // Paper start - per-world time
          ServerClockManager clockManager = source.getLevel().clockManager();
          org.bukkit.event.world.ClockTimeSkipEvent event = org.bukkit.craftbukkit.event.CraftEventFactory.createTimeSkipEvent(source, time);
-         if (event.callEvent()) {
-@@ -198,7 +200,7 @@ public class TimeCommand {
+@@ -221,6 +223,7 @@ public class TimeCommand {
      }
  
      private static int setTimeToTimeMarker(final CommandSourceStack source, final Holder<WorldClock> clock, final ResourceKey<ClockTimeMarker> timeMarkerId) throws CommandSyntaxException {
--        // Paper start - per-world time
 +        ensureSynchronousContext(source, "time command set marker");
-         ServerClockManager clockManager = source.getLevel().clockManager();
-         java.util.OptionalLong targetTime = clockManager.getTotalTicksToTimeMarker(clock, timeMarkerId);
-         if (targetTime.isEmpty()) {
-@@ -218,17 +220,37 @@ public class TimeCommand {
-     }
+         ServerClockManager clockManager = source.getLevel().clockManager(); // Paper - per-world time
+         ServerClockManager.MoveResult moveResult = moveToTimeMarker(clock, timeMarkerId, clockManager, source); // Paper - time skip event
+         String clockName = clock.getRegisteredName();
+@@ -252,6 +255,7 @@ public class TimeCommand {
+     // Paper end - time skip event
  
-     private static int setPaused(final CommandSourceStack source, final Holder<WorldClock> clock, final boolean paused) {
--        source.getLevel().clockManager().setPaused(clock, paused); // Paper - per-world time
+     private static int setPaused(final CommandSourceStack source, final Holder<WorldClock> clock, final boolean paused) throws CommandSyntaxException {
 +        ensureSynchronousContext(source, paused ? "time command pause" : "time command resume");
-+        source.getServer().clockManager().setPaused(clock, paused);
-         source.sendSuccess(() -> Component.translatable(paused ? "commands.time.pause" : "commands.time.resume", clock.getRegisteredName()), true);
-         return Command.SINGLE_SUCCESS;
+         ServerClockManager clockManager = source.getLevel().clockManager(); // Paper - per-world time
+         String clockName = clock.getRegisteredName();
+         if (clockManager.getInstance(clock).isPaused() == paused) {
+@@ -268,6 +272,7 @@ public class TimeCommand {
      }
  
-     private static int setRate(final CommandSourceStack source, final Holder<WorldClock> clock, final float rate) {
--        source.getLevel().clockManager().setRate(clock, rate); // Paper - per-world time
+     private static int setRate(final CommandSourceStack source, final Holder<WorldClock> clock, final float rate) throws CommandSyntaxException {
 +        ensureSynchronousContext(source, "time command rate");
-+        source.getServer().clockManager().setRate(clock, rate);
-         source.sendSuccess(() -> Component.translatable("commands.time.rate", clock.getRegisteredName(), rate), true);
+         ServerClockManager clockManager = source.getLevel().clockManager(); // Paper - per-world time
+         if (clockManager.getInstance(clock).rate() == rate) {
+             throw ERROR_ALREADY_SAME_RATE.create(clock.getRegisteredName(), rate);
+@@ -278,6 +283,24 @@ public class TimeCommand {
          return Command.SINGLE_SUCCESS;
      }
  
@@ -578,7 +505,7 @@ index 27ec27001aad55c9e1c691e3910c08a57b3322c9..ec3880f5d9be7b175a96819213e51764
          return Math.toIntExact(ticks % 2147483647L);
      }
 diff --git a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java b/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
-index 912962e7ba35df57cbb157443fc8b7867a43d5dc..379f672e5ddde802bf727404cc730e48ea003953 100644
+index 28d8984b040a877e04247199c3b29fc71aeb64e5..e6c9b1b5aea1e6cdfe7bf2ea402e45ed2183d1ff 100644
 --- a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
 +++ b/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
 @@ -80,8 +80,20 @@ public class MinecartCommandBlock extends AbstractMinecart {
@@ -617,10 +544,10 @@ index fbe1cf1f02a27cbe0666fb83eb74c82df92785c9..3d5e1e7913f43551b5653c4424a6185a
                  BaseCommandBlock.this.onUpdated(this.level);
              }
 diff --git a/net/minecraft/world/level/block/CommandBlock.java b/net/minecraft/world/level/block/CommandBlock.java
-index 8cf4410a41ccd2f7e253e5400ca679a498aea4db..f126882c9e2556e812b4ac3c89a93cba437665b4 100644
+index 5cdf7439fd303e2d0ada2b773551bebde693944b..ce56a040a05639eb782afc9211e6da81fba9d0fa 100644
 --- a/net/minecraft/world/level/block/CommandBlock.java
 +++ b/net/minecraft/world/level/block/CommandBlock.java
-@@ -91,6 +91,23 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+@@ -80,6 +80,23 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
  
      @Override
      protected void tick(final BlockState state, final ServerLevel level, final BlockPos pos, final RandomSource random) {

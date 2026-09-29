@@ -118,10 +118,10 @@ index 445c5cafad71028171c1f261939661775dd7f2bd..1628f7b43da9b5e936a5eedc3bd9c3aa
      // Paper end
  
 diff --git a/net/minecraft/world/level/block/FarmlandBlock.java b/net/minecraft/world/level/block/FarmlandBlock.java
-index 902735a0ae76c0a8b3397c00bb8e4480b4120c6e..fe8b768d2f77f11aad17e54fb47116eed1ead201 100644
+index 5437f62ff44d3aa59bfa671dc5aaed14a646a7bc..10efbf27ec72976d4fa5336e3d03e8ad18028475 100644
 --- a/net/minecraft/world/level/block/FarmlandBlock.java
 +++ b/net/minecraft/world/level/block/FarmlandBlock.java
-@@ -4,6 +4,7 @@ import com.mojang.serialization.MapCodec;
+@@ -3,6 +3,7 @@ package net.minecraft.world.level.block;
  import net.minecraft.core.BlockPos;
  import net.minecraft.core.Direction;
  import net.minecraft.server.level.ServerLevel;
@@ -129,7 +129,7 @@ index 902735a0ae76c0a8b3397c00bb8e4480b4120c6e..fe8b768d2f77f11aad17e54fb47116ee
  import net.minecraft.tags.BlockTags;
  import net.minecraft.tags.FluidTags;
  import net.minecraft.util.RandomSource;
-@@ -94,8 +95,9 @@ public class FarmlandBlock extends Block {
+@@ -89,8 +90,9 @@ public class FarmlandBlock extends Block {
      @Override
      protected void randomTick(final BlockState state, final ServerLevel level, final BlockPos pos, final RandomSource random) {
          int moisture = state.getValue(MOISTURE);
@@ -142,10 +142,10 @@ index 902735a0ae76c0a8b3397c00bb8e4480b4120c6e..fe8b768d2f77f11aad17e54fb47116ee
              if (moisture > 0) {
                  org.bukkit.craftbukkit.event.CraftEventFactory.handleMoistureChangeEvent(level, pos, state.setValue(MOISTURE, moisture - 1), Block.UPDATE_CLIENTS); // CraftBukkit
 diff --git a/net/minecraft/world/level/block/SpreadingSnowyBlock.java b/net/minecraft/world/level/block/SpreadingSnowyBlock.java
-index 513e23b693aa0f47bcf91e9087159a75471efd36..7814387fd5c2a92301cc53edc21c7cb741110b94 100644
+index aa5ca5ef216ea08f70629824b87d73b31c1493ce..fcbb7bf22c3cc14623046c658ecaa8c1f72723d7 100644
 --- a/net/minecraft/world/level/block/SpreadingSnowyBlock.java
 +++ b/net/minecraft/world/level/block/SpreadingSnowyBlock.java
-@@ -8,6 +8,7 @@ import net.minecraft.core.Registry;
+@@ -7,6 +7,7 @@ import net.minecraft.core.Registry;
  import net.minecraft.core.registries.Registries;
  import net.minecraft.resources.ResourceKey;
  import net.minecraft.server.level.ServerLevel;
@@ -153,7 +153,7 @@ index 513e23b693aa0f47bcf91e9087159a75471efd36..7814387fd5c2a92301cc53edc21c7cb7
  import net.minecraft.tags.FluidTags;
  import net.minecraft.util.RandomSource;
  import net.minecraft.world.level.LevelReader;
-@@ -59,7 +60,7 @@ public abstract class SpreadingSnowyBlock extends SnowyBlock {
+@@ -55,7 +56,7 @@ public abstract class SpreadingSnowyBlock extends SnowyBlock {
  
      @Override
      protected void randomTick(final BlockState state, final ServerLevel level, final BlockPos pos, final RandomSource random) {
@@ -163,26 +163,26 @@ index 513e23b693aa0f47bcf91e9087159a75471efd36..7814387fd5c2a92301cc53edc21c7cb7
          Optional<Block> baseBlock = blocks.getOptional(this.baseBlock);
          if (!baseBlock.isEmpty()) {
 diff --git a/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java b/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java
-index 3fcb1a45a547681740d6ec8946b274539448cf95..965a5f59c5b463fac7eafbac7aac1888b1bdb136 100644
+index 2126385a1fb5c89e01920f3a8cc77eb4ac78c87e..fa8d4112c4e2141356397098a1c59ba6f689d815 100644
 --- a/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java
 +++ b/net/minecraft/world/level/block/piston/PistonMovingBlockEntity.java
-@@ -160,8 +160,9 @@ public class PistonMovingBlockEntity extends BlockEntity {
+@@ -146,8 +146,9 @@ public class PistonMovingBlockEntity extends BlockEntity {
  
-                                 entity.setDeltaMovement(dx, dy, dz);
-                                 // Paper - EAR items stuck in slime pushed by a piston
--                                entity.activatedTick = Math.max(entity.activatedTick, net.minecraft.server.MinecraftServer.currentTick + 10);
--                                entity.activatedImmunityTick = Math.max(entity.activatedImmunityTick, net.minecraft.server.MinecraftServer.currentTick + 10);
-+                                final int currentTick = net.minecraft.server.threading.runtime.DomainClock.currentEntityTick(entity);
-+                                entity.activatedTick = Math.max(entity.activatedTick, currentTick + 10);
-+                                entity.activatedImmunityTick = Math.max(entity.activatedImmunityTick, currentTick + 10);
-                                 // Paper end
-                                 break;
-                             }
+                             entity.setDeltaMovement(dx, dy, dz);
+                             // Paper - EAR items stuck in slime pushed by a piston
+-                            entity.activatedTick = Math.max(entity.activatedTick, net.minecraft.server.MinecraftServer.currentTick + 10);
+-                            entity.activatedImmunityTick = Math.max(entity.activatedImmunityTick, net.minecraft.server.MinecraftServer.currentTick + 10);
++                            final int currentTick = net.minecraft.server.threading.runtime.DomainClock.currentEntityTick(entity);
++                            entity.activatedTick = Math.max(entity.activatedTick, currentTick + 10);
++                            entity.activatedImmunityTick = Math.max(entity.activatedImmunityTick, currentTick + 10);
+                             // Paper end
+                         }
+ 
 diff --git a/net/minecraft/world/level/block/state/BlockBehaviour.java b/net/minecraft/world/level/block/state/BlockBehaviour.java
-index c78d77089e34c4bb559f173b449bfb7d91b05d5c..bf99187e3f5e15034f147fc95bc7889cd6a568a7 100644
+index bebfe5b72c1dd812c480de3311ad36ca8d96466b..53c007fdc14a6a8774366a608938e8f09b5605ec 100644
 --- a/net/minecraft/world/level/block/state/BlockBehaviour.java
 +++ b/net/minecraft/world/level/block/state/BlockBehaviour.java
-@@ -168,7 +168,7 @@ public abstract class BlockBehaviour implements FeatureElement {
+@@ -159,7 +159,7 @@ public abstract class BlockBehaviour implements FeatureElement {
      }
  
      protected void onPlace(final BlockState state, final Level level, final BlockPos pos, final BlockState oldState, final boolean movedByPiston) {

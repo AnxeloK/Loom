@@ -6,10 +6,10 @@ Subject: [PATCH] Reduce entity and block traversal overhead
 Reuse traversal state and remove transient predicates from entity and block hot paths without changing collision or push behavior.
 
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index e0b846154b87c7bbfeed836ad1fc45d75a1c7ecd..f5c8d12d3652212e998dacf8ffb6c81222922dfb 100644
+index 435b625e67ffa02947b8f094820ccc9028f32ca2..c878ecd9a52653e87643f6180988da5a93e85ffe 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -1923,8 +1923,7 @@ public abstract class Entity
+@@ -1966,8 +1966,7 @@ public abstract class Entity
          boolean movedFar = from.distanceToSqr(to) > Mth.square(0.9999900000002526);
          boolean debugEntityBlockIntersections = this.level instanceof ServerLevel serverLevel
              && serverLevel.getServer().debugSubscribers().hasAnySubscriberFor(DebugSubscriptions.ENTITY_BLOCK_INTERSECTIONS);
@@ -19,7 +19,7 @@ index e0b846154b87c7bbfeed836ad1fc45d75a1c7ecd..f5c8d12d3652212e998dacf8ffb6c812
              from,
              to,
              deflatedBoundingBoxAtTarget,
-@@ -1937,7 +1936,6 @@ public abstract class Entity
+@@ -1980,7 +1979,6 @@ public abstract class Entity
                      return false;
                  }
  
@@ -27,7 +27,7 @@ index e0b846154b87c7bbfeed836ad1fc45d75a1c7ecd..f5c8d12d3652212e998dacf8ffb6c812
                  BlockState state = this.level().getBlockState(blockIntersection);
                  if (state.isAir()) {
                      if (debugEntityBlockIntersections) {
-@@ -1983,7 +1981,6 @@ public abstract class Entity
+@@ -2026,7 +2024,6 @@ public abstract class Entity
                  }
              }
          );
@@ -96,7 +96,7 @@ index a3c13e421768f5e1a703b5b1167fa1c912b6f126..f46bf91053417527e63dbd6fc63b304a
  
      public static Predicate<Entity> notRiding(final Entity entity) {
 diff --git a/net/minecraft/world/entity/InsideBlockEffectApplier.java b/net/minecraft/world/entity/InsideBlockEffectApplier.java
-index fc7cfc75e3e5c274f01498e4afd8693236b4e394..6347a656f631838841eaaef685c5a931646090c5 100644
+index c2f124383be06ae777c1ee7f0820c959c8359f87..90b30b14d578b162fbbb3af13f5615cea9e94e6d 100644
 --- a/net/minecraft/world/entity/InsideBlockEffectApplier.java
 +++ b/net/minecraft/world/entity/InsideBlockEffectApplier.java
 @@ -53,30 +53,36 @@ public interface InsideBlockEffectApplier {
@@ -147,7 +147,7 @@ index fc7cfc75e3e5c274f01498e4afd8693236b4e394..6347a656f631838841eaaef685c5a931
          }
  
 diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
-index f3345a5846b0dd6442de3d52a5b21cb978b1a8e0..92315ba997c66f86661fa58ed0887d2d95541b0b 100644
+index a5d41946ef12f31d8969b03f8f92d7b6785a4e50..0600f0d2fdd3344723e9f100c124c2ed5d80942a 100644
 --- a/net/minecraft/world/entity/LivingEntity.java
 +++ b/net/minecraft/world/entity/LivingEntity.java
 @@ -1328,6 +1328,9 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin

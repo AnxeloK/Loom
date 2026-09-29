@@ -6,7 +6,7 @@ Subject: [PATCH] Reuse collision traversal state
 Reuse collision visitors and bounds within an owner context instead of allocating equivalent traversal state for each query.
 
 diff --git a/ca/spottedleaf/moonrise/patches/collisions/CollisionUtil.java b/ca/spottedleaf/moonrise/patches/collisions/CollisionUtil.java
-index 15568f598b8c61cf92563b6a7f8cae526b84484e..ebd819146895072314021818596aa6671c6a1b97 100644
+index 54b2492c3ab6bf9ff52cec53dc4635f725f9eb4f..6d90d60ab619843764abd68352ae8367c0bad537 100644
 --- a/ca/spottedleaf/moonrise/patches/collisions/CollisionUtil.java
 +++ b/ca/spottedleaf/moonrise/patches/collisions/CollisionUtil.java
 @@ -2013,16 +2013,21 @@ public final class CollisionUtil {
@@ -44,18 +44,18 @@ index 15568f598b8c61cf92563b6a7f8cae526b84484e..ebd819146895072314021818596aa667
                                          }
                                      }
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index f5c8d12d3652212e998dacf8ffb6c81222922dfb..3b23b77d727a53c70349eff333493ac7ffaafa04 100644
+index c878ecd9a52653e87643f6180988da5a93e85ffe..c8d1867229087ef1a6b3c93ffa47d86a11297439 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -438,6 +438,7 @@ public abstract class Entity
-     private final List<Entity.Movement> finalMovementsThisTick = new ObjectArrayList<>();
+@@ -443,6 +443,7 @@ public abstract class Entity
      private final LongSet visitedBlocks = new LongOpenHashSet();
-     private final InsideBlockEffectApplier.StepBasedCollector insideEffectCollector = new InsideBlockEffectApplier.StepBasedCollector();
+     protected final InsideBlockEffectApplier.StepBasedCollector insideEffectCollector = new InsideBlockEffectApplier.StepBasedCollector();
+     protected final InterpolationHandler interpolationHandler;
 +    private @Nullable InsideBlockTraversal insideBlockTraversal;
      private CustomData customData = CustomData.EMPTY;
      // CraftBukkit start
      public boolean persist = true;
-@@ -1628,11 +1629,13 @@ public abstract class Entity
+@@ -1666,11 +1667,13 @@ public abstract class Entity
              }
  
              BlockState belowState = this.level().getBlockState(getOnPos);
@@ -74,7 +74,7 @@ index f5c8d12d3652212e998dacf8ffb6c81222922dfb..3b23b77d727a53c70349eff333493ac7
          } else {
              int xTruncated = Mth.floor(this.position.x);
              int yTruncatedBelow = Mth.floor(this.position.y - offset);
-@@ -1703,6 +1706,37 @@ public abstract class Entity
+@@ -1741,6 +1744,37 @@ public abstract class Entity
          return colliders.isEmpty() ? maxDistance : -Shapes.collide(Direction.Axis.Y, aabb, colliders, -maxDistance);
      }
  
@@ -112,7 +112,7 @@ index f5c8d12d3652212e998dacf8ffb6c81222922dfb..3b23b77d727a53c70349eff333493ac7
      private Vec3 collide(final Vec3 movement) {
          // Paper start - optimise collisions
          final boolean xZero = movement.x == 0.0;
-@@ -1713,66 +1747,70 @@ public abstract class Entity
+@@ -1751,71 +1785,73 @@ public abstract class Entity
          }
  
          final AABB currentBox = this.getBoundingBox();
@@ -145,12 +145,20 @@ index f5c8d12d3652212e998dacf8ffb6c81222922dfb..3b23b77d727a53c70349eff333493ac7
 -        }
 -
 -        final List<AABB> entityAABBs = new ArrayList<>();
+-        // Vanilla expands the entity query by maxUpStep: the step logic below tests raised positions, so
+-        // entities fully above this entity's hitbox must be fetched for those checks (MC-310289). When
+-        // there is no horizontal movement the step logic cannot run, so keep the smaller query.
+-        final AABB entityQueryBox = (xZero & zZero) ? initialCollisionBox
+-            : initialCollisionBox.expandTowards(0.0, (double)this.maxUpStep(), 0.0);
 -        ca.spottedleaf.moonrise.patches.collisions.CollisionUtil.getEntityHardCollisions(
--            this.level, (Entity)(Object)this, initialCollisionBox, entityAABBs, 0, null
+-            this.level, (Entity)(Object)this, entityQueryBox, entityAABBs, 0, null
 -        );
 +            final List<AABB> entityAABBs = scratch.entityAABBs;
++            // Include entities above the hitbox when horizontal movement can step upward (MC-310289).
++            final AABB entityQueryBox = (xZero & zZero) ? initialCollisionBox
++                : initialCollisionBox.expandTowards(0.0, (double)this.maxUpStep(), 0.0);
 +            ca.spottedleaf.moonrise.patches.collisions.CollisionUtil.getEntityHardCollisions(
-+                this.level, (Entity)(Object)this, initialCollisionBox, entityAABBs, 0, null
++                this.level, (Entity)(Object)this, entityQueryBox, entityAABBs, 0, null
 +            );
  
 -        ca.spottedleaf.moonrise.patches.collisions.CollisionUtil.getCollisionsForBlocksOrWorldBorder(
@@ -231,7 +239,7 @@ index f5c8d12d3652212e998dacf8ffb6c81222922dfb..3b23b77d727a53c70349eff333493ac7
          // Paper end - optimise collisions
      }
  
-@@ -1923,55 +1961,116 @@ public abstract class Entity
+@@ -1966,55 +2002,116 @@ public abstract class Entity
          boolean movedFar = from.distanceToSqr(to) > Mth.square(0.9999900000002526);
          boolean debugEntityBlockIntersections = this.level instanceof ServerLevel serverLevel
              && serverLevel.getServer().debugSubscribers().hasAnySubscriberFor(DebugSubscriptions.ENTITY_BLOCK_INTERSECTIONS);
@@ -373,7 +381,7 @@ index f5c8d12d3652212e998dacf8ffb6c81222922dfb..3b23b77d727a53c70349eff333493ac7
                          }
  
                          return true;
-@@ -1980,7 +2079,7 @@ public abstract class Entity
+@@ -2023,7 +2120,7 @@ public abstract class Entity
                      }
                  }
              }
@@ -382,7 +390,7 @@ index f5c8d12d3652212e998dacf8ffb6c81222922dfb..3b23b77d727a53c70349eff333493ac7
      }
  
      private void debugBlockIntersection(final ServerLevel level, final BlockPos pos, final boolean insideBlock, final boolean insideFluid) {
-@@ -3100,21 +3199,30 @@ public abstract class Entity
+@@ -3173,21 +3270,30 @@ public abstract class Entity
          }
  
          // Paper start - optimise collisions
@@ -422,7 +430,7 @@ index f5c8d12d3652212e998dacf8ffb6c81222922dfb..3b23b77d727a53c70349eff333493ac7
  
          final int minChunkX = minBlockX >> 4;
          final int minChunkY = minBlockY >> 4;
-@@ -3181,16 +3289,24 @@ public abstract class Entity
+@@ -3254,16 +3360,24 @@ public abstract class Entity
                                      continue;
                                  }
  
@@ -449,7 +457,7 @@ index f5c8d12d3652212e998dacf8ffb6c81222922dfb..3b23b77d727a53c70349eff333493ac7
                                  if (ca.spottedleaf.moonrise.patches.collisions.CollisionUtil.voxelShapeIntersectNoEmpty(collisionShape, toCollide)) {
                                      return true;
                                  }
-@@ -4720,18 +4836,37 @@ public abstract class Entity
+@@ -4865,18 +4979,37 @@ public abstract class Entity
                  maxX = bb.maxX,
                  maxY = bb.maxY,
                  maxZ = bb.maxZ;

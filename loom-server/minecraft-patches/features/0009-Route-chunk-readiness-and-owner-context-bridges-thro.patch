@@ -45,10 +45,10 @@ index f2fb701db8c171e1639c53d437f18c9104dfe07b..ae5d61788e44603ab3031435817f0359
              return;
          }
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index bcedec73102ab35d0c84646c9a82a02384f7da6c..41c5b0d8915d81d1b51de769252a7d83aca6276f 100644
+index 65acb895eb2e4100929f87fb7bb6a753de5234e2..3bae538f6a1ebf59a74903506499c6eebd43f352 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2748,7 +2748,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2720,7 +2720,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      // Paper start - rewrite chunk system
      @Override
      public boolean isSameThread() {
@@ -58,41 +58,21 @@ index bcedec73102ab35d0c84646c9a82a02384f7da6c..41c5b0d8915d81d1b51de769252a7d83
      // Paper end - rewrite chunk system
  
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 697a070576fa0488787063fc1fb42d23e764a6c6..451cec7cd6285eb4ec677bbb8049e32a73a76473 100644
+index dedac41b55878d8c4f4bd6db65d8fa13e9abc839..d8ad5d44473917ab30855c9f842ce013c530bcdf 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -472,7 +472,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
-         for (int cx = minChunkX; cx <= maxChunkX; ++cx) {
-             for (int cz = minChunkZ; cz <= maxChunkZ; ++cz) {
-                 ca.spottedleaf.moonrise.common.PlatformHooks.get().scheduleChunkLoad(
--                    this, cx, cz, net.minecraft.world.level.chunk.status.ChunkStatus.FULL, true, priority, consumer
-+                    this, cx, cz, chunkStatus, true, priority, consumer
-                 );
-             }
-         }
-@@ -1439,10 +1439,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
-             // Paper end - log detailed entity tick information
-         entity.setOldPosAndRot();
+@@ -1448,6 +1448,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          ProfilerFiller profiler = Profiler.get();
--        entity.tickCount++;
--        entity.totalEntityAge++; // Paper - age-like counter for all entities
          profiler.push(entity.typeHolder()::getRegisteredName);
          profiler.incrementCounter("tickNonPassenger");
 +        if (entity.processPendingPortalDestination()) {
 +            profiler.pop();
 +            return;
 +        }
-+        entity.tickCount++;
-+        entity.totalEntityAge++; // Paper - age-like counter for all entities
+         entity.commonTick();
          final boolean isActive = io.papermc.paper.entity.activation.ActivationRange.checkIfActive(entity); // Paper - EAR 2
          if (isActive) { // Paper - EAR 2
-         entity.tick();
-@@ -1467,11 +1471,15 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
-             entity.stopRiding();
-         } else if (entity instanceof Player || this.entityTickList.contains(entity)) {
-             entity.setOldPosAndRot();
--            entity.tickCount++;
--            entity.totalEntityAge++; // Paper - age-like counter for all entities
+@@ -1475,6 +1479,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              ProfilerFiller profiler = Profiler.get();
              profiler.push(entity.typeHolder()::getRegisteredName);
              profiler.incrementCounter("tickPassenger");
@@ -100,16 +80,14 @@ index 697a070576fa0488787063fc1fb42d23e764a6c6..451cec7cd6285eb4ec677bbb8049e32a
 +                profiler.pop();
 +                return;
 +            }
-+            entity.tickCount++;
-+            entity.totalEntityAge++; // Paper - age-like counter for all entities
+             entity.commonTick();
              // Paper start - EAR 2
              if (isActive) {
-             entity.rideTick();
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index c3eacd2e085437557de1dbdef0abc23ba7d180bd..25bfa5319d4089bff778d3856df4acea15c40212 100644
+index 77ad8a568db9fd471c1fcfd007ca723889c9b640..ce4306652209372e68243ecdbf73f82832b57d40 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
-@@ -800,13 +800,16 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -810,13 +810,16 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
  
      public void doTick() {
          try {
@@ -127,7 +105,7 @@ index c3eacd2e085437557de1dbdef0abc23ba7d180bd..25bfa5319d4089bff778d3856df4acea
                      return;
                  }
                  if (!this.containerMenu.stillValid(this)) {
-@@ -918,16 +921,22 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -928,16 +931,22 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
              return false;
          }
  
@@ -152,7 +130,7 @@ index c3eacd2e085437557de1dbdef0abc23ba7d180bd..25bfa5319d4089bff778d3856df4acea
          return true;
      }
  
-@@ -1764,24 +1773,35 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1804,24 +1813,35 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
          final int targetMinChunkZ = targetChunkZ - ownerRadius;
          final int targetMaxChunkX = targetChunkX + ownerRadius;
          final int targetMaxChunkZ = targetChunkZ + ownerRadius;
@@ -205,7 +183,7 @@ index c3eacd2e085437557de1dbdef0abc23ba7d180bd..25bfa5319d4089bff778d3856df4acea
              }
          }
      }
-@@ -3311,7 +3331,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -3350,7 +3370,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
  
      @Override
      public boolean isImmobile() {
@@ -215,10 +193,10 @@ index c3eacd2e085437557de1dbdef0abc23ba7d180bd..25bfa5319d4089bff778d3856df4acea
  
      public void reset() {
 diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-index 7f5dc445c930a36afaad97782b856f74e4803606..2bb82cbf939f22928819db773c2047e8747dc154 100644
+index 6d1c1171d55245eca7dde70ca1c4cdb880011fe6..a936c7b0fd4a4743a1a710670a5b7d1cdca5c1e8 100644
 --- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-@@ -1907,6 +1907,14 @@ public class ServerGamePacketListenerImpl
+@@ -1964,6 +1964,14 @@ public class ServerGamePacketListenerImpl
      }
  
      public void internalTeleport(PositionMoveRotation destination, Set<Relative> relatives) {
@@ -233,7 +211,7 @@ index 7f5dc445c930a36afaad97782b856f74e4803606..2bb82cbf939f22928819db773c2047e8
          org.spigotmc.AsyncCatcher.catchOp("teleport", this.player); // Paper
          // Paper start - Prevent teleporting dead entities
          if (this.player.isRemoved()) {
-@@ -1929,7 +1937,9 @@ public class ServerGamePacketListenerImpl
+@@ -1986,7 +1994,9 @@ public class ServerGamePacketListenerImpl
              this.awaitingTeleport = 0;
          }
  
@@ -244,7 +222,7 @@ index 7f5dc445c930a36afaad97782b856f74e4803606..2bb82cbf939f22928819db773c2047e8
          this.player.teleportSetPosition(destination, relatives);
          this.awaitingPositionFromClient = this.player.position();
          // CraftBukkit start - update last location
-@@ -1946,16 +1956,22 @@ public class ServerGamePacketListenerImpl
+@@ -2003,16 +2013,22 @@ public class ServerGamePacketListenerImpl
          final PositionMoveRotation absoluteDestination = PositionMoveRotation.calculateAbsolute(PositionMoveRotation.of(this.player), destination, relatives);
          final Vec3 position = absoluteDestination.position();
          final ServerLevel level = this.player.level();
@@ -269,7 +247,7 @@ index 7f5dc445c930a36afaad97782b856f74e4803606..2bb82cbf939f22928819db773c2047e8
      }
  
      private boolean waitForPlayerChunkIfUnloaded(final ServerLevel level) {
-@@ -1964,19 +1980,25 @@ public class ServerGamePacketListenerImpl
+@@ -2021,19 +2037,25 @@ public class ServerGamePacketListenerImpl
              return false;
          }
  
@@ -298,10 +276,10 @@ index 7f5dc445c930a36afaad97782b856f74e4803606..2bb82cbf939f22928819db773c2047e8
      }
  
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index 321afd76dddce2fc980cfa2c874fd22bbd37e384..d114bf9e3e82bcb528b12e1c768c53b9b8a6de2e 100644
+index 4db9a808e194dae7e4a5c9079081cc2b72d3c57f..740abe3e1c0d83c46877a8da0cd5eeb81ce0df73 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
-@@ -161,34 +161,42 @@ public abstract class PlayerList {
+@@ -163,34 +163,42 @@ public abstract class PlayerList {
          final int minChunkZ = chunkPos.z() - radius;
          final int maxChunkX = chunkPos.x() + radius;
          final int maxChunkZ = chunkPos.z() + radius;
@@ -760,10 +738,10 @@ index 699ed1f7ee89c5646617368a1c41803bc1533cc5..f75fa8ee15efa0ee6b99c56409d5cd2e
 +    }
  }
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 357cdd17e6ca0a672941f765d5ed1a0b8a1c40fe..021e33657fc6e02e1321c6d78d138a11384e34b3 100644
+index e734ebbe7ddfe5814bcf9dcd2e373f966e727f0e..d9737f6128c0819fbf3b6f89add431ce6d2582e3 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -889,6 +889,10 @@ public abstract class Entity
+@@ -910,6 +910,10 @@ public abstract class Entity
          }
  
          if (this instanceof ServerPlayer) this.handlePortal(); // CraftBukkit - Moved up to postTick
@@ -774,7 +752,7 @@ index 357cdd17e6ca0a672941f765d5ed1a0b8a1c40fe..021e33657fc6e02e1321c6d78d138a11
          if (this.canSpawnSprintParticle()) {
              this.spawnSprintParticle();
          }
-@@ -3583,14 +3587,29 @@ public abstract class Entity
+@@ -3675,14 +3679,29 @@ public abstract class Entity
              this.setPortalCooldown();
          } else {
              if (this.portalProcess == null || !this.portalProcess.isSamePortal(portal)) {
@@ -805,19 +783,19 @@ index 357cdd17e6ca0a672941f765d5ed1a0b8a1c40fe..021e33657fc6e02e1321c6d78d138a11
      protected void handlePortal() {
          if (this.level() instanceof ServerLevel level) {
              this.processPortalCooldown();
-@@ -4079,6 +4098,7 @@ public abstract class Entity
+@@ -4188,6 +4207,7 @@ public abstract class Entity
  
      public final boolean isInvulnerableToBase(final DamageSource source) {
          return this.isRemoved()
 +            || this.isAwaitingPortalDestination()
-             || this.invulnerable && !source.is(DamageTypeTags.BYPASSES_INVULNERABILITY) && !source.isCreativePlayer()
+             || this.isInvulnerable() && !source.is(DamageTypeTags.BYPASSES_INVULNERABILITY) && !source.isCreativePlayer()
              || source.is(DamageTypeTags.IS_FIRE) && this.fireImmune()
              || source.is(DamageTypeTags.IS_FALL) && this.is(EntityTypeTags.FALL_DAMAGE_IMMUNE);
 diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
-index e23720de0df7759b1be384a4d118962ae6e23483..f3345a5846b0dd6442de3d52a5b21cb978b1a8e0 100644
+index 75634bc863327e9957b60831836fd29dbf165c64..a5d41946ef12f31d8969b03f8f92d7b6785a4e50 100644
 --- a/net/minecraft/world/entity/LivingEntity.java
 +++ b/net/minecraft/world/entity/LivingEntity.java
-@@ -3400,6 +3400,9 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+@@ -3395,6 +3395,9 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
          if (this instanceof ServerPlayer && this.level() != tickStartLevel) {
              return;
          }
@@ -990,10 +968,10 @@ index 5538a93f1ae5af424432e78d652fcf451b5946b3..e697cd58f93e4799ceec0843fe8fe589
          return this.portal.getLocalTransition();
      }
 diff --git a/net/minecraft/world/entity/player/Player.java b/net/minecraft/world/entity/player/Player.java
-index b7e07ce82d001b27816d8ebc030cd2194a022984..6c2521c124254a94ffe7fae0aa7f8e87f1e71268 100644
+index 41014e2a5106bb047aaa1b55de6b40d3618a4120..40a170b11d1a52d97414e9e06ec09acada74d348 100644
 --- a/net/minecraft/world/entity/player/Player.java
 +++ b/net/minecraft/world/entity/player/Player.java
-@@ -279,7 +279,7 @@ public abstract class Player extends Avatar implements ContainerUser {
+@@ -280,7 +280,7 @@ public abstract class Player extends Avatar implements ContainerUser {
  
          this.updateIsUnderwater();
          super.tick();
@@ -1003,10 +981,10 @@ index b7e07ce82d001b27816d8ebc030cd2194a022984..6c2521c124254a94ffe7fae0aa7f8e87
          }
          int maxPositionOffset = 29999999;
 diff --git a/net/minecraft/world/level/block/EndPortalBlock.java b/net/minecraft/world/level/block/EndPortalBlock.java
-index 27e1443322c79d94a0669d617052ba7f20d2cdfe..ba47f21de3dbb698342b29c63d47642f2041afe9 100644
+index 98b15e6454cc444eb23a04c9e777c873544209df..d34eaeabb2082f9cc1677571c278c7de2b3e7675 100644
 --- a/net/minecraft/world/level/block/EndPortalBlock.java
 +++ b/net/minecraft/world/level/block/EndPortalBlock.java
-@@ -210,14 +210,20 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
+@@ -203,14 +203,20 @@ public class EndPortalBlock extends BaseEntityBlock implements Portal {
                  });
          });
  
@@ -1030,10 +1008,10 @@ index 27e1443322c79d94a0669d617052ba7f20d2cdfe..ba47f21de3dbb698342b29c63d47642f
      }
  
 diff --git a/net/minecraft/world/level/block/NetherPortalBlock.java b/net/minecraft/world/level/block/NetherPortalBlock.java
-index ff7926d06a96069e7dabd1b147393ae91b5a3528..79bd1a02e47aed8dff8e3325c48db28bd2924bc1 100644
+index 11bbc9d5a88331c5317942fc32262586afc42c49..3c348471ad2134404e8206c1f7d060940aeafc3b 100644
 --- a/net/minecraft/world/level/block/NetherPortalBlock.java
 +++ b/net/minecraft/world/level/block/NetherPortalBlock.java
-@@ -10,7 +10,7 @@ import net.minecraft.core.Direction;
+@@ -9,7 +9,7 @@ import net.minecraft.core.Direction;
  import net.minecraft.core.particles.ParticleTypes;
  import net.minecraft.resources.ResourceKey;
  import net.minecraft.server.level.ServerLevel;
@@ -1042,7 +1020,7 @@ index ff7926d06a96069e7dabd1b147393ae91b5a3528..79bd1a02e47aed8dff8e3325c48db28b
  import net.minecraft.sounds.SoundEvents;
  import net.minecraft.sounds.SoundSource;
  import net.minecraft.util.BlockUtil;
-@@ -35,6 +35,7 @@ import net.minecraft.world.level.block.state.StateDefinition;
+@@ -34,6 +34,7 @@ import net.minecraft.world.level.block.state.StateDefinition;
  import net.minecraft.world.level.block.state.properties.BlockStateProperties;
  import net.minecraft.world.level.block.state.properties.EnumProperty;
  import net.minecraft.world.level.border.WorldBorder;
@@ -1050,7 +1028,7 @@ index ff7926d06a96069e7dabd1b147393ae91b5a3528..79bd1a02e47aed8dff8e3325c48db28b
  import net.minecraft.world.level.dimension.DimensionType;
  import net.minecraft.world.level.gamerules.GameRules;
  import net.minecraft.world.level.portal.PortalForcer;
-@@ -187,7 +188,7 @@ public class NetherPortalBlock extends Block implements Portal {
+@@ -180,7 +181,7 @@ public class NetherPortalBlock extends Block implements Portal {
          newWorldBorder = newLevel.getWorldBorder();
          approximateExitPos = newWorldBorder.clampToBounds(result.to().getX(), result.to().getY(), result.to().getZ());
          SourcePortalInfo sourcePortal = getSourcePortalInfo(entity, portalEntryPos);
@@ -1059,7 +1037,7 @@ index ff7926d06a96069e7dabd1b147393ae91b5a3528..79bd1a02e47aed8dff8e3325c48db28b
          // CraftBukkit end
      }
  
-@@ -195,83 +196,118 @@ public class NetherPortalBlock extends Block implements Portal {
+@@ -188,86 +189,118 @@ public class NetherPortalBlock extends Block implements Portal {
          final ServerLevel newLevel,
          final Entity entity,
          final BlockPos approximateExitPos,
@@ -1150,6 +1128,9 @@ index ff7926d06a96069e7dabd1b147393ae91b5a3528..79bd1a02e47aed8dff8e3325c48db28b
 -            );
 -            post = TeleportTransition.PLAY_PORTAL_SOUND.then(e -> e.placePortalTicket(pos));
 -        } else if (result.canCreatePortal()) { // CraftBukkit
+-            if (entity.isSpectator()) {
+-                return null;
+-            }
 -            Optional<BlockUtil.FoundRectangle> createdExit = newLevel.getPortalForcer().createPortal(approximateExitPos, sourcePortal.axis(), entity, result.createRadius()); // CraftBukkit
 -            if (createdExit.isEmpty()) {
 -                // LOGGER.error("Unable to create a portal, likely target out of worldborder"); // CraftBukkit

@@ -5,10 +5,10 @@ Subject: [PATCH] Serialize contended compatibility callbacks
 
 
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d0e60a97b 100644
+index f53ab18e66cff8223a1494146577cce1f509c045..c892e32d3af92a15672fb2b795c24960b5e23dd1 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-@@ -5,6 +5,7 @@ import com.destroystokyo.paper.event.server.ServerExceptionEvent;
+@@ -4,6 +4,7 @@ import com.destroystokyo.paper.event.server.ServerExceptionEvent;
  import com.destroystokyo.paper.exception.ServerEventException;
  import com.google.common.collect.Sets;
  import io.papermc.paper.plugin.manager.compat.CompatibilityApartment;
@@ -16,7 +16,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
  import io.papermc.paper.plugin.manager.compat.CompatibilityKernel;
  import io.papermc.paper.plugin.manager.compat.CompatibilityRuntimeContext;
  import io.papermc.paper.plugin.manager.compat.CompatibilityTransaction;
-@@ -16,9 +17,7 @@ import java.util.HashMap;
+@@ -15,9 +16,7 @@ import java.util.HashMap;
  import java.util.HashSet;
  import java.util.Map;
  import java.util.Set;
@@ -26,7 +26,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
  import org.bukkit.Server;
  import org.bukkit.Warning;
  import org.bukkit.event.Event;
-@@ -35,21 +34,6 @@ import org.jetbrains.annotations.NotNull;
+@@ -34,21 +33,6 @@ import org.jetbrains.annotations.NotNull;
  
  class PaperEventManager {
  
@@ -48,7 +48,11 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
      private final Server server;
      private final CompatibilityKernel compatibilityKernel;
  
-@@ -70,13 +54,18 @@ class PaperEventManager {
+@@ -66,17 +50,22 @@ class PaperEventManager {
+         // Loom start - defer synchronous events fired on a region worker thread during parallel ticking to
+         // the owning (main) thread's serial replay, so plugin handlers run single-threaded as under serial
+         // ticking. This keeps legacy main-thread-only plugins safe with the parallel flags enabled.
+-        if (!event.isAsynchronous() && net.minecraft.server.threading.RegionTickStaging.stageEvent(event)) {
 +        // Explosion callers consume cancellation, radius, yield and the mutable block list before
 +        // returning. Use the owner/compatibility dispatch below so listeners decide before side effects.
 +        final boolean explosionDecision = event instanceof org.bukkit.event.entity.ExplosionPrimeEvent
@@ -59,7 +63,6 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
 +        if (explosionDecision) {
 +            net.minecraft.server.threading.RegionTickStaging.stageDecisionBoundary();
 +        }
--        if (!event.isAsynchronous() && net.minecraft.server.threading.RegionTickStaging.stageEvent(event)) {
 +        if (!event.isAsynchronous() && !explosionDecision && net.minecraft.server.threading.RegionTickStaging.stageEvent(event)) {
              return;
          }
@@ -70,13 +73,14 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
 -        // running them inline on a worker and then REFUSING them on apartment contention (which silently
 -        // dropped e.g. WorldGuard's protection listeners). Staged-veto events (cancellation gating a
 -        // synchronous side effect) are intentionally NOT deferred and fall through unchanged.
+-        if (!event.isAsynchronous() && net.minecraft.server.threading.RegionTickStaging.deferEventToOwner(event)) {
 +        // Events fired on a region worker outside a staging window are routed back to their owner here.
 +        // Staged-veto events, whose cancellation gates a synchronous side effect, fall through unchanged.
--        if (!event.isAsynchronous() && net.minecraft.server.threading.RegionTickStaging.deferEventToOwner(event)) {
 +        if (!event.isAsynchronous() && !explosionDecision && net.minecraft.server.threading.RegionTickStaging.deferEventToOwner(event)) {
              return;
          }
-@@ -130,14 +109,6 @@ class PaperEventManager {
+         // Loom end
+@@ -129,14 +118,6 @@ class PaperEventManager {
                      );
                  }
  
@@ -91,7 +95,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
                  final CompatibilityTransaction.ListenerSnapshot beforeListener = transaction.beforeListener(lane);
                  final long callbackStart = System.nanoTime();
  
-@@ -157,9 +128,6 @@ class PaperEventManager {
+@@ -156,9 +137,6 @@ class PaperEventManager {
                              this.compatibilityKernel.diagnostics().recordStrictFallback(profile, "strict policy for " + event.getEventName());
                              this.callThroughApartment(registration, event, transaction, profile, true, plan.path());
                          }
@@ -101,7 +105,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
                      }
                  } catch (final AuthorNagException ex) {
                      if (plugin.isNaggable()) {
-@@ -207,67 +175,18 @@ class PaperEventManager {
+@@ -206,67 +184,18 @@ class PaperEventManager {
          final String path
      ) throws Throwable {
          final CompatibilityApartment apartment = this.compatibilityKernel.apartmentFor(registration.getPlugin());
@@ -177,7 +181,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
                  } finally {
                      this.compatibilityKernel.diagnostics().recordOwnerRpcWait(
                          profile,
-@@ -281,43 +200,6 @@ class PaperEventManager {
+@@ -280,43 +209,6 @@ class PaperEventManager {
          }
      }
  
@@ -221,7 +225,7 @@ index b1ab3e07c85ab7371868ad451f1645f0743fde9a..2dfab5491fafcc1d910cb77568aed92d
      private void callListener(
          final RegisteredListener registration,
          final Event event,
-@@ -330,11 +212,6 @@ class PaperEventManager {
+@@ -329,11 +221,6 @@ class PaperEventManager {
          }
      }
  
@@ -1842,7 +1846,9 @@ diff --git a/src/test/java/org/bukkit/support/suite/NormalTestSuite.java b/src/t
 index 625d88420c9f0f0828aae1ff9f22103b44ace76e..1292c4595bf0acc5b149e17f4c93da3f8ffbc3f3 100644
 --- a/src/test/java/org/bukkit/support/suite/NormalTestSuite.java
 +++ b/src/test/java/org/bukkit/support/suite/NormalTestSuite.java
-@@ -3,4 +3,5 @@
+@@ -1,6 +1,7 @@
+ package org.bukkit.support.suite;
+ 
  import org.junit.platform.suite.api.ConfigurationParameter;
 +import org.junit.platform.suite.api.ExcludePackages;
  import org.junit.platform.suite.api.IncludeTags;

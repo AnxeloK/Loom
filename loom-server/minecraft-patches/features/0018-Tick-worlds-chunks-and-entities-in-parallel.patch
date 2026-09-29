@@ -85,10 +85,10 @@ index 328784ba08236553e49d62320b79f7222292412f..9448f253d2a0b6806a4c3bae5f99d966
  
      protected static final class NoOpCallback implements EntityInLevelCallback {
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 5fb98e98f87d03a472acba516b004ffd4c15c7de..f6b2a36b7ad6ed9f7f576d19be5e0d3d3f521343 100644
+index bef527f4677df09b87d8da49b5d779133a9f0d89..97a8f0c399975ee55aa6098e60d4ec4b0b4b36e3 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -479,6 +479,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -474,6 +474,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          // if we execute too many tasks, that's fine - we have logic to correctly handle overuse of allocated time.
          boolean executed = false;
          for (final ServerLevel world : this.getAllLevels()) {
@@ -101,7 +101,7 @@ index 5fb98e98f87d03a472acba516b004ffd4c15c7de..f6b2a36b7ad6ed9f7f576d19be5e0d3d
              long currTime = System.nanoTime();
              if (currTime - ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)world).moonrise$getLastMidTickFailure() <= TASK_EXECUTION_FAILURE_BACKOFF) {
                  continue;
-@@ -1997,21 +2003,28 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1978,21 +1984,28 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.updateEffectiveRespawnData();
  
          this.isIteratingOverLevels = true; // Paper - Throw exception on world create while being ticked
@@ -134,7 +134,7 @@ index 5fb98e98f87d03a472acba516b004ffd4c15c7de..f6b2a36b7ad6ed9f7f576d19be5e0d3d
                  level.fillReportDetails(report);
                  throw new ReportedException(report);
              } finally {
-@@ -2019,10 +2032,8 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2000,10 +2013,8 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              }
              net.minecraft.server.threading.TickRegions.postWorldTick(level);
  
@@ -147,10 +147,10 @@ index 5fb98e98f87d03a472acba516b004ffd4c15c7de..f6b2a36b7ad6ed9f7f576d19be5e0d3d
  
          profiler.popPush("connection");
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
-index 2528158d9b6aaeb2fb35f6a77ad130cc354104a7..e49147a4ae0288148da1cb0a0f2378fa519739ee 100644
+index 7ce6a4588e61d10214d29aa6a03ff060a50be23b..ba7894cce76ead632003429bbaa9ba8731f92eed 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
-@@ -174,6 +174,54 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+@@ -178,6 +178,54 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
          final int size = entityTickingChunks.size();
  
          java.util.Objects.checkFromToIndex(0, size, raw.length);
@@ -205,7 +205,7 @@ index 2528158d9b6aaeb2fb35f6a77ad130cc354104a7..e49147a4ae0288148da1cb0a0f2378fa
          for (int i = 0; i < size; ++i) {
              world.tickChunk(raw[i], randomTickSpeed);
  
-@@ -183,6 +231,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+@@ -187,6 +235,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
                  continue;
              }
          }
@@ -215,10 +215,10 @@ index 2528158d9b6aaeb2fb35f6a77ad130cc354104a7..e49147a4ae0288148da1cb0a0f2378fa
      // Paper end - chunk tick iteration optimisations
  
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index f17c6922a73b86a1af9fb8d8ca0bfb484f643ae0..f39673692009c5047310048d952b4b7fd76fa0f3 100644
+index 903b075d3e76bf22970422626b91260edb7e3a8d..3eb0804b4b81bbb89949ddd4b887d68c9447d5c7 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -930,40 +930,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -937,40 +937,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
                  loomDiagnostics.record(LoomTickSectionDiagnostics.ENTITY_ACTIVATION, now - loomEntitySectionStart);
                  loomEntitySectionStart = now;
              }
@@ -262,7 +262,7 @@ index f17c6922a73b86a1af9fb8d8ca0bfb484f643ae0..f39673692009c5047310048d952b4b7f
              profiler.popPush("blockEntities");
              final long loomBlockEntitiesStart = loomDiagnostics == null ? 0L : System.nanoTime();
              this.tickBlockEntities();
-@@ -1077,7 +1046,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1085,7 +1054,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      private void optimiseRandomTick(final LevelChunk chunk, final int tickSpeed) {
          final LevelChunkSection[] sections = chunk.getSections();
          final int minSection = ca.spottedleaf.moonrise.common.util.WorldUtil.getMinSection((ServerLevel)(Object)this);
@@ -275,7 +275,7 @@ index f17c6922a73b86a1af9fb8d8ca0bfb484f643ae0..f39673692009c5047310048d952b4b7f
          final boolean doubleTickFluids = !ca.spottedleaf.moonrise.common.PlatformHooks.get().configFixMC224294();
  
          final ChunkPos cpos = chunk.getPos();
-@@ -1124,7 +1097,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1132,7 +1105,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      // Paper end - optimise random ticking
  
      public void tickChunk(final LevelChunk chunk, final int tickSpeed) {
@@ -284,7 +284,7 @@ index f17c6922a73b86a1af9fb8d8ca0bfb484f643ae0..f39673692009c5047310048d952b4b7f
          ChunkPos chunkPos = chunk.getPos();
          int minX = chunkPos.getMinBlockX();
          int minZ = chunkPos.getMinBlockZ();
-@@ -1497,6 +1470,115 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1505,6 +1478,115 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      }
      // Paper end - log detailed entity tick information
  
@@ -400,7 +400,7 @@ index f17c6922a73b86a1af9fb8d8ca0bfb484f643ae0..f39673692009c5047310048d952b4b7f
      public void tickNonPassenger(final Entity entity) {
          // Paper start - log detailed entity tick information
          ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(entity, "Cannot tick an entity off-main");
-@@ -1698,6 +1780,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1702,6 +1784,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
      @Override
      public boolean addFreshEntity(final Entity entity, final org.bukkit.event.entity.CreatureSpawnEvent.@Nullable SpawnReason reason) {
@@ -412,7 +412,7 @@ index f17c6922a73b86a1af9fb8d8ca0bfb484f643ae0..f39673692009c5047310048d952b4b7f
          return this.addEntity(entity, reason);
          // CraftBukkit end
      }
-@@ -2357,18 +2444,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2621,18 +2708,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
          for (ServerLevel otherLevel : this.getServer().getAllLevels()) {
              if (otherLevel != this) {
@@ -1267,10 +1267,10 @@ index 745f26d36a30a9f570bc989b97002c2723db4ba8..1c698d2d2cb9f2693876839b5a2fd0b1
  
      public static <T, U> BiPredicate<T, U> rememberPositives(final int invocations, final BiPredicate<T, U> predicate) {
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index b8de0a50895176645c4828cb49acc03074b40b0d..3a800d1f1256a793c229a4a1ae22979278119f68 100644
+index 18208c62e2beb68af12e0ca50368fb0cf0060735..66aff157c552db2d633b3f6857f4da83435cd587 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
-@@ -1054,6 +1054,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1047,6 +1047,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
  
      @Override
      public boolean setBlock(final BlockPos pos, final BlockState blockState, final @Block.UpdateFlags int updateFlags, final int updateLimit) {
@@ -1282,7 +1282,7 @@ index b8de0a50895176645c4828cb49acc03074b40b0d..3a800d1f1256a793c229a4a1ae229792
          // CraftBukkit start - tree generation
          if (this.captureTreeGeneration) {
              // Paper start - Protect Bedrock and End Portal/Frames from being destroyed
-@@ -1320,10 +1325,70 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1310,10 +1315,70 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
              return Blocks.VOID_AIR.defaultBlockState();
          }
  
@@ -1353,7 +1353,7 @@ index b8de0a50895176645c4828cb49acc03074b40b0d..3a800d1f1256a793c229a4a1ae229792
      @Override
      public FluidState getFluidState(final BlockPos pos) {
          if (!this.isInValidBounds(pos)) {
-@@ -1528,7 +1593,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1529,7 +1594,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
              entity.discard(org.bukkit.event.entity.EntityRemoveEvent.Cause.DISCARD);
              // Paper end - Prevent block entity and entity crashes
          }

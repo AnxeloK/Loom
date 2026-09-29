@@ -5,12 +5,12 @@ Subject: [PATCH] Write level data on the async-I/O owner
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 03953a7e19d9fc286d8f085aa2ed89ef049a71d1..fb3ee08f9a7bf8112a3ee5e4b44d7c8191ce98aa 100644
+index 12f39182c5093528a9aae0fe6b8fc9ac803dab20..13b3c06b9a5def80d9d23e37872621561377e513 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -1035,8 +1035,27 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1027,8 +1027,27 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.scoreboard.storeToSaveDataIfDirty(this.getDataStorage().computeIfAbsent(ScoreboardSaveData.TYPE));
- 
+         // Paper end - split out global level data
          GameProfile singleplayerProfile = this.getSingleplayerProfile();
 -        this.storageSource.saveDataTag(this.worldData, singleplayerProfile == null ? null : singleplayerProfile.id());
 +        // Loom - the snapshot is built here because it reads mutable world state, but compressing and
@@ -37,7 +37,7 @@ index 03953a7e19d9fc286d8f085aa2ed89ef049a71d1..fb3ee08f9a7bf8112a3ee5e4b44d7c81
              this.savedDataStorage.saveAndJoin();
          } else {
              this.savedDataStorage.scheduleSave();
-@@ -1103,6 +1122,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1095,6 +1114,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              // removes the subsequent durability wait; every vanilla save is still scheduled.
              savedAny = this.saveAllChunks(silent, false, force);
              if (flush) {
@@ -82,7 +82,7 @@ index 49a89fad126f8a93c29f842c2db0ac76c18dc183..7a0b5dc6b76d722dcaa5e54e943a1b5c
          if (OwnerDomainExecutor.canRunSynchronousCallbacks()) {
              final org.bukkit.plugin.Plugin plugin = CompatibilityRuntimeContext.currentPlugin();
 diff --git a/net/minecraft/world/level/storage/LevelStorageSource.java b/net/minecraft/world/level/storage/LevelStorageSource.java
-index 6f24eb34e0ecc2b03371c585a9538e9337a2295a..e4832799c9d9fcbaf7d86ad50866cebee876bdd2 100644
+index 01b4ea4159d1885c4f409cca85297342bf485d56..6bd9ed4c55e18084a1a1222c13b213034eae3e65 100644
 --- a/net/minecraft/world/level/storage/LevelStorageSource.java
 +++ b/net/minecraft/world/level/storage/LevelStorageSource.java
 @@ -63,6 +63,7 @@ import net.minecraft.server.packs.repository.PackRepository;

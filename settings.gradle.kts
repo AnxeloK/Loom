@@ -13,6 +13,8 @@ plugins {
 rootProject.name = "loom"
 include("loom-api")
 include("loom-server")
+include("paper-checkstyle")
+file("paper-checkstyle").mkdirs()
 
 gradle.lifecycle.beforeProject {
     val mcVersion = providers.gradleProperty("mcVersion").get().trim()

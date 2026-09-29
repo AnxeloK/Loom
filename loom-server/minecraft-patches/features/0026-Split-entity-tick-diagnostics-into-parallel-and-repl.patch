@@ -34,10 +34,10 @@ index 85da845af413754031e7ebfb94e2f7bd20412a22..59646a42ece4492d027baa0c2c182dd2
  
      private final long[] currentNanos = new long[SECTION_COUNT];
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index f39673692009c5047310048d952b4b7fd76fa0f3..23543d1174247fadba959f3d66cef5c67a3a057d 100644
+index 3eb0804b4b81bbb89949ddd4b887d68c9447d5c7..182d10a48f46ea3dfd980fc1c2663e6ee510d130 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -1567,8 +1567,17 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1575,8 +1575,17 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
                  }
              }));
          }

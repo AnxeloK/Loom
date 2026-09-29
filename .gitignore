@@ -14,3 +14,6 @@ build
 /paper-api-generator
 
 .idea/
+
+/paper-checkstyle/
+/.checkstyle/

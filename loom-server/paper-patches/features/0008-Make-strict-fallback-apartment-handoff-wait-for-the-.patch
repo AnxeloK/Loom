@@ -14,10 +14,10 @@ event dispatches degrade to the owner-domain transient-refusal path on
 timeout, service calls still throw since they must return a value.
 
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-index 63e0196fefb712c545116ebea8a80c99a4e233ee..b1ab3e07c85ab7371868ad451f1645f0743fde9a 100644
+index c2dc1b0f8b245345a7c16c9aea4fe9a55e9c36c7..f53ab18e66cff8223a1494146577cce1f509c045 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-@@ -42,6 +42,13 @@ class PaperEventManager {
+@@ -41,6 +41,13 @@ class PaperEventManager {
      private static final long APARTMENT_CONTENTION_WAIT_NANOS = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(
          Math.max(0L, Long.getLong("Loom.CompatApartmentWaitMillis", 5L))
      );
@@ -31,7 +31,7 @@ index 63e0196fefb712c545116ebea8a80c99a4e233ee..b1ab3e07c85ab7371868ad451f1645f0
  
      private final Server server;
      private final CompatibilityKernel compatibilityKernel;
-@@ -222,9 +229,31 @@ class PaperEventManager {
+@@ -221,9 +228,31 @@ class PaperEventManager {
                  final long handoffStart = System.nanoTime();
                  try {
                      apartment.submitStrictFallback(() -> {

@@ -5,7 +5,7 @@ Subject: [PATCH] Resume chunk post-processing after neighbor loads
 
 
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
-index c4fa7ec6c3f311c76c0239008b6e5908d3584d62..7382e40b0175b93aba9c3a234f932a02c1d0e194 100644
+index 784bcd598d6482316783f62785dd081f16a6e4c6..ee186e3976565697955950117fe4cd3f94dd3a79 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
 @@ -1491,8 +1491,14 @@ public final class RegionizedPlayerChunkLoader {
@@ -25,7 +25,7 @@ index c4fa7ec6c3f311c76c0239008b6e5908d3584d62..7382e40b0175b93aba9c3a234f932a02
                          ++diagnostics.postProcessedChunks;
                          diagnostics.postProcessNanos += postProcessDone - postProcessStart;
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
-index 9a9a599ef178f851ee5c783631a724013a693586..af17f9006e9d3a36b6b25e21651a8dd8d30a406f 100644
+index 7a0006f9b56d1e43b06f9f7452e1b5bb0ec53e72..5a9c1341723fe0244d85c154df2c1300086ffd0c 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
 @@ -1194,6 +1194,10 @@ public final class NewChunkHolder {
@@ -50,10 +50,10 @@ index 9a9a599ef178f851ee5c783631a724013a693586..af17f9006e9d3a36b6b25e21651a8dd8
                          this.changeEntityChunkStatus(FullChunkStatus.BLOCK_TICKING);
                          PlatformHooks.get().onChunkTicking(chunk, this.vanillaChunkHolder);
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 81f10744a0fcf32a750b07feec863c18bac0350c..08157a2715fde6887043ff7f55e5f5bf6b233a58 100644
+index d4277b95680c16c53881d42ed635ac3ca8b9ce96..43663708048eb85735e72a3228a13f968c85247b 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2170,6 +2170,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2161,6 +2161,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
                  net.minecraft.server.threading.TickRegions.pushLevelContext(level);
  
              try {
@@ -194,18 +194,19 @@ index ffc7103102639214c60201a213df3ad042a05c85..0b4f17076ea84112c6ae5b93865f0825
              level,
              owner.chunkX(),
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
-index 72cd3eb5cd0832abccdfb15f985d1ca306bbe49e..25f48bec232c33f36a38b36ebccc9ef3790fac33 100644
+index ff5dde4a8ca50e9bcfcb58914ea2c4a57ff5250f..c5b04accb2aba5a83fa352775c0539ef69958cdd 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
 +++ b/net/minecraft/world/level/chunk/LevelChunk.java
-@@ -11,6 +11,7 @@ import java.util.Collections;
+@@ -11,6 +11,8 @@ import java.util.Collections;
  import java.util.List;
  import java.util.Map;
  import java.util.Map.Entry;
 +import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
- import java.util.function.Consumer;
++import java.util.function.Consumer;
  import java.util.function.Supplier;
  import net.minecraft.CrashReport;
-@@ -104,7 +105,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+ import net.minecraft.CrashReportCategory;
+@@ -103,7 +105,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
      boolean loadedTicketLevel;
      // Paper end
      // Paper start - rewrite chunk system
@@ -217,7 +218,7 @@ index 72cd3eb5cd0832abccdfb15f985d1ca306bbe49e..25f48bec232c33f36a38b36ebccc9ef3
      private ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder chunkAndHolder;
  
      @Override
-@@ -121,6 +125,97 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+@@ -120,6 +125,97 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
      public final void moonrise$setChunkHolder(final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder holder) {
          this.chunkAndHolder = holder;
      }

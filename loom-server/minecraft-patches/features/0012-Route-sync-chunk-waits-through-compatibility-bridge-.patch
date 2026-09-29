@@ -5,7 +5,7 @@ Subject: [PATCH] Route sync chunk waits through compatibility bridge mode
 
 
 diff --git a/net/minecraft/server/dedicated/DedicatedServer.java b/net/minecraft/server/dedicated/DedicatedServer.java
-index 0b6d7f99edde802cb464baa5a4b2b4a4dcce684a..8a10107363ab4f35ad983154210d396056b7775a 100644
+index 68675926ee85f738b3693a76fc29b80b80c717ed..09fbab51a7f81f10a9b8b8a4cf216e0645438361 100644
 --- a/net/minecraft/server/dedicated/DedicatedServer.java
 +++ b/net/minecraft/server/dedicated/DedicatedServer.java
 @@ -237,6 +237,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
@@ -17,10 +17,10 @@ index 0b6d7f99edde802cb464baa5a4b2b4a4dcce684a..8a10107363ab4f35ad983154210d3960
          this.server.spark.enableEarlyIfRequested(); // Paper - spark
          // Paper start - fix converting txt to json file; convert old users earlier after PlayerList creation but before file load/save
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
-index 2dd623796c90d88c0ebb32003165e7a9b4ea7f44..a5d8754739559ef39126d538e61992a4251cb54a 100644
+index 0181f94880d17b8801e1c8b987188595b912f205..cd9067b37b9061ef0df068fdbaedeec31555148c 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
-@@ -118,7 +118,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+@@ -122,7 +122,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
          if (!completable.isDone()) {
              ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.pushChunkWait(this.level, chunkX, chunkZ);
              try {

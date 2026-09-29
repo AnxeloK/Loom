@@ -19,7 +19,7 @@ index a814512fcfb85312474ae2c2c21443843bf57831..1d7cba490e4024a192503711963684c7
  
      public MoonriseRegionFileIO.RegionDataController.WriteData moonrise$startWrite(
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/io/MoonriseRegionFileIO.java b/ca/spottedleaf/moonrise/patches/chunk_system/io/MoonriseRegionFileIO.java
-index 3bb9b58ee97464687e348e23b99159226415c267..997dcfda4407977c932e034eb8bf239cc6a6ccbf 100644
+index 775d93d35855e394e5eccf0ad80eca43b1ed9562..f63bb55f57ac053f22a4b2fa533b36a088dfb089 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/io/MoonriseRegionFileIO.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/io/MoonriseRegionFileIO.java
 @@ -17,6 +17,7 @@ import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
@@ -71,7 +71,7 @@ index 3bb9b58ee97464687e348e23b99159226415c267..997dcfda4407977c932e034eb8bf239c
      public static void flush(final ServerLevel world) {
          for (final RegionFileType regionFileType : CACHED_REGIONFILE_TYPES) {
              flush(world, regionFileType);
-@@ -962,6 +990,8 @@ public final class MoonriseRegionFileIO {
+@@ -966,6 +994,8 @@ public final class MoonriseRegionFileIO {
          private RegionDataController.ReadData readData;
          private RegionDataController.WriteData writeData;
          private boolean failedWrite;
@@ -80,7 +80,7 @@ index 3bb9b58ee97464687e348e23b99159226415c267..997dcfda4407977c932e034eb8bf239c
  
          public ChunkIOTask(final ServerLevel world, final RegionDataController regionDataController,
                             final int chunkX, final int chunkZ, final Priority priority, final InProgressRead inProgressRead) {
-@@ -973,6 +1003,29 @@ public final class MoonriseRegionFileIO {
+@@ -977,6 +1007,29 @@ public final class MoonriseRegionFileIO {
              this.inProgressRead = inProgressRead;
          }
  
@@ -110,7 +110,7 @@ index 3bb9b58ee97464687e348e23b99159226415c267..997dcfda4407977c932e034eb8bf239c
          public Priority getPriority() {
              synchronized (this) {
                  return this.priority;
-@@ -1450,9 +1503,54 @@ public final class MoonriseRegionFileIO {
+@@ -1523,9 +1576,54 @@ public final class MoonriseRegionFileIO {
          }
  
          final void endTask(final ChunkIOTask task) {
@@ -166,7 +166,7 @@ index 3bb9b58ee97464687e348e23b99159226415c267..997dcfda4407977c932e034eb8bf239c
              return this.inProgressTasks.get() != 0L;
          }
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..81f10744a0fcf32a750b07feec863c18bac0350c 100644
+index 622ca4115986b9202f0fca2c4347388af53ead9a..d4277b95680c16c53881d42ed635ac3ca8b9ce96 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -36,6 +36,7 @@ import java.util.Map.Entry;
@@ -177,9 +177,9 @@ index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..81f10744a0fcf32a750b07feec863c18
  import java.util.concurrent.atomic.AtomicReference;
  import java.util.concurrent.locks.LockSupport;
  import java.util.function.BooleanSupplier;
-@@ -309,7 +310,9 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
-     public PotionBrewing potionBrewing;
-     private FuelValues fuelValues;
+@@ -304,7 +305,9 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     protected WorldData worldData;
+     private LevelData.RespawnData effectiveRespawnData = LevelData.RespawnData.DEFAULT;
      private int emptyTicks;
 -    private volatile boolean isSaving;
 +    private final AtomicInteger activeSaveOperations = new AtomicInteger();
@@ -188,34 +188,32 @@ index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..81f10744a0fcf32a750b07feec863c18
      private final SuppressedExceptionCollector suppressedExceptions = new SuppressedExceptionCollector();
      private final DiscontinuousFrame tickFrame;
      private final PacketProcessor packetProcessor;
-@@ -991,17 +994,20 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
-         // Paper - move to saveGlobalData()
- 
-         if (flush) {
--            for (ServerLevel level : this.getAllLevels()) {
--                String storageName = level.getChunkSource().chunkMap.getStorageName();
--                LOGGER.info("ThreadedAnvilChunkStorage ({}): All chunks are saved", LEGACY_WORLD_NAMES_FOR_REALMS_LOG.getOrDefault(storageName, storageName));
--            }
--
--            LOGGER.info("ThreadedAnvilChunkStorage: All dimensions are saved");
-+            this.logChunkSaveCompletion(this.getAllLevels());
+@@ -981,10 +984,23 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             result = true;
          }
  
+-        // Paper start - split out global level data
++        // Paper - move to saveGlobalData()
++
++        if (flush) {
++            this.logChunkSaveCompletion(this.getAllLevels());
++        }
++
          return result;
      }
  
 +    private void logChunkSaveCompletion(final Iterable<ServerLevel> levels) {
 +        for (final ServerLevel level : levels) {
-+            final String storageName = level.getChunkSource().chunkMap.getStorageName();
-+            LOGGER.info("ThreadedAnvilChunkStorage ({}): All chunks are saved", LEGACY_WORLD_NAMES_FOR_REALMS_LOG.getOrDefault(storageName, storageName));
++            LOGGER.info("ThreadedAnvilChunkStorage ({}): All chunks are saved", level.dimension().identifier());
 +        }
 +        LOGGER.info("ThreadedAnvilChunkStorage: All dimensions are saved");
 +    }
 +
-     // Paper start - split out global level data
++    // Paper start - split out global level data
      public void saveGlobalData(final boolean flush) {
          this.scoreboard.storeToSaveDataIfDirty(this.getDataStorage().computeIfAbsent(ScoreboardSaveData.TYPE));
-@@ -1018,16 +1024,131 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         // Paper end - split out global level data
+@@ -1000,15 +1016,130 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
  
      public boolean saveEverything(final boolean silent, final boolean flush, final boolean force) {
          try {
@@ -286,7 +284,7 @@ index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..81f10744a0fcf32a750b07feec863c18
 +            }
 +        } catch (final Throwable throwable) {
 +            schedulingFailure = throwable;
-         }
++        }
 +
 +        final boolean saveResult = savedAny;
 +        final Throwable initialFailure = schedulingFailure;
@@ -302,8 +300,8 @@ index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..81f10744a0fcf32a750b07feec863c18
 +                result.completeExceptionally(failure == null ? rejected : failure);
 +            }
 +        });
-     }
- 
++    }
++
 +    private void completeAsyncSave(
 +        final List<ServerLevel> levels,
 +        final boolean flush,
@@ -342,14 +340,13 @@ index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..81f10744a0fcf32a750b07feec863c18
 +        if (remaining < 0) {
 +            this.activeSaveOperations.set(0);
 +            throw new IllegalStateException("Save operation accounting underflow");
-+        }
-+    }
+         }
+     }
 +    // Loom end - owner-domain save transaction
-+
+ 
      @Override
      public void close() {
-         this.stopServer();
-@@ -1070,7 +1191,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1052,7 +1183,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          }
          // CraftBukkit end
          this.getConnection().stop();
@@ -358,7 +355,7 @@ index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..81f10744a0fcf32a750b07feec863c18
          if (this.playerList != null) {
              LOGGER.info("Saving players");
              this.playerList.saveAll();
-@@ -1107,7 +1228,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1088,7 +1219,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
  
          this.saveAllChunks(false, true, false, true); // Paper - rewrite chunk system
  
@@ -367,7 +364,7 @@ index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..81f10744a0fcf32a750b07feec863c18
          this.savedDataStorage.close();
          this.resources.close();
  
-@@ -1157,6 +1278,28 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1138,6 +1269,28 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.halt(wait, false);
      }
      public void halt(final boolean wait, final boolean isRestarting) {
@@ -396,7 +393,7 @@ index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..81f10744a0fcf32a750b07feec863c18
          this.isRestarting = isRestarting;
          this.hasLoggedStop = true; // Paper - Debugging
          if (this.isDebugging()) io.papermc.paper.util.TraceUtil.dumpTraceForThread("Server stopped"); // Paper - Debugging
-@@ -1830,7 +1973,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1811,7 +1964,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          Profiler.get().push("save");
          final boolean fullSave = this.autosavePeriod > 0 && this.tickCount % this.autosavePeriod == 0;
          try {
@@ -405,7 +402,7 @@ index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..81f10744a0fcf32a750b07feec863c18
              if (playerSaveInterval > 0) {
                  this.playerList.saveAll(playerSaveInterval);
              }
-@@ -1843,7 +1986,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1824,7 +1977,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
                  }
              }
          } finally {
@@ -414,7 +411,7 @@ index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..81f10744a0fcf32a750b07feec863c18
          }
          Profiler.get().pop();
          // Paper end - Incremental chunk and player saving
-@@ -2449,6 +2592,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2439,6 +2592,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          return super.scheduleExecutables() && !this.isStopped();
      }
  
@@ -431,7 +428,7 @@ index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..81f10744a0fcf32a750b07feec863c18
      @Override
      public void executeIfPossible(final Runnable command) {
          if (this.isStopped()) {
-@@ -3051,7 +3204,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -3030,7 +3193,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      }
  
      public boolean isCurrentlySaving() {
@@ -441,10 +438,10 @@ index 97fb4dee3f3f89798c9c536f2b0eaf3df9d77e39..81f10744a0fcf32a750b07feec863c18
  
      public boolean isTimeProfilerRunning() {
 diff --git a/net/minecraft/server/PlayerAdvancements.java b/net/minecraft/server/PlayerAdvancements.java
-index d447b444abd9b62ab241419301a96d19ae77a7eb..079a532a4f2c471ed7bf6409980cbbc508dd2972 100644
+index e70701663abd6f19a506690167d80f0dceab8000..f5538b348dfe45868186b52f7c8fb699ed4c7c71 100644
 --- a/net/minecraft/server/PlayerAdvancements.java
 +++ b/net/minecraft/server/PlayerAdvancements.java
-@@ -127,19 +127,30 @@ public class PlayerAdvancements {
+@@ -128,19 +128,30 @@ public class PlayerAdvancements {
      }
  
      public void save() {
@@ -526,7 +523,7 @@ index 299991905c24a7018f8ac60d0c16e56fa43cd710..315622400592063d7dcf90bd5ed9e944
      }
  }
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index d114bf9e3e82bcb528b12e1c768c53b9b8a6de2e..23058ff83012f0d1d6c80abdac76ca71db1f0f03 100644
+index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..b9748a691f1a21cb8a2ff61f318772ea1004b71d 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
 @@ -3,6 +3,7 @@ package net.minecraft.server.players;
@@ -547,7 +544,7 @@ index d114bf9e3e82bcb528b12e1c768c53b9b8a6de2e..23058ff83012f0d1d6c80abdac76ca71
  import java.util.function.Function;
  import java.util.function.Predicate;
  import net.minecraft.ChatFormatting;
-@@ -544,19 +548,79 @@ public abstract class PlayerList {
+@@ -547,19 +551,79 @@ public abstract class PlayerList {
      }
  
      protected void save(final ServerPlayer player) {
@@ -635,7 +632,7 @@ index d114bf9e3e82bcb528b12e1c768c53b9b8a6de2e..23058ff83012f0d1d6c80abdac76ca71
  
      public net.kyori.adventure.text.@Nullable Component remove(final ServerPlayer player) { // CraftBukkit - return string // Paper - return Component
          // Paper start - Fix kick event leave message not being sent
-@@ -1174,20 +1238,41 @@ public abstract class PlayerList {
+@@ -1178,20 +1242,41 @@ public abstract class PlayerList {
      }
      public void saveAll(final int interval) {
          // Paper end - Incremental chunk and player saving
@@ -748,11 +745,11 @@ index f5beb001b938072e78c0ead7e0ad0499784ed1cf..7c283b8503ed3fbb2114e66339448a1f
      @Override
      public void setValue(final Player player, final Stat<?> stat, final int count) {
 diff --git a/net/minecraft/world/level/chunk/storage/RegionFileStorage.java b/net/minecraft/world/level/chunk/storage/RegionFileStorage.java
-index 63b40c420030d935bb81a219fb33defe0946e21f..a327fba23e89032ba44fdb350817a8649e44ab4c 100644
+index 154b571b33c868c6520ab563d8cd5482f1c288c3..e15c83000686df52bdd4433ee2bf74f7b8e77389 100644
 --- a/net/minecraft/world/level/chunk/storage/RegionFileStorage.java
 +++ b/net/minecraft/world/level/chunk/storage/RegionFileStorage.java
-@@ -94,6 +94,11 @@ public class RegionFileStorage implements AutoCloseable, ca.spottedleaf.moonrise
-         return this.regionCache.getAndMoveToFirst(ChunkPos.pack(chunkX >> REGION_SHIFT, chunkZ >> REGION_SHIFT));
+@@ -98,6 +98,11 @@ public class RegionFileStorage implements AutoCloseable, ca.spottedleaf.moonrise
+         return ret == null || ret.isEmpty() ? null : ret.get();
      }
  
 +    @Override
@@ -762,9 +759,9 @@ index 63b40c420030d935bb81a219fb33defe0946e21f..a327fba23e89032ba44fdb350817a864
 +
      @Override
      public synchronized final RegionFile moonrise$getRegionFileIfExists(final int chunkX, final int chunkZ) throws IOException {
-         final long key = ChunkPos.pack(chunkX >> REGION_SHIFT, chunkZ >> REGION_SHIFT);
+         return this.getRegionFile(new ChunkPos(chunkX, chunkZ), false);
 diff --git a/net/minecraft/world/level/storage/PlayerDataStorage.java b/net/minecraft/world/level/storage/PlayerDataStorage.java
-index eddb6ebe3fa50a818e54079b73ba117be0abd195..b1fcc011349c44e27a51ab20f52bda71da26427f 100644
+index 142a34eb046c87f16b73023c83218d8752922fbe..ee82a06da534d052540408ba61218ce2961a8f05 100644
 --- a/net/minecraft/world/level/storage/PlayerDataStorage.java
 +++ b/net/minecraft/world/level/storage/PlayerDataStorage.java
 @@ -17,6 +17,7 @@ import net.minecraft.util.ProblemReporter;

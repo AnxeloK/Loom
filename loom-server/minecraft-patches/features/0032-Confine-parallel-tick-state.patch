@@ -226,10 +226,10 @@ index 1956b02ba18a39ec5987a5e8dc1a1b970b640ec6..58e67d0663a9528b5a65166687670087
              }
          }
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 802c4c91e0f076cc1c4a043f294887e6321b53a6..d8a64e4c2ab81ccd5feaa53d6bf97682df77d88e 100644
+index d69f36c1103baa91dae8880aef5b6d3477915a3e..e1fcad4540cfb80add3881b16eccb7c24ff3cb16 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2018,7 +2018,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1999,7 +1999,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              level.hasPhysicsEvent = org.bukkit.event.block.BlockPhysicsEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - BlockPhysicsEvent
              level.hasEntityMoveEvent = io.papermc.paper.event.entity.EntityMoveEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - Add EntityMoveEvent
              level.updateLagCompensationTick(); // Paper - lag compensation
@@ -239,10 +239,10 @@ index 802c4c91e0f076cc1c4a043f294887e6321b53a6..d8a64e4c2ab81ccd5feaa53d6bf97682
          }
          net.minecraft.server.threading.TickRegions.tickWorldsInParallel(parallelLevels, level -> {
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 021e33657fc6e02e1321c6d78d138a11384e34b3..7086fdca5c6f6ea27c0a638bdab84e1dfff6cfe5 100644
+index d9737f6128c0819fbf3b6f89add431ce6d2582e3..e25eebd203ed32c8708b16524cdcaa3a411e9cc8 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -173,31 +173,114 @@ public abstract class Entity
+@@ -175,31 +175,114 @@ public abstract class Entity
  
      // Paper start - Share random for entities to make them more random
      public static RandomSource SHARED_RANDOM = new RandomRandomSource();
@@ -371,10 +371,10 @@ index 021e33657fc6e02e1321c6d78d138a11384e34b3..7086fdca5c6f6ea27c0a638bdab84e1d
      public org.bukkit.event.entity.CreatureSpawnEvent.@Nullable SpawnReason spawnReason; // Paper - Entity#getEntitySpawnReason
  
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index 785e91ad0c9d5a76ae1927dc24f13cbb9383754b..482ddd7194bf876b805482036ada7050392eb455 100644
+index c78f4048805b613497d2da67207f9720a34a5e21..4ed9d1548211a3bea0f569c795740a3493b30a93 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
-@@ -158,10 +158,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -156,10 +156,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
      public List<net.minecraft.world.entity.item.ItemEntity> captureDrops;
      public final it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<SpawnCategory> ticksPerSpawnCategory = new it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap<>();
      // Paper start - EAR 2
@@ -389,7 +389,7 @@ index 785e91ad0c9d5a76ae1927dc24f13cbb9383754b..482ddd7194bf876b805482036ada7050
      // Paper end - EAR 2
      public boolean populating;
      public final org.spigotmc.SpigotWorldConfig spigotConfig; // Spigot
-@@ -174,6 +174,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -172,6 +172,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
  
      public static @Nullable BlockPos lastPhysicsProblem; // Spigot
      public final Map<ServerExplosion.CacheKey, Float> explosionDensityCache = new java.util.HashMap<>(); // Paper - Optimize explosions
@@ -398,7 +398,7 @@ index 785e91ad0c9d5a76ae1927dc24f13cbb9383754b..482ddd7194bf876b805482036ada7050
  
      public CraftWorld getWorld() {
 diff --git a/net/minecraft/world/level/block/entity/BlockEntity.java b/net/minecraft/world/level/block/entity/BlockEntity.java
-index ae0df53c3be7ebcf48886adbedfaa2c071a94023..80ff0ef452acd2480d4c49a543d91ad3b16851c6 100644
+index ddda24a55201de2136fc6dd2cb863d609925d0ca..83fe2b392cb819ad8c382c24a2e8a91cebd11f3c 100644
 --- a/net/minecraft/world/level/block/entity/BlockEntity.java
 +++ b/net/minecraft/world/level/block/entity/BlockEntity.java
 @@ -1,5 +1,6 @@
@@ -428,7 +428,7 @@ index ae0df53c3be7ebcf48886adbedfaa2c071a94023..80ff0ef452acd2480d4c49a543d91ad3
          }
      }
 diff --git a/net/minecraft/world/level/block/entity/HopperBlockEntity.java b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
-index fef616d7b92454a721f7a14941b62a8963080cc5..4b87eb54828f422b627e59a2714179e58c8617e8 100644
+index 86f005e755f58f9f6a674a5065444fa08ae9ec08..7584a7f9bfe93021b8871d04d47d28634e35544a 100644
 --- a/net/minecraft/world/level/block/entity/HopperBlockEntity.java
 +++ b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
 @@ -1,5 +1,6 @@
@@ -604,7 +604,7 @@ index fef616d7b92454a721f7a14941b62a8963080cc5..4b87eb54828f422b627e59a2714179e5
          final org.bukkit.inventory.Inventory destination = getInventory(hopper);
  
 @@ -343,7 +361,7 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
-         final io.papermc.paper.event.inventory.PaperInventoryMoveItemEvent event = new io.papermc.paper.event.inventory.PaperInventoryMoveItemEvent(sourceInventory, org.bukkit.craftbukkit.inventory.CraftItemStack.asCraftMirror(itemstack), destination, false);
+         final io.papermc.paper.event.inventory.PaperInventoryMoveItemEvent event = new io.papermc.paper.event.inventory.PaperInventoryMoveItemEvent(sourceInventory, org.bukkit.craftbukkit.inventory.CraftItemStack.asBukkitMirror(itemstack), destination, false);
          final boolean result = event.callEvent();
          if (!event.calledGetItem && !event.calledSetItem) {
 -            skipPullModeEventFire = true;

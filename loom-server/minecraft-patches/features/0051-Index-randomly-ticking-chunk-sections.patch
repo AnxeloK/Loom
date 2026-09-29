@@ -6,10 +6,10 @@ Subject: [PATCH] Index randomly ticking chunk sections
 Track active vertical sections per full chunk so random ticking skips empty sections while preserving section order and live mutations.
 
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index a232577ad5167bc673737180fd91d9c0d5cd2331..2f3f8a6d87f10e26ac974de514ca415c2c769b8d 100644
+index b4890deac65b0e115c4347d1a43032ce05f77d9b..d18b5515a3e4c907b9de7c1222f6cb48faa27937 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -1059,13 +1059,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1067,13 +1067,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          final int offsetX = chunk.locX << 4;
          final int offsetZ = chunk.locZ << 4;
  
@@ -29,7 +29,7 @@ index a232577ad5167bc673737180fd91d9c0d5cd2331..2f3f8a6d87f10e26ac974de514ca415c
              final ca.spottedleaf.moonrise.common.list.ShortList tickList = ((ca.spottedleaf.moonrise.patches.block_counting.BlockCountingChunkSection)section).moonrise$getTickingBlockList();
  
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
-index cfba1a37e43fe19390972a903152aabbce8204d5..8fa61332352afcc37df69ef4ae3200856e23437e 100644
+index ea12b336ad5b942c9ce35e40d56ecab60573a04b..2e7d6cf29ee833ee5dd43d061580c9707d21ee65 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
 +++ b/net/minecraft/world/level/chunk/LevelChunk.java
 @@ -96,6 +96,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot

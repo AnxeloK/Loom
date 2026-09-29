@@ -3,12 +3,6 @@ From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
 Date: Wed, 9 Sep 2026 20:12:01 +0300
 Subject: [PATCH] Test packet flush batching and completion
 
----
- .../server/network/PacketFlushTest.java       | 219 ++++++++++++++++++
- .../server/network/PacketFlushTestSuite.java  |  13 ++
- 2 files changed, 232 insertions(+)
- create mode 100644 src/test/java/net/minecraft/server/network/PacketFlushTest.java
- create mode 100644 src/test/java/net/minecraft/server/network/PacketFlushTestSuite.java
 
 diff --git a/src/test/java/net/minecraft/server/network/PacketFlushTest.java b/src/test/java/net/minecraft/server/network/PacketFlushTest.java
 new file mode 100644
@@ -254,6 +248,3 @@ index 0000000000000000000000000000000000000000..89614addf5dc39cdf740e0001d23e343
 +@ConfigurationParameter(key = "TestSuite", value = "Normal")
 +public class PacketFlushTestSuite {
 +}
--- 
-2.43.0
-

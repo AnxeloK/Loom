@@ -3,7 +3,7 @@ import org.gradle.api.tasks.testing.logging.TestLogEvent
 
 plugins {
     java
-    id("io.papermc.paperweight.patcher") version "2.0.0-beta.21"
+    id("io.papermc.paperweight.patcher") version "2.0.0-beta.23"
 }
 
 paperweight {
@@ -20,6 +20,16 @@ paperweight {
             path = "paper-api/build.gradle.kts"
             outputFile = file("loom-api/build.gradle.kts")
             patchFile = file("loom-api/build.gradle.kts.patch")
+        }
+        patchDir("paperCheckstyle") {
+            upstreamPath = "paper-checkstyle"
+            patchesDir = file("loom-checkstyle/paper-patches")
+            outputDir = file("paper-checkstyle")
+        }
+        patchDir("paperCheckstyleConfig") {
+            upstreamPath = ".checkstyle"
+            patchesDir = file("loom-checkstyle/config-patches")
+            outputDir = file(".checkstyle")
         }
         patchDir("paperApi") {
             upstreamPath = "paper-api"

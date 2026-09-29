@@ -6,10 +6,10 @@ Subject: [PATCH] Reduce chunk tick bookkeeping
 Reuse palette buffers, cache stable tick plans, and use primitive proximity checks to reduce repeated chunk-tick setup work.
 
 diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
-index 3e540926d9cdc773a5f4030d2c68f675fca94137..3e6b05efce804e012e281dddb48f010d169e0a16 100644
+index 73d90a78d760ad7108e587ac4ebe496e61e829b1..4fdcf59ae3e9dda3155506f53c97e44bc6573c39 100644
 --- a/net/minecraft/server/level/ChunkMap.java
 +++ b/net/minecraft/server/level/ChunkMap.java
-@@ -703,7 +703,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -702,7 +702,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
      }
  
      // Paper start - optimise chunk tick iteration
@@ -18,7 +18,7 @@ index 3e540926d9cdc773a5f4030d2c68f675fca94137..3e6b05efce804e012e281dddb48f010d
          final ca.spottedleaf.moonrise.patches.chunk_system.level.chunk.ChunkData chunkData = ((ca.spottedleaf.moonrise.patches.chunk_system.level.chunk.ChunkSystemLevelChunk)levelChunk).moonrise$getChunkHolder().holderData;
          final ca.spottedleaf.moonrise.common.misc.NearbyPlayers.TrackedChunk nearbyPlayers = chunkData.nearbyPlayers;
          if (nearbyPlayers == null) {
-@@ -729,7 +729,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -728,7 +728,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
                  continue;
              }
              double blockRange = (double) ((event.getSpawnRadius() << 4) * (event.getSpawnRadius() << 4));
@@ -27,7 +27,7 @@ index 3e540926d9cdc773a5f4030d2c68f675fca94137..3e6b05efce804e012e281dddb48f010d
                  // Paper end - PlayerNaturallySpawnCreaturesEvent
                  return true;
              }
-@@ -750,7 +750,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -749,7 +749,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
          for (int i = 0; i < size; ++i) {
              final LevelChunk levelChunk = raw[i];
  
@@ -36,7 +36,7 @@ index 3e540926d9cdc773a5f4030d2c68f675fca94137..3e6b05efce804e012e281dddb48f010d
                  continue;
              }
  
-@@ -783,10 +783,23 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -782,10 +782,23 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
      }
  
      public boolean anyPlayerCloseEnoughTo(final BlockPos pos, final int maxDistance) {
@@ -62,7 +62,7 @@ index 3e540926d9cdc773a5f4030d2c68f675fca94137..3e6b05efce804e012e281dddb48f010d
                  return true;
              }
          }
-@@ -866,26 +879,26 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -865,26 +878,26 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
      }
  
      public boolean playerIsCloseEnoughForSpawning(final ServerPlayer player, final ChunkPos pos, final double range) { // Spigot // Paper - chunk tick iteration optimisation - public
@@ -102,7 +102,7 @@ index 3e540926d9cdc773a5f4030d2c68f675fca94137..3e6b05efce804e012e281dddb48f010d
          double zd = zPos - pos.z;
          return xd * xd + zd * zd;
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
-index a8ec8aca965346f5a8b147ed7889bc9350a5733e..09b78e80d63e2bfd16a49244bd34eea223d5f04c 100644
+index 869780f046f6df61c0cb1277b7cd93f798b51181..a5e1eac38dae8b8716913e5953d88818d34af543 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
 @@ -8,6 +8,7 @@ import it.unimi.dsi.fastutil.objects.ObjectArrayList;
@@ -113,7 +113,7 @@ index a8ec8aca965346f5a8b147ed7889bc9350a5733e..09b78e80d63e2bfd16a49244bd34eea2
  import java.util.Arrays;
  import java.util.List;
  import java.util.Objects;
-@@ -159,6 +160,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+@@ -163,6 +164,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
      // Paper end - rewrite chunk system
      // Paper start - chunk tick iteration optimisations
      private final ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom shuffleRandom = new ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom(0L);
@@ -122,7 +122,7 @@ index a8ec8aca965346f5a8b147ed7889bc9350a5733e..09b78e80d63e2bfd16a49244bd34eea2
      private void iterateTickingChunksFaster() {
          final ServerLevel world = this.level;
          final int randomTickSpeed = world.getGameRules().get(GameRules.RANDOM_TICK_SPEED);
-@@ -174,82 +177,141 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+@@ -178,82 +181,141 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
          final int size = entityTickingChunks.size();
  
          java.util.Objects.checkFromToIndex(0, size, raw.length);
@@ -327,10 +327,10 @@ index a8ec8aca965346f5a8b147ed7889bc9350a5733e..09b78e80d63e2bfd16a49244bd34eea2
              if ((i & 7) == 0) {
                  ((ca.spottedleaf.moonrise.patches.chunk_system.server.ChunkSystemMinecraftServer)this.level.getServer()).moonrise$executeMidTickTasks();
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 48ed1659e4e7499dcecadc9654536da1b2870559..e15917c11645120d90e14a87ba06c9f84685866a 100644
+index b03932562cd61caac3088cd64061eedd77e3fed6..b00be3ab8139940a1125baf937a9a1248d774d3d 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -1044,19 +1044,13 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1052,19 +1052,13 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      // Paper start - optimise random ticking
      private final ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom simpleRandom = new ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom(net.minecraft.world.level.levelgen.RandomSupport.generateUniqueSeed());
  
@@ -353,7 +353,7 @@ index 48ed1659e4e7499dcecadc9654536da1b2870559..e15917c11645120d90e14a87ba06c9f8
  
          for (int sectionIndex = 0, sectionsLen = sections.length; sectionIndex < sectionsLen; sectionIndex++) {
              final int offsetY = (sectionIndex + minSection) << 4;
-@@ -1098,11 +1092,24 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1106,11 +1100,24 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      // Paper end - optimise random ticking
  
      public void tickChunk(final LevelChunk chunk, final int tickSpeed) {
@@ -383,7 +383,7 @@ index 48ed1659e4e7499dcecadc9654536da1b2870559..e15917c11645120d90e14a87ba06c9f8
          profiler.push("iceandsnow");
  
          if (!this.paperConfig().environment.disableIceAndSnow) { // Paper - Option to disable ice and snow
-@@ -1115,17 +1122,17 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1123,17 +1130,17 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
          profiler.popPush("tickBlocks");
          if (tickSpeed > 0) {
@@ -406,21 +406,10 @@ index 48ed1659e4e7499dcecadc9654536da1b2870559..e15917c11645120d90e14a87ba06c9f8
          profiler.push("thunder");
          if (!this.paperConfig().environment.disableThunder && raining && this.isThundering() && this.spigotConfig.thunderChance > 0 && this.random.nextInt(this.spigotConfig.thunderChance) == 0) { // Spigot // Paper - Option to disable thunder
 diff --git a/net/minecraft/world/level/chunk/PalettedContainer.java b/net/minecraft/world/level/chunk/PalettedContainer.java
-index 26dbb9da7a7f50ec913b1226eff9e9ce6b4f3f12..9022152c70ebc77ae43dd3de6b86587b3caaaeac 100644
+index 55037971b2631100ac5fd5fd8157adbbc0604d36..e95600c87cec8e8de2393da4863eb77637a526ec 100644
 --- a/net/minecraft/world/level/chunk/PalettedContainer.java
 +++ b/net/minecraft/world/level/chunk/PalettedContainer.java
-@@ -24,6 +24,10 @@ import org.jspecify.annotations.Nullable;
- 
- public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainerRO<T> {
-     private static final int MIN_PALETTE_BITS = 0;
-+    // Loom - packing a chunk section previously allocated a 4096-entry int array for every palette.
-+    // Save workers consume this scratch array synchronously while holding the container lock, so one
-+    // buffer per worker avoids the allocation without retaining or sharing serialized state.
-+    private static final ThreadLocal<int[]> PACK_REENCODE_BUFFER = ThreadLocal.withInitial(() -> new int[4096]);
-     public volatile PalettedContainer.Data<T> data; // Paper - optimise collisions - public
-     private final Strategy<T> strategy;
-     private final T @Nullable [] presetValues; // Paper - Anti-Xray - Add preset values
-@@ -332,7 +336,8 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
+@@ -332,7 +332,8 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
                      Palette<T> oldPalette = new HashMapPalette<>(bitsOnDisc, paletteEntries);
                      SimpleBitStorage oldStorage = new SimpleBitStorage(bitsOnDisc, entryCount, data);
                      Palette<T> newPalette = storedConfiguration.createPalette(strategy, paletteEntries);
@@ -430,22 +419,8 @@ index 26dbb9da7a7f50ec913b1226eff9e9ce6b4f3f12..9022152c70ebc77ae43dd3de6b86587b
                      palette = newPalette;
                      storage = new SimpleBitStorage(storedConfiguration.bitsInMemory(), entryCount, newContents);
                  }
-@@ -353,7 +358,12 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
-             Palette<T> currentPalette = this.data.palette;
-             HashMapPalette<T> newPalette = new HashMapPalette<>(currentStorage.getBits());
-             int entryCount = strategy.entryCount();
--            int[] newContents = reencodeContents(currentStorage, currentPalette, newPalette);
-+            int[] newContents = PACK_REENCODE_BUFFER.get();
-+            if (newContents.length < currentStorage.getSize()) {
-+                newContents = new int[currentStorage.getSize()];
-+                PACK_REENCODE_BUFFER.set(newContents);
-+            }
-+            reencodeContents(currentStorage, currentPalette, newPalette, newContents);
-             Configuration storedConfiguration = strategy.getConfigurationForPaletteSize(newPalette.getSize());
-             int bitsOnDisc = storedConfiguration.bitsInStorage();
-             Optional<LongStream> values;
-@@ -370,14 +380,18 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
-         }
+@@ -444,14 +445,18 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
+         // Paper end - optimise PalettedContainer packing
      }
  
 -    private static <T> int[] reencodeContents(final BitStorage storage, final Palette<T> oldPalette, final Palette<T> newPalette) {
@@ -466,7 +441,7 @@ index 26dbb9da7a7f50ec913b1226eff9e9ce6b4f3f12..9022152c70ebc77ae43dd3de6b86587b
              int id = buffer[index];
              if (id != lastReadId) {
                  lastReadId = id;
-@@ -386,8 +400,6 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
+@@ -460,8 +465,6 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
  
              buffer[index] = lastWrittenId;
          }
