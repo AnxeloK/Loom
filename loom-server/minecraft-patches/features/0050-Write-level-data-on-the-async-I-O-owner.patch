@@ -5,7 +5,7 @@ Subject: [PATCH] Write level data on the async-I/O owner
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 12f39182c5093528a9aae0fe6b8fc9ac803dab20..13b3c06b9a5def80d9d23e37872621561377e513 100644
+index 9a15398320ed9a057a660d7f606b65522287cf55..33b910a6274794c335df4149689a0aa86df81e49 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -1027,8 +1027,27 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa

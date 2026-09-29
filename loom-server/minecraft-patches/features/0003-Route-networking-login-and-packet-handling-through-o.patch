@@ -43,7 +43,7 @@ index 66d6af2833d76af28fbeb2ce70c194a559572460..7a260cf3b908b1752031d2feb35d9b95
  
              for (KeepAliveResponse response : this.responses) {
 diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
-index 936200d7620e1fe83eb45ddbcff86b6b6ecaab8f..3aae70be4b99006517179d2129760951572ca6cf 100644
+index 936200d7620e1fe83eb45ddbcff86b6b6ecaab8f..fcbea1eaa028fb77a67154d0ffa0afb0719343da 100644
 --- a/net/minecraft/network/Connection.java
 +++ b/net/minecraft/network/Connection.java
 @@ -42,6 +42,7 @@ import net.minecraft.network.protocol.handshake.ServerHandshakePacketListener;
@@ -62,7 +62,15 @@ index 936200d7620e1fe83eb45ddbcff86b6b6ecaab8f..3aae70be4b99006517179d2129760951
      public static final Marker ROOT_MARKER = MarkerFactory.getMarker("NETWORK");
      public static final Marker PACKET_MARKER = Util.make(MarkerFactory.getMarker("NETWORK_PACKETS"), m -> m.add(ROOT_MARKER));
      public static final Marker PACKET_RECEIVED_MARKER = Util.make(MarkerFactory.getMarker("PACKET_RECEIVED"), m -> m.add(PACKET_MARKER));
-@@ -515,6 +517,15 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -121,6 +123,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+     public java.util.@Nullable Optional<net.minecraft.network.chat.Component> legacySavedLoginEventResultOverride; // Paper - playerloginevent
+     public boolean handledLegacyLoginEvent; // Paper - playerloginevent
+     public net.minecraft.server.level.@Nullable ServerPlayer savedPlayerForLegacyEvents; // Paper - playerloginevent & PlayerSpawnLocationEvent
++    public net.minecraft.server.players.PlayerList.@Nullable PreparedPlayerProgress preparedPlayerProgress;
+     public org.bukkit.event.player.PlayerResourcePackStatusEvent.@Nullable Status resourcePackStatus; // Paper
+     // Paper start - Optimize network
+     public boolean isPending = true;
+@@ -515,6 +518,15 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          if (listener != null) {
              future = flush ? this.channel.writeAndFlush(packet) : this.channel.write(packet); // Paper - Optimize network
              future.addListener(listener);
@@ -78,7 +86,7 @@ index 936200d7620e1fe83eb45ddbcff86b6b6ecaab8f..3aae70be4b99006517179d2129760951
          } else if (flush) {
              future = this.channel.writeAndFlush(packet, this.channel.voidPromise()); // Paper - Optimize network
          } else {
-@@ -605,23 +616,59 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -605,23 +617,59 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
      private static final int MAX_PER_TICK = io.papermc.paper.configuration.GlobalConfiguration.get().misc.maxJoinsPerTick; // Paper - Buffer joins to world
      private static int joinAttemptsThisTick; // Paper - Buffer joins to world
      private static int currTick; // Paper - Buffer joins to world
@@ -144,7 +152,7 @@ index 936200d7620e1fe83eb45ddbcff86b6b6ecaab8f..3aae70be4b99006517179d2129760951
              } finally {
                  net.minecraft.network.PacketProcessor.packetProcessing.pop();
              } // Paper end - detailed watchdog information
-@@ -629,7 +676,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -629,7 +677,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          }
  
          if (!this.isConnected() && !this.disconnectionHandled) {
@@ -153,7 +161,7 @@ index 936200d7620e1fe83eb45ddbcff86b6b6ecaab8f..3aae70be4b99006517179d2129760951
          }
  
          if (this.channel != null) {
-@@ -715,7 +762,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -715,7 +763,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
                  } catch (ChannelException var3) {
                  }
  
@@ -162,7 +170,7 @@ index 936200d7620e1fe83eb45ddbcff86b6b6ecaab8f..3aae70be4b99006517179d2129760951
                  Connection.configureSerialization(pipeline, PacketFlow.CLIENTBOUND, false, connection.bandwidthDebugMonitor);
                  connection.configurePacketHandler(pipeline);
              }
-@@ -910,6 +957,12 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -910,6 +958,12 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          }
      }
  
@@ -943,7 +951,7 @@ index ee52233d15df9de9f5a0a85dcac7f7f38f8c004d..a558f54bc3e6d855db4162e6a7a64f3f
  
      @Override
 diff --git a/net/minecraft/server/network/ServerLoginPacketListenerImpl.java b/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
-index a1855a257c3ac801bbd371ca4508af755550d737..3031fc69e554222c8bfd2339514e402213998a24 100644
+index a1855a257c3ac801bbd371ca4508af755550d737..933257e344ecd00edae2dc72717b67ad671572d2 100644
 --- a/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerLoginPacketListenerImpl.java
 @@ -47,15 +47,17 @@ import org.slf4j.Logger;
@@ -967,15 +975,16 @@ index a1855a257c3ac801bbd371ca4508af755550d737..3031fc69e554222c8bfd2339514e4022
      private final byte[] challenge;
      private final MinecraftServer server;
      public final Connection connection;
-@@ -70,6 +72,7 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+@@ -70,6 +72,8 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
      private int velocityLoginMessageId = -1; // Paper - Add Velocity IP Forwarding Support
      public java.util.@Nullable UUID requestedUuid; // Paper
      private final io.papermc.paper.connection.PaperPlayerLoginConnection paperLoginConnection; // Paper - Config API
 +    private volatile boolean disconnecting = false; // Paper - Fix disconnect still ticking login
++    private java.util.concurrent.@Nullable CompletableFuture<PlayerList.PreparedPlayerProgress> preparedProgress;
  
      public ServerLoginPacketListenerImpl(final MinecraftServer minecraftserver, final Connection connection, final boolean transferred) {
          this.server = minecraftserver;
-@@ -82,6 +85,7 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+@@ -82,6 +86,7 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
  
      @Override
      public void tick() {
@@ -983,7 +992,7 @@ index a1855a257c3ac801bbd371ca4508af755550d737..3031fc69e554222c8bfd2339514e4022
          // Paper start - login cookie API
          // Don't block the connection
          if (this.paperLoginConnection.isAwaitingCookies()) {
-@@ -104,8 +108,8 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+@@ -104,8 +109,8 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
      }
      public void tickTimeout() {
      // Paper end - login cookie API
@@ -994,7 +1003,7 @@ index a1855a257c3ac801bbd371ca4508af755550d737..3031fc69e554222c8bfd2339514e4022
          }
      }
  
-@@ -121,22 +125,12 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+@@ -121,22 +126,12 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
          return this.connection.isConnected();
      }
  
@@ -1018,7 +1027,7 @@ index a1855a257c3ac801bbd371ca4508af755550d737..3031fc69e554222c8bfd2339514e4022
          } catch (Exception e) {
              LOGGER.error("Error whilst disconnecting player", e);
          }
-@@ -186,20 +180,32 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+@@ -186,20 +181,32 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
                      return;
                  }
                  // Paper end - Add Velocity IP Forwarding Support
@@ -1056,8 +1065,24 @@ index a1855a257c3ac801bbd371ca4508af755550d737..3031fc69e554222c8bfd2339514e4022
              }
          }
      }
-@@ -213,7 +219,7 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+@@ -211,9 +218,23 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+ 
+     private void verifyLoginAndFinishConnectionSetup(final GameProfile profile) {
          PlayerList playerList = this.server.getPlayerList();
++        // Legacy listeners construct a player before configuration. Decode its saved progress on
++        // ASYNC_IO and poll here so login timeouts and other connections keep ticking normally.
++        if (org.bukkit.event.player.PlayerLoginEvent.getHandlerList().getRegisteredListeners().length != 0
++            && this.connection.savedPlayerForLegacyEvents == null) {
++            if (this.preparedProgress == null) this.preparedProgress = playerList.preparePlayerProgressAsync(profile);
++            if (!this.preparedProgress.isDone()) return;
++            try {
++                this.connection.preparedPlayerProgress = this.preparedProgress.getNow(null);
++            } catch (java.util.concurrent.CompletionException failure) {
++                LOGGER.error("Couldn't prepare player progress", failure);
++                this.disconnectAsync(Component.translatable("multiplayer.disconnect.invalid_player_data"));
++                return;
++            }
++        }
          Component error = org.bukkit.craftbukkit.event.CraftEventFactory.handleLoginResult(playerList.canPlayerLogin(this.connection.getRemoteAddress(), new NameAndId(profile)), this.paperLoginConnection, this.connection, profile, this.server, true); // Paper
          if (error != null) {
 -            this.disconnectAsync(error); // Paper
@@ -1065,7 +1090,7 @@ index a1855a257c3ac801bbd371ca4508af755550d737..3031fc69e554222c8bfd2339514e4022
          } else {
              if (this.server.getCompressionThreshold() >= 0 && !this.connection.isMemoryConnection()) {
                  // Paper start - Keep compression packet write and setup in the same Netty task
-@@ -261,7 +267,7 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+@@ -261,7 +282,7 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
              throw new IllegalStateException("Protocol error", e);
          }
  
@@ -1074,7 +1099,7 @@ index a1855a257c3ac801bbd371ca4508af755550d737..3031fc69e554222c8bfd2339514e4022
          authenticatorPool.execute(new Runnable() {
              @Override
              public void run() {
-@@ -278,11 +284,21 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+@@ -278,11 +299,21 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
                          if (!ServerLoginPacketListenerImpl.this.connection.isConnected()) {
                              return;
                          }
@@ -1101,7 +1126,7 @@ index a1855a257c3ac801bbd371ca4508af755550d737..3031fc69e554222c8bfd2339514e4022
                      } else if (ServerLoginPacketListenerImpl.this.server.isSingleplayer()) {
                          ServerLoginPacketListenerImpl.LOGGER.warn("Failed to verify username but will let them in anyway!");
                          ServerLoginPacketListenerImpl.this.startClientVerification(ServerLoginPacketListenerImpl.this.createOfflineProfile(name)); // Spigot
-@@ -313,57 +329,66 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+@@ -313,57 +344,66 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
                      : null;
              }
          });
@@ -1209,7 +1234,7 @@ index a1855a257c3ac801bbd371ca4508af755550d737..3031fc69e554222c8bfd2339514e4022
      }
      // CraftBukkit end
  
-@@ -412,9 +437,19 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
+@@ -412,9 +452,19 @@ public class ServerLoginPacketListenerImpl implements ServerLoginPacketListener,
              // Proceed with login
              authenticatorPool.execute(() -> {
                  try {

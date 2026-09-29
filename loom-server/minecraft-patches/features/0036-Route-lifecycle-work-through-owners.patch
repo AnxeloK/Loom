@@ -165,8 +165,27 @@ index 775d93d35855e394e5eccf0ad80eca43b1ed9562..f63bb55f57ac053f22a4b2fa533b36a0
          public boolean hasTasks() {
              return this.inProgressTasks.get() != 0L;
          }
+diff --git a/net/minecraft/advancements/AdvancementProgress.java b/net/minecraft/advancements/AdvancementProgress.java
+index b6ca9b6303a8201bdbbc7c224998fdad9dff8a4f..5c2c5dcc1924db36e3065deb177f14d5d16abef5 100644
+--- a/net/minecraft/advancements/AdvancementProgress.java
++++ b/net/minecraft/advancements/AdvancementProgress.java
+@@ -57,6 +57,14 @@ public class AdvancementProgress implements Comparable<AdvancementProgress> {
+         this.criteria = Maps.newHashMap();
+     }
+ 
++    public AdvancementProgress copy() {
++        final Map<String, CriterionProgress> criteria = new HashMap<>();
++        this.criteria.forEach((name, progress) -> criteria.put(name, new CriterionProgress(progress.getObtained())));
++        final AdvancementProgress copy = new AdvancementProgress(criteria);
++        copy.requirements = this.requirements;
++        return copy;
++    }
++
+     public void update(final AdvancementRequirements requirements) {
+         Set<String> names = requirements.names();
+         this.criteria.entrySet().removeIf(entry -> !names.contains(entry.getKey()));
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 622ca4115986b9202f0fca2c4347388af53ead9a..d4277b95680c16c53881d42ed635ac3ca8b9ce96 100644
+index 622ca4115986b9202f0fca2c4347388af53ead9a..8089f2c466463bc6b4c02fee6ff1ad5ad546febb 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -36,6 +36,7 @@ import java.util.Map.Entry;
@@ -346,7 +365,7 @@ index 622ca4115986b9202f0fca2c4347388af53ead9a..d4277b95680c16c53881d42ed635ac3c
  
      @Override
      public void close() {
-@@ -1052,7 +1183,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1052,9 +1183,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          }
          // CraftBukkit end
          this.getConnection().stop();
@@ -354,8 +373,11 @@ index 622ca4115986b9202f0fca2c4347388af53ead9a..d4277b95680c16c53881d42ed635ac3c
 +        this.beginSaving();
          if (this.playerList != null) {
              LOGGER.info("Saving players");
++            this.playerList.awaitPendingPlayerSaves();
              this.playerList.saveAll();
-@@ -1088,7 +1219,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             this.playerList.removeAll(this.isRestarting); // Paper
+             this.getConnection().handleAllDisconnections(); // Paper
+@@ -1088,7 +1220,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
  
          this.saveAllChunks(false, true, false, true); // Paper - rewrite chunk system
  
@@ -364,7 +386,7 @@ index 622ca4115986b9202f0fca2c4347388af53ead9a..d4277b95680c16c53881d42ed635ac3c
          this.savedDataStorage.close();
          this.resources.close();
  
-@@ -1138,6 +1269,28 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1138,6 +1270,28 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.halt(wait, false);
      }
      public void halt(final boolean wait, final boolean isRestarting) {
@@ -393,7 +415,7 @@ index 622ca4115986b9202f0fca2c4347388af53ead9a..d4277b95680c16c53881d42ed635ac3c
          this.isRestarting = isRestarting;
          this.hasLoggedStop = true; // Paper - Debugging
          if (this.isDebugging()) io.papermc.paper.util.TraceUtil.dumpTraceForThread("Server stopped"); // Paper - Debugging
-@@ -1811,7 +1964,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1811,7 +1965,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          Profiler.get().push("save");
          final boolean fullSave = this.autosavePeriod > 0 && this.tickCount % this.autosavePeriod == 0;
          try {
@@ -402,7 +424,7 @@ index 622ca4115986b9202f0fca2c4347388af53ead9a..d4277b95680c16c53881d42ed635ac3c
              if (playerSaveInterval > 0) {
                  this.playerList.saveAll(playerSaveInterval);
              }
-@@ -1824,7 +1977,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1824,7 +1978,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
                  }
              }
          } finally {
@@ -411,7 +433,7 @@ index 622ca4115986b9202f0fca2c4347388af53ead9a..d4277b95680c16c53881d42ed635ac3c
          }
          Profiler.get().pop();
          // Paper end - Incremental chunk and player saving
-@@ -2439,6 +2592,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2439,6 +2593,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          return super.scheduleExecutables() && !this.isStopped();
      }
  
@@ -428,7 +450,7 @@ index 622ca4115986b9202f0fca2c4347388af53ead9a..d4277b95680c16c53881d42ed635ac3c
      @Override
      public void executeIfPossible(final Runnable command) {
          if (this.isStopped()) {
-@@ -3030,7 +3193,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -3030,7 +3194,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      }
  
      public boolean isCurrentlySaving() {
@@ -438,10 +460,64 @@ index 622ca4115986b9202f0fca2c4347388af53ead9a..d4277b95680c16c53881d42ed635ac3c
  
      public boolean isTimeProfilerRunning() {
 diff --git a/net/minecraft/server/PlayerAdvancements.java b/net/minecraft/server/PlayerAdvancements.java
-index e70701663abd6f19a506690167d80f0dceab8000..f5538b348dfe45868186b52f7c8fb699ed4c7c71 100644
+index e70701663abd6f19a506690167d80f0dceab8000..8c0c3db53f83171e5ebcc7caa3f297c3cc02e049 100644
 --- a/net/minecraft/server/PlayerAdvancements.java
 +++ b/net/minecraft/server/PlayerAdvancements.java
-@@ -128,19 +128,30 @@ public class PlayerAdvancements {
+@@ -64,6 +64,13 @@ public class PlayerAdvancements {
+ 
+     public PlayerAdvancements(
+         final DataFixer dataFixer, final PlayerList playerList, final ServerAdvancementManager manager, final Path playerSavePath, final ServerPlayer player
++    ) {
++        this(dataFixer, playerList, manager, playerSavePath, player, readData(dataFixer, playerSavePath));
++    }
++
++    public PlayerAdvancements(
++        final DataFixer dataFixer, final PlayerList playerList, final ServerAdvancementManager manager,
++        final Path playerSavePath, final ServerPlayer player, final Data loadedData
+     ) {
+         this.playerList = playerList;
+         this.playerSavePath = playerSavePath;
+@@ -71,7 +78,7 @@ public class PlayerAdvancements {
+         this.tree = manager.tree();
+         int defaultVersion = 1343;
+         this.codec = DataFixTypes.ADVANCEMENTS.wrapCodec(PlayerAdvancements.Data.CODEC, dataFixer, 1343);
+-        this.load(manager);
++        this.load(manager, loadedData);
+     }
+ 
+     public void setPlayer(final ServerPlayer player) {
+@@ -111,36 +118,64 @@ public class PlayerAdvancements {
+     }
+ 
+     private void load(final ServerAdvancementManager manager) {
+-        if (Files.isRegularFile(this.playerSavePath)) {
+-            try (Reader reader = Files.newBufferedReader(this.playerSavePath, StandardCharsets.UTF_8)) {
++        this.load(manager, readData(this.playerList.getServer().getFixerUpper(), this.playerSavePath));
++    }
++
++    public static Data readData(final DataFixer dataFixer, final Path playerSavePath) {
++        if (Files.isRegularFile(playerSavePath)) {
++            try (Reader reader = Files.newBufferedReader(playerSavePath, StandardCharsets.UTF_8)) {
+                 JsonElement json = StrictJsonParser.parse(reader);
+-                PlayerAdvancements.Data data = this.codec.parse(JsonOps.INSTANCE, json).getOrThrow(JsonParseException::new);
+-                this.applyFrom(manager, data);
++                return DataFixTypes.ADVANCEMENTS.wrapCodec(Data.CODEC, dataFixer, 1343)
++                    .parse(JsonOps.INSTANCE, json).getOrThrow(JsonParseException::new);
+             } catch (IOException | JsonIOException e) {
+-                LOGGER.error("Couldn't access player advancements in {}", this.playerSavePath, e);
++                LOGGER.error("Couldn't access player advancements in {}", playerSavePath, e);
+             } catch (JsonParseException e) {
+-                LOGGER.error("Couldn't parse player advancements in {}", this.playerSavePath, e);
++                LOGGER.error("Couldn't parse player advancements in {}", playerSavePath, e);
+             }
+         }
++        return new Data(Map.of());
++    }
+ 
++    private void load(final ServerAdvancementManager manager, final Data data) {
++        this.applyFrom(manager, data);
+         this.checkForAutomaticTriggers(manager);
+         this.registerListeners(manager);
      }
  
      public void save() {
@@ -455,8 +531,17 @@ index e70701663abd6f19a506690167d80f0dceab8000..f5538b348dfe45868186b52f7c8fb699
 +
 +    // Loom start - split owner-bound capture from asynchronous file I/O
 +    public @Nullable JsonElement captureSave() {
++        final Data data = this.captureSaveData();
++        return data == null ? null : this.codec.encodeStart(JsonOps.INSTANCE, data).getOrThrow();
++    }
++
++    public @Nullable Data captureSaveData() {
 +        if (org.spigotmc.SpigotConfig.disableAdvancementSaving) return null; // Spigot
-+        return this.codec.encodeStart(JsonOps.INSTANCE, this.asData()).getOrThrow();
++        return this.asData();
++    }
++
++    public void writeSave(final Data snapshot) {
++        this.writeSave(this.codec.encodeStart(JsonOps.INSTANCE, snapshot).getOrThrow());
 +    }
  
 +    public void writeSave(final JsonElement snapshot) {
@@ -475,6 +560,24 @@ index e70701663abd6f19a506690167d80f0dceab8000..f5538b348dfe45868186b52f7c8fb699
  
      private void applyFrom(final ServerAdvancementManager manager, final PlayerAdvancements.Data data) {
          data.forEach((id, progress) -> {
+@@ -160,7 +195,7 @@ public class PlayerAdvancements {
+         Map<Identifier, AdvancementProgress> map = new LinkedHashMap<>();
+         this.progress.forEach((advancement, progress) -> {
+             if (progress.hasProgress()) {
+-                map.put(advancement.id(), progress);
++                map.put(advancement.id(), progress.copy());
+             }
+         });
+         return new PlayerAdvancements.Data(map);
+@@ -350,7 +385,7 @@ public class PlayerAdvancements {
+         }
+     }
+ 
+-    private record Data(Map<Identifier, AdvancementProgress> map) {
++    public record Data(Map<Identifier, AdvancementProgress> map) {
+         public static final Codec<PlayerAdvancements.Data> CODEC = Codec.unboundedMap(Identifier.CODEC, AdvancementProgress.CODEC)
+             .xmap(PlayerAdvancements.Data::new, PlayerAdvancements.Data::map);
+ 
 diff --git a/net/minecraft/server/commands/SaveAllCommand.java b/net/minecraft/server/commands/SaveAllCommand.java
 index 299991905c24a7018f8ac60d0c16e56fa43cd710..315622400592063d7dcf90bd5ed9e94460276ddd 100644
 --- a/net/minecraft/server/commands/SaveAllCommand.java
@@ -522,29 +625,171 @@ index 299991905c24a7018f8ac60d0c16e56fa43cd710..315622400592063d7dcf90bd5ed9e944
          return Command.SINGLE_SUCCESS;
      }
  }
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index a1b5815050cc6100739eb4848ded4160635e9eb0..52dee1d914f46da2ed8dc582096f673642979849 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -479,14 +479,24 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+     // Paper end - rewrite chunk system
+ 
+     public ServerPlayer(final MinecraftServer server, final ServerLevel level, final GameProfile gameProfile, final ClientInformation clientInformation) {
++        this(server, level, gameProfile, clientInformation, null);
++    }
++
++    public ServerPlayer(
++        final MinecraftServer server, final ServerLevel level, final GameProfile gameProfile, final ClientInformation clientInformation,
++        final net.minecraft.server.players.PlayerList.@Nullable PreparedPlayerProgress prepared
++    ) {
+         super(level, gameProfile);
++        if (prepared != null && !gameProfile.id().equals(prepared.playerId())) {
++            throw new IllegalArgumentException("Prepared progress belongs to another player");
++        }
+         this.server = server;
+         this.textFilter = server.createTextFilterForPlayer(this);
+         this.gameMode = server.createGameModeForPlayer(this);
+         this.gameMode.setGameModeForPlayer(this.calculateGameModeForNewPlayer(null), null);
+         this.recipeBook = new ServerRecipeBook((id, output) -> server.getRecipeManager().listDisplaysForRecipe(id, output));
+-        this.stats = server.getPlayerList().getPlayerStats(this);
+-        this.advancements = server.getPlayerList().getPlayerAdvancements(this);
++        this.stats = server.getPlayerList().getPlayerStats(this, prepared);
++        this.advancements = server.getPlayerList().getPlayerAdvancements(this, prepared);
+         this.updateOptionsNoEvents(clientInformation); // Paper - don't call options events on login
+         this.object = null;
+         // CraftBukkit start
+diff --git a/net/minecraft/server/network/config/PrepareSpawnTask.java b/net/minecraft/server/network/config/PrepareSpawnTask.java
+index 38690e87424cd427543f770d8937fef3f15e24c0..9648a45d1fc0f266812b7d345d0504ecba7d76ec 100644
+--- a/net/minecraft/server/network/config/PrepareSpawnTask.java
++++ b/net/minecraft/server/network/config/PrepareSpawnTask.java
+@@ -17,7 +17,6 @@ import net.minecraft.server.level.TicketType;
+ import net.minecraft.server.level.progress.LevelLoadListener;
+ import net.minecraft.server.network.CommonListenerCookie;
+ import net.minecraft.server.network.ConfigurationTask;
+-import net.minecraft.server.players.NameAndId;
+ import net.minecraft.util.ProblemReporter;
+ import net.minecraft.world.level.ChunkPos;
+ import net.minecraft.world.level.storage.LevelData;
+@@ -33,7 +32,6 @@ public class PrepareSpawnTask implements ConfigurationTask {
+     public static final ConfigurationTask.Type TYPE = new ConfigurationTask.Type("prepare_spawn");
+     public static final int PREPARE_CHUNK_RADIUS = 3;
+     private final MinecraftServer server;
+-    private final NameAndId nameAndId;
+     private final LevelLoadListener loadListener;
+     private PrepareSpawnTask.@Nullable State state;
+ 
+@@ -41,22 +39,28 @@ public class PrepareSpawnTask implements ConfigurationTask {
+     private final com.mojang.authlib.GameProfile profile;
+     private final net.minecraft.server.network.ServerConfigurationPacketListenerImpl listener;
+     private boolean newPlayer;
++    private net.minecraft.server.players.PlayerList.@Nullable PreparedPlayerLogin preparedLogin;
+ 
+     public PrepareSpawnTask(final MinecraftServer server, final com.mojang.authlib.GameProfile profile, final net.minecraft.server.network.ServerConfigurationPacketListenerImpl listener) {
+         this.profile = profile;
+         this.listener = listener;
+         // Paper end - passthrough profile and packet listener
+         this.server = server;
+-        this.nameAndId = new net.minecraft.server.players.NameAndId(profile); // Paper - passthrough profile and packet listener - create from profile
+         this.loadListener = LevelLoadListener.noop(); // Paper - per level load listener - this is already a no-op on dedicated server, but we moved it to Level
+     }
+ 
+     @Override
+     public void start(final Consumer<Packet<?>> connection) {
++        this.state = new Loading(this.server.getPlayerList().preparePlayerLoginAsync(
++            this.profile, this.listener.connection.savedPlayerForLegacyEvents == null
++        ));
++    }
++
++    private void prepareSpawn(final net.minecraft.server.players.PlayerList.PreparedPlayerLogin prepared) {
++        this.preparedLogin = prepared;
++        this.listener.connection.preparedPlayerProgress = prepared.progress();
+         try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(LOGGER)) {
+-            Optional<ValueInput> loadedData = this.server
+-                .getPlayerList()
+-                .loadPlayerData(this.nameAndId)
++            Optional<ValueInput> loadedData = prepared.playerData()
+                 .map(tag -> TagValueInput.create(reporter, this.server.registryAccess(), tag));
+             // Paper start - move logic in Entity to here, to use bukkit supplied world UUID & reset to main world spawn if no valid world is found
+             this.newPlayer = loadedData.isEmpty(); // New players don't have saved data!
+@@ -119,6 +123,11 @@ public class PrepareSpawnTask implements ConfigurationTask {
+     public boolean tick() {
+         return switch (this.state) {
+             case null -> false;
++            case Loading loading -> {
++                if (!loading.data().isDone()) yield false;
++                this.prepareSpawn(Objects.requireNonNull(loading.data().getNow(null)));
++                yield false;
++            }
+             case PrepareSpawnTask.Preparing preparing -> {
+                 PrepareSpawnTask.Ready ready = preparing.tick();
+                 if (ready != null) {
+@@ -153,6 +162,8 @@ public class PrepareSpawnTask implements ConfigurationTask {
+         }
+ 
+         this.state = null;
++        this.preparedLogin = null;
++        this.listener.connection.preparedPlayerProgress = null;
+     }
+ 
+     @Override
+@@ -195,7 +206,8 @@ public class PrepareSpawnTask implements ConfigurationTask {
+                             PrepareSpawnTask.this.server,
+                             PrepareSpawnTask.this.server.overworld(),
+                             PrepareSpawnTask.this.profile,
+-                            net.minecraft.server.level.ClientInformation.createDefault()
++                            net.minecraft.server.level.ClientInformation.createDefault(),
++                            PrepareSpawnTask.this.listener.connection.preparedPlayerProgress
+                         );
+                         PrepareSpawnTask.this.listener.connection.savedPlayerForLegacyEvents = player;
+                     }
+@@ -278,20 +290,20 @@ public class PrepareSpawnTask implements ConfigurationTask {
+                 player.updateOptionsNoEvents(cookie.clientInformation());
+                 player.setServerLevel(this.spawnLevel);
+             } else {
+-                player = new ServerPlayer(PrepareSpawnTask.this.server, this.spawnLevel, cookie.gameProfile(), cookie.clientInformation());
++                player = new ServerPlayer(PrepareSpawnTask.this.server, this.spawnLevel, cookie.gameProfile(), cookie.clientInformation(), connection.preparedPlayerProgress);
+             }
++            connection.preparedPlayerProgress = null;
+             // Paper end - configuration api - possibly use legacy saved server player instance
+             PrepareSpawnTask.this.listener.paperConnection.applyPendingEntityId(player); // Paper - internal entity id api - possibly override player network id if plugins used internal API to configure it.
+ 
+             try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(player.problemPath(), PrepareSpawnTask.LOGGER)) {
+-                Optional<ValueInput> input = PrepareSpawnTask.this.server
+-                    .getPlayerList()
+-                    .loadPlayerData(PrepareSpawnTask.this.nameAndId)
++                final net.minecraft.server.players.PlayerList.PreparedPlayerLogin prepared = Objects.requireNonNull(PrepareSpawnTask.this.preparedLogin);
++                Optional<ValueInput> input = prepared.playerData()
+                     // CraftBukkit start
+                     .map(tag -> {
+                         org.bukkit.craftbukkit.entity.CraftPlayer craftPlayer = player.getBukkitEntity();
+                         // Only update first played if it is older than the one we have
+-                        long modified = new java.io.File(PrepareSpawnTask.this.server.getPlayerList().playerIo.getPlayerDir(), player.getStringUUID() + ".dat").lastModified();
++                        long modified = prepared.lastModified();
+                         if (modified < craftPlayer.getFirstPlayed()) {
+                             craftPlayer.setFirstPlayed(modified);
+                         }
+@@ -321,6 +333,9 @@ public class PrepareSpawnTask implements ConfigurationTask {
+         }
+     }
+ 
+-    private sealed interface State permits PrepareSpawnTask.Preparing, PrepareSpawnTask.Ready {
++    private record Loading(CompletableFuture<net.minecraft.server.players.PlayerList.PreparedPlayerLogin> data) implements State {
++    }
++
++    private sealed interface State permits PrepareSpawnTask.Loading, PrepareSpawnTask.Preparing, PrepareSpawnTask.Ready {
+     }
+ }
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..06871cc4e99a1379e566b0737c8b4023e2d0241c 100644
+index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..de8356c8266b1a50de3738d3116b4846ffd380fb 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
-@@ -3,6 +3,7 @@ package net.minecraft.server.players;
- import com.google.common.collect.Lists;
- import com.google.common.collect.Maps;
- import com.google.common.collect.Sets;
-+import com.google.gson.JsonElement;
- import com.mojang.authlib.GameProfile;
- import com.mojang.logging.LogUtils;
- import java.io.File;
-@@ -19,6 +20,9 @@ import java.util.Map;
+@@ -19,6 +19,7 @@ import java.util.Map;
  import java.util.Optional;
  import java.util.Set;
  import java.util.UUID;
 +import java.util.concurrent.CompletableFuture;
-+import java.util.concurrent.CompletionException;
-+import java.util.concurrent.RejectedExecutionException;
  import java.util.function.Function;
  import java.util.function.Predicate;
  import net.minecraft.ChatFormatting;
-@@ -116,6 +120,7 @@ public abstract class PlayerList {
+@@ -116,6 +117,7 @@ public abstract class PlayerList {
      private final MinecraftServer server;
      private final List<ServerPlayer> players = new java.util.concurrent.CopyOnWriteArrayList(); // CraftBukkit - ArrayList -> CopyOnWriteArrayList: Iterator safety
      private final Map<UUID, ServerPlayer> playersByUUID = Maps.newHashMap();
@@ -552,16 +797,58 @@ index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..06871cc4e99a1379e566b0737c8b4023
      private final Map<NameAndId, PermissionLevel> playerPermissions = Maps.newHashMap();
      private final UserBanList bans;
      private final IpBanList ipBans;
-@@ -547,19 +552,79 @@ public abstract class PlayerList {
+@@ -546,21 +548,137 @@ public abstract class PlayerList {
+         }
      }
  
++    public CompletableFuture<PreparedPlayerProgress> preparePlayerProgressAsync(final GameProfile profile) {
++        return this.playerSaveQueue.submit(profile.id(), () ->
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.asyncIo(this.server, "read-player-progress"),
++                () -> this.readPlayerProgress(profile)
++            )
++        );
++    }
++
++    public CompletableFuture<PreparedPlayerLogin> preparePlayerLoginAsync(final GameProfile profile, final boolean loadProgress) {
++        final NameAndId nameAndId = new NameAndId(profile);
++        final UUID singleplayerOwner = this.server.getWorldData().getSinglePlayerUUID();
++        final NameAndId storageId = this.server.isSingleplayerOwner(nameAndId) && singleplayerOwner != null
++            ? new NameAndId(singleplayerOwner, "<singleplayer owner>") : nameAndId;
++        return this.playerSaveQueue.submit(profile.id(), () ->
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.asyncIo(this.server, "read-player-login-data"),
++                () -> new PreparedPlayerLogin(
++                    this.playerIo.load(storageId),
++                    new java.io.File(this.playerIo.getPlayerDir(), profile.id() + ".dat").lastModified(),
++                    loadProgress ? this.readPlayerProgress(profile) : null
++                )
++            )
++        );
++    }
++
++    private PreparedPlayerProgress readPlayerProgress(final GameProfile profile) {
++        final Path statsPath = this.locateStatsFile(profile);
++        final Path advancementPath = this.server.getWorldPath(LevelResource.PLAYER_ADVANCEMENTS_DIR).resolve(profile.id() + ".json");
++        return new PreparedPlayerProgress(
++            profile.id(), statsPath, ServerStatsCounter.readData(this.server.getFixerUpper(), statsPath),
++            advancementPath, PlayerAdvancements.readData(this.server.getFixerUpper(), advancementPath)
++        );
++    }
++
++    public record PreparedPlayerProgress(
++        UUID playerId, Path statsPath, Map<net.minecraft.stats.Stat<?>, Integer> stats,
++        Path advancementPath, PlayerAdvancements.Data advancements
++    ) {
++    }
++
++    public record PreparedPlayerLogin(
++        Optional<CompoundTag> playerData, long lastModified, @Nullable PreparedPlayerProgress progress
++    ) {
++    }
++
      protected void save(final ServerPlayer player) {
 -        if (!player.getBukkitEntity().isPersistent()) return; // CraftBukkit
--        player.lastSave = DomainClock.currentServerTick(this.server); // Paper - Incremental chunk and player saving
--        this.playerIo.save(player);
--        ServerStatsCounter stats = player.getStats(); // CraftBukkit
--        if (stats != null) {
--            stats.save();
 +        final PlayerSaveQueue.Reservation reservation = this.playerSaveQueue.reserve(player.getUUID());
 +        try {
 +            net.minecraft.server.threading.runtime.OwnerDomainExecutor.awaitCooperatively(
@@ -575,22 +862,41 @@ index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..06871cc4e99a1379e566b0737c8b4023
 +        } catch (final Throwable failure) {
 +            reservation.completion().completeExceptionally(failure);
 +            throw failure;
-         }
++        }
 +    }
- 
--        PlayerAdvancements advancements = player.getAdvancements(); // CraftBukkit
--        if (advancements != null) {
--            advancements.save();
--        }
++
++    private CompletableFuture<Void> writeCapturedPlayerSaveAsync(final UUID playerId, final @Nullable CapturedPlayerSave captured) {
++        if (captured == null) return CompletableFuture.completedFuture(null);
++        return this.playerSaveQueue.submit(playerId, () ->
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.submit(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.asyncIo(this.server, "write-player-save"),
++                () -> this.writePlayerSave(captured)
++            )
++        );
++    }
++
++    public void awaitPendingPlayerSaves() {
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.awaitCooperatively(
++            this.playerSaveQueue.drain().handle((ignored, failure) -> {
++                if (failure != null) LOGGER.error("Could not finish pending player saves", failure);
++                return null;
++            }), "finish-pending-player-saves"
++        );
++    }
++
 +    // Loom start - capture player state under PLAYER ownership and write it under ASYNC_IO
 +    private @Nullable CapturedPlayerSave capturePlayerSave(final ServerPlayer player) {
 +        if (!player.getBukkitEntity().isPersistent()) return null; // CraftBukkit
-+        player.lastSave = DomainClock.currentServerTick(this.server); // Paper - Incremental chunk and player saving
+         player.lastSave = DomainClock.currentServerTick(this.server); // Paper - Incremental chunk and player saving
+-        this.playerIo.save(player);
+-        ServerStatsCounter stats = player.getStats(); // CraftBukkit
+-        if (stats != null) {
+-            stats.save();
 +        final PlayerDataStorage.PendingSave playerData = this.playerIo.captureSave(player);
 +        final ServerStatsCounter stats = player.getStats(); // CraftBukkit
-+        final JsonElement statsData = stats == null ? null : stats.captureSave();
++        final Map<net.minecraft.stats.Stat<?>, Integer> statsData = stats == null ? null : stats.captureSaveData();
 +        final PlayerAdvancements advancements = player.getAdvancements(); // CraftBukkit
-+        final JsonElement advancementData = advancements == null ? null : advancements.captureSave();
++        final PlayerAdvancements.Data advancementData = advancements == null ? null : advancements.captureSaveData();
 +        return new CapturedPlayerSave(playerData, stats, statsData, advancements, advancementData);
 +    }
 +
@@ -603,46 +909,59 @@ index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..06871cc4e99a1379e566b0737c8b4023
 +        }
 +        if (captured.advancements() != null && captured.advancementData() != null) {
 +            captured.advancements().writeSave(captured.advancementData());
-+        }
+         }
 +    }
-+
+ 
+-        PlayerAdvancements advancements = player.getAdvancements(); // CraftBukkit
+-        if (advancements != null) {
+-            advancements.save();
 +    public CompletableFuture<Void> saveAllAsync() {
 +        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "save-all-players-async");
 +        final List<CompletableFuture<Void>> writes = new java.util.ArrayList<>(this.players.size());
 +        for (final ServerPlayer player : this.players) {
-+            writes.add(this.playerSaveQueue.submit(player.getUUID(), () ->
-+                net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
-+                    net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "capture-player-save"),
-+                    () -> this.capturePlayerSave(player)
-+                ).handle((captured, failure) -> {
-+                    if (failure == null) return captured;
-+                    final Throwable cause = failure instanceof CompletionException && failure.getCause() != null
-+                        ? failure.getCause() : failure;
-+                    if (cause instanceof RejectedExecutionException && player.hasDisconnected()) return null;
-+                    throw new CompletionException(cause);
-+                }).thenCompose(captured -> captured == null ? CompletableFuture.completedFuture(null)
-+                    : net.minecraft.server.threading.runtime.OwnerDomainExecutor.submit(
-+                        net.minecraft.server.threading.runtime.OwnerDomainExecutor.asyncIo(this.server, "write-player-save"),
-+                        () -> this.writePlayerSave(captured)
-+                    ))
-+            ));
-+        }
++            try (net.minecraft.server.threading.runtime.OwnerDomainExecutor.Scope ignored =
++                     net.minecraft.server.threading.runtime.OwnerDomainExecutor.enter(
++                         net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "capture-player-save")
++                     )) {
++                writes.add(this.writeCapturedPlayerSaveAsync(player.getUUID(), this.capturePlayerSave(player)));
++            }
+         }
++        writes.add(this.playerSaveQueue.drain());
 +        return CompletableFuture.allOf(writes.toArray(CompletableFuture[]::new));
-+    }
-+
+     }
+ 
 +    private record CapturedPlayerSave(
 +        PlayerDataStorage.@Nullable PendingSave playerData,
 +        @Nullable ServerStatsCounter stats,
-+        @Nullable JsonElement statsData,
++        @Nullable Map<net.minecraft.stats.Stat<?>, Integer> statsData,
 +        @Nullable PlayerAdvancements advancements,
-+        @Nullable JsonElement advancementData
++        PlayerAdvancements.@Nullable Data advancementData
 +    ) {
-     }
++    }
 +    // Loom end - capture player state under PLAYER ownership and write it under ASYNC_IO
- 
++
      public net.kyori.adventure.text.@Nullable Component remove(final ServerPlayer player) { // CraftBukkit - return string // Paper - return Component
          // Paper start - Fix kick event leave message not being sent
-@@ -1178,20 +1243,58 @@ public abstract class PlayerList {
+         return this.remove(player, net.kyori.adventure.text.Component.translatable("multiplayer.player.left", net.kyori.adventure.text.format.NamedTextColor.YELLOW, io.papermc.paper.configuration.GlobalConfiguration.get().messages.useDisplayNameInQuitMessage ? player.getBukkitEntity().displayName() : io.papermc.paper.adventure.PaperAdventure.asAdventure(player.getDisplayName())));
+@@ -612,7 +730,16 @@ public abstract class PlayerList {
+             player.drop(carried, false, net.minecraft.util.Prediction.PREDICTED);
+         }
+         // Paper end - Drop carried item when player has disconnected
+-        this.save(player);
++        if (this.server.hasStopped()) {
++            this.save(player);
++        } else {
++            // Capture before removal and retire the player without waiting for disk. The next login
++            // uses the same queue, so it cannot read until this final write has completed.
++            this.writeCapturedPlayerSaveAsync(player.getUUID(), this.capturePlayerSave(player))
++                .whenComplete((ignoredSave, failure) -> {
++                    if (failure != null) LOGGER.error("Could not write final save for {}", player.getPlainTextName(), failure);
++                });
++        }
+         if (player.isPassenger()) {
+             Entity vehicle = player.getRootVehicle();
+             if (vehicle.hasExactlyOnePlayerPassenger()) {
+@@ -1178,20 +1305,48 @@ public abstract class PlayerList {
      }
      public void saveAll(final int interval) {
          // Paper end - Incremental chunk and player saving
@@ -683,18 +1002,8 @@ index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..06871cc4e99a1379e566b0737c8b4023
 +                    if (interval == -1) {
 +                        this.save(player);
 +                    } else {
-+                        // A queued capture may wait for an earlier write; do not queue it again each tick.
-+                        player.lastSave = now;
-+                        this.playerSaveQueue.submit(player.getUUID(), () ->
-+                            net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
-+                                net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "capture-player-autosave"),
-+                                () -> this.capturePlayerSave(player)
-+                            ).thenCompose(captured -> captured == null ? CompletableFuture.completedFuture(null)
-+                                : net.minecraft.server.threading.runtime.OwnerDomainExecutor.submit(
-+                                    net.minecraft.server.threading.runtime.OwnerDomainExecutor.asyncIo(this.server, "write-player-autosave"),
-+                                    () -> this.writePlayerSave(captured)
-+                                ))
-+                        ).whenComplete((ignoredSave, failure) -> {
++                        this.writeCapturedPlayerSaveAsync(player.getUUID(), this.capturePlayerSave(player))
++                            .whenComplete((ignoredSave, failure) -> {
 +                            if (failure != null) LOGGER.error("Could not write autosave for {}", player.getPlainTextName(), failure);
 +                        });
 +                    }
@@ -710,12 +1019,46 @@ index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..06871cc4e99a1379e566b0737c8b4023
      }
  
      public UserWhiteList getWhiteList() {
+@@ -1384,9 +1539,14 @@ public abstract class PlayerList {
+ 
+     // CraftBukkit start
+     public ServerStatsCounter getPlayerStats(final ServerPlayer player) {
++        return this.getPlayerStats(player, null);
++    }
++
++    public ServerStatsCounter getPlayerStats(final ServerPlayer player, final @Nullable PreparedPlayerProgress prepared) {
+         GameProfile gameProfile = player.getGameProfile();
+         ServerStatsCounter playerStatsCounter = player.getStats();
+         if (playerStatsCounter == null) {
++            if (prepared != null) return new ServerStatsCounter(this.server, prepared.statsPath(), prepared.stats());
+             return this.getPlayerStats(gameProfile);
+         } else {
+             return playerStatsCounter;
+@@ -1422,11 +1582,17 @@ public abstract class PlayerList {
+     }
+ 
+     public PlayerAdvancements getPlayerAdvancements(final ServerPlayer player) {
++        return this.getPlayerAdvancements(player, null);
++    }
++
++    public PlayerAdvancements getPlayerAdvancements(final ServerPlayer player, final @Nullable PreparedPlayerProgress prepared) {
+         UUID uuid = player.getUUID();
+         PlayerAdvancements result = player.getAdvancements(); // CraftBukkit
+         if (result == null) {
+             Path uuidStatsFile = this.server.getWorldPath(LevelResource.PLAYER_ADVANCEMENTS_DIR).resolve(uuid + ".json");
+-            result = new PlayerAdvancements(this.server.getFixerUpper(), this, this.server.getAdvancements(), uuidStatsFile, player);
++            result = prepared == null
++                ? new PlayerAdvancements(this.server.getFixerUpper(), this, this.server.getAdvancements(), uuidStatsFile, player)
++                : new PlayerAdvancements(this.server.getFixerUpper(), this, this.server.getAdvancements(), prepared.advancementPath(), player, prepared.advancements());
+             // this.advancements.put(uuid, result); // CraftBukkit
+         }
+ 
 diff --git a/net/minecraft/server/players/PlayerSaveQueue.java b/net/minecraft/server/players/PlayerSaveQueue.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..bc1b8b4c52b1daefbe550b98f015fc4fa642ad05
+index 0000000000000000000000000000000000000000..5fd8f8d651f74d77d8bd5f9b1a378f7ae00c0e8f
 --- /dev/null
 +++ b/net/minecraft/server/players/PlayerSaveQueue.java
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,47 @@
 +package net.minecraft.server.players;
 +
 +import java.util.UUID;
@@ -739,15 +1082,25 @@ index 0000000000000000000000000000000000000000..bc1b8b4c52b1daefbe550b98f015fc4f
 +        return new Reservation(predecessor.get(), completion);
 +    }
 +
-+    CompletableFuture<Void> submit(final UUID playerId, final Supplier<CompletableFuture<Void>> operation) {
++    <T> CompletableFuture<T> submit(final UUID playerId, final Supplier<CompletableFuture<T>> operation) {
 +        final Reservation reservation = this.reserve(playerId);
++        final CompletableFuture<T> result = new CompletableFuture<>();
 +        reservation.previous().handle((ignored, failure) -> null)
 +            .thenCompose(ignored -> operation.get())
-+            .whenComplete((ignored, failure) -> {
-+                if (failure == null) reservation.completion().complete(null);
-+                else reservation.completion().completeExceptionally(failure);
++            .whenComplete((value, failure) -> {
++                if (failure == null) {
++                    reservation.completion().complete(null);
++                    result.complete(value);
++                } else {
++                    reservation.completion().completeExceptionally(failure);
++                    result.completeExceptionally(failure);
++                }
 +            });
-+        return reservation.completion();
++        return result;
++    }
++
++    CompletableFuture<Void> drain() {
++        return CompletableFuture.allOf(this.pending.values().toArray(CompletableFuture[]::new));
 +    }
 +
 +    record Reservation(CompletableFuture<Void> previous, CompletableFuture<Void> completion) {
@@ -770,7 +1123,7 @@ index 6b7cad2ff1b2490090e18925e4380d3202350527..ffc7103102639214c60201a213df3ad0
  
      private static void enqueueRegion(final Owner owner, final Runnable task) {
 diff --git a/net/minecraft/stats/ServerStatsCounter.java b/net/minecraft/stats/ServerStatsCounter.java
-index f5beb001b938072e78c0ead7e0ad0499784ed1cf..7c283b8503ed3fbb2114e66339448a1f393ee974 100644
+index f5beb001b938072e78c0ead7e0ad0499784ed1cf..259af6a325c74da87f179e935f2ce069a59d352d 100644
 --- a/net/minecraft/stats/ServerStatsCounter.java
 +++ b/net/minecraft/stats/ServerStatsCounter.java
 @@ -36,6 +36,7 @@ import net.minecraft.util.StrictJsonParser;
@@ -781,9 +1134,47 @@ index f5beb001b938072e78c0ead7e0ad0499784ed1cf..7c283b8503ed3fbb2114e66339448a1f
  import org.slf4j.Logger;
  
  public class ServerStatsCounter extends StatsCounter {
-@@ -89,17 +90,30 @@ public class ServerStatsCounter extends StatsCounter {
+@@ -64,17 +65,12 @@ public class ServerStatsCounter extends StatsCounter {
      }
  
+     public ServerStatsCounter(final MinecraftServer server, final Path file) {
++        this(server, file, readData(server.getFixerUpper(), file));
++    }
++
++    public ServerStatsCounter(final MinecraftServer server, final Path file, final Map<Stat<?>, Integer> loadedStats) {
+         this.file = file;
+-        if (Files.isRegularFile(file)) {
+-            try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+-                JsonElement element = StrictJsonParser.parse(reader);
+-                this.parse(server.getFixerUpper(), element);
+-            } catch (IOException e) {
+-                LOGGER.error("Couldn't read statistics file {}", file, e);
+-            } catch (JsonParseException e) {
+-                LOGGER.error("Couldn't parse statistics file {}", file, e);
+-            }
+-        }
++        this.stats.putAll(loadedStats);
+         // Paper start - Moved after stat fetching for player state file
+         // Moves the loading after vanilla loading, so it overrides the values.
+         // Disables saving any forced stats, so it stays at the same value (without enabling disableStatSaving)
+@@ -88,18 +84,54 @@ public class ServerStatsCounter extends StatsCounter {
+         // Paper end - Moved after stat fetching for player state file
+     }
+ 
++    public static Map<Stat<?>, Integer> readData(final DataFixer fixerUpper, final Path file) {
++        if (Files.isRegularFile(file)) {
++            try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
++                JsonElement element = StrictJsonParser.parse(reader);
++                return decodeData(fixerUpper, element, file);
++            } catch (IOException e) {
++                LOGGER.error("Couldn't read statistics file {}", file, e);
++            } catch (JsonParseException e) {
++                LOGGER.error("Couldn't parse statistics file {}", file, e);
++            }
++        }
++        return Map.of();
++    }
++
      public void save() {
 -        if (org.spigotmc.SpigotConfig.disableStatSaving) return; // Spigot
 +        final JsonElement snapshot = this.captureSave();
@@ -794,8 +1185,17 @@ index f5beb001b938072e78c0ead7e0ad0499784ed1cf..7c283b8503ed3fbb2114e66339448a1f
 +
 +    // Loom start - split owner-bound capture from asynchronous file I/O
 +    public @Nullable JsonElement captureSave() {
++        final Map<Stat<?>, Integer> data = this.captureSaveData();
++        return data == null ? null : encodeData(data);
++    }
++
++    public @Nullable Map<Stat<?>, Integer> captureSaveData() {
 +        if (org.spigotmc.SpigotConfig.disableStatSaving) return null; // Spigot
-+        return this.toJson();
++        return Map.copyOf(this.stats);
++    }
++
++    public void writeSave(final Map<Stat<?>, Integer> snapshot) {
++        this.writeSave(encodeData(snapshot));
 +    }
 +
 +    public void writeSave(final JsonElement snapshot) {
@@ -814,6 +1214,72 @@ index f5beb001b938072e78c0ead7e0ad0499784ed1cf..7c283b8503ed3fbb2114e66339448a1f
  
      @Override
      public void setValue(final Player player, final Stat<?> stat, final int count) {
+@@ -116,19 +148,24 @@ public class ServerStatsCounter extends StatsCounter {
+     }
+ 
+     public void parse(final DataFixer fixerUpper, final JsonElement element) {
++        this.stats.putAll(decodeData(fixerUpper, element, this.file));
++    }
++
++    private static Map<Stat<?>, Integer> decodeData(final DataFixer fixerUpper, final JsonElement element, final Path file) {
+         Dynamic<JsonElement> data = new Dynamic<>(JsonOps.INSTANCE, element);
+         data = DataFixTypes.STATS.updateToCurrentVersion(fixerUpper, data, NbtUtils.getDataVersion(data, 1343));
+-        this.stats
+-            .putAll(
+-                STATS_CODEC.parse(data.get("stats").orElseEmptyMap())
+-                    .resultOrPartial(error -> LOGGER.error("Failed to parse statistics for {}: {}", this.file, error))
+-                    .orElse(Map.of())
+-            );
++        return STATS_CODEC.parse(data.get("stats").orElseEmptyMap())
++            .resultOrPartial(error -> LOGGER.error("Failed to parse statistics for {}: {}", file, error))
++            .orElse(Map.of());
+     }
+ 
+     protected JsonElement toJson() {
++        return encodeData(this.stats);
++    }
++
++    private static JsonElement encodeData(final Map<Stat<?>, Integer> data) {
+         JsonObject result = new JsonObject();
+-        result.add("stats", STATS_CODEC.encodeStart(JsonOps.INSTANCE, this.stats).getOrThrow());
++        result.add("stats", STATS_CODEC.encodeStart(JsonOps.INSTANCE, data).getOrThrow());
+         result.addProperty("DataVersion", SharedConstants.getCurrentVersion().dataVersion().version());
+         return result;
+     }
+diff --git a/net/minecraft/stats/StatType.java b/net/minecraft/stats/StatType.java
+index 3c1d74c92948d550bd8d96e9603b743bb34ef2c5..61b09e77d09cd19c1948144bf472aea99139a3ba 100644
+--- a/net/minecraft/stats/StatType.java
++++ b/net/minecraft/stats/StatType.java
+@@ -1,7 +1,9 @@
+ package net.minecraft.stats;
+ 
++import java.util.Collections;
+ import java.util.IdentityHashMap;
+ import java.util.Iterator;
++import java.util.List;
+ import java.util.Map;
+ import net.minecraft.core.Registry;
+ import net.minecraft.network.RegistryFriendlyByteBuf;
+@@ -11,7 +13,7 @@ import net.minecraft.network.codec.StreamCodec;
+ 
+ public class StatType<T> implements Iterable<Stat<T>> {
+     private final Registry<T> registry;
+-    private final Map<T, Stat<T>> map = new IdentityHashMap<>();
++    private final Map<T, Stat<T>> map = Collections.synchronizedMap(new IdentityHashMap<>());
+     private final Component displayName;
+     private final StreamCodec<RegistryFriendlyByteBuf, Stat<T>> streamCodec;
+ 
+@@ -39,7 +41,9 @@ public class StatType<T> implements Iterable<Stat<T>> {
+ 
+     @Override
+     public Iterator<Stat<T>> iterator() {
+-        return this.map.values().iterator();
++        synchronized (this.map) {
++            return List.copyOf(this.map.values()).iterator();
++        }
+     }
+ 
+     public Stat<T> get(final T argument) {
 diff --git a/net/minecraft/world/level/chunk/storage/RegionFileStorage.java b/net/minecraft/world/level/chunk/storage/RegionFileStorage.java
 index 154b571b33c868c6520ab563d8cd5482f1c288c3..e15c83000686df52bdd4433ee2bf74f7b8e77389 100644
 --- a/net/minecraft/world/level/chunk/storage/RegionFileStorage.java

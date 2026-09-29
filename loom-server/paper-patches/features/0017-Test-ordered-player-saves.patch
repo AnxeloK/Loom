@@ -6,16 +6,17 @@ Subject: [PATCH] Test ordered player saves
 
 diff --git a/src/test/java/net/minecraft/server/players/PlayerSaveQueueTest.java b/src/test/java/net/minecraft/server/players/PlayerSaveQueueTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..4d1514655ca774796609e0e7ff4034fefbd13039
+index 0000000000000000000000000000000000000000..844168b3dd495b5be60af727667da004d342c9a8
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/players/PlayerSaveQueueTest.java
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,117 @@
 +package net.minecraft.server.players;
 +
 +import java.io.IOException;
 +import java.util.UUID;
 +import java.util.concurrent.CompletableFuture;
 +import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicReference;
 +import org.bukkit.support.environment.Normal;
 +import org.junit.jupiter.api.Test;
 +
@@ -77,10 +78,58 @@ index 0000000000000000000000000000000000000000..4d1514655ca774796609e0e7ff4034fe
 +        assertTrue(autosaveStarted.get());
 +        assertTrue(autosave.isDone());
 +    }
++
++    @Test
++    void reconnectReadsTheFinalLogoutStateAfterTheWriteCompletes() {
++        final PlayerSaveQueue queue = new PlayerSaveQueue();
++        final UUID player = UUID.randomUUID();
++        final AtomicReference<String> disk = new AtomicReference<>("old inventory");
++        final CompletableFuture<Void> write = new CompletableFuture<>();
++        queue.submit(player, () -> write.thenRun(() -> disk.set("final inventory")));
++
++        final CompletableFuture<String> reconnect = queue.submit(player,
++            () -> CompletableFuture.completedFuture(disk.get()));
++        assertFalse(reconnect.isDone(), "a reconnect must not read the old file while logout is writing");
++        final CompletableFuture<Void> shutdown = queue.drain();
++        assertFalse(shutdown.isDone(), "shutdown must retain saves for players already removed");
++
++        write.complete(null);
++        assertEquals("final inventory", reconnect.join());
++        assertTrue(shutdown.isDone());
++    }
++
++    @Test
++    void cancelledLoginDoesNotStrandLaterSaves() {
++        final PlayerSaveQueue queue = new PlayerSaveQueue();
++        final UUID player = UUID.randomUUID();
++        final CompletableFuture<String> read = new CompletableFuture<>();
++        final CompletableFuture<String> login = queue.submit(player, () -> read);
++        login.cancel(false);
++        final AtomicBoolean saved = new AtomicBoolean();
++        final CompletableFuture<Void> laterSave = queue.submit(player, () -> {
++            saved.set(true);
++            return CompletableFuture.completedFuture(null);
++        });
++
++        assertFalse(saved.get());
++        read.complete("discarded login data");
++        assertTrue(saved.get());
++        assertTrue(laterSave.isDone());
++        assertTrue(queue.drain().isDone());
++    }
++
++    @Test
++    void onePlayersSlowDiskOperationDoesNotHoldAnotherPlayer() {
++        final PlayerSaveQueue queue = new PlayerSaveQueue();
++        queue.submit(UUID.randomUUID(), CompletableFuture<Void>::new);
++        final CompletableFuture<String> otherLogin = queue.submit(UUID.randomUUID(),
++            () -> CompletableFuture.completedFuture("ready"));
++        assertEquals("ready", otherLogin.join());
++    }
 +}
 diff --git a/src/test/java/net/minecraft/server/players/PlayerSaveQueueTestSuite.java b/src/test/java/net/minecraft/server/players/PlayerSaveQueueTestSuite.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..b0f4292c4a0f8177006d3ee1bba771cde203cf6e
+index 0000000000000000000000000000000000000000..b8f6d9d66fae045eede123ec2155277697e02e3e
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/players/PlayerSaveQueueTestSuite.java
 @@ -0,0 +1,15 @@
@@ -95,7 +144,151 @@ index 0000000000000000000000000000000000000000..b0f4292c4a0f8177006d3ee1bba771cd
 +@Suite
 +@SuiteDisplayName("Ordered player saves")
 +@IncludeTags("Normal")
-+@SelectClasses(PlayerSaveQueueTest.class)
++@SelectClasses({PlayerSaveQueueTest.class, PreparedPlayerProgressTest.class})
 +@ConfigurationParameter(key = "TestSuite", value = "Normal")
 +public class PlayerSaveQueueTestSuite {
++}
+diff --git a/src/test/java/net/minecraft/server/players/PreparedPlayerProgressTest.java b/src/test/java/net/minecraft/server/players/PreparedPlayerProgressTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..977d7a92abd64f3ddea205418a472503504b232d
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/players/PreparedPlayerProgressTest.java
+@@ -0,0 +1,138 @@
++package net.minecraft.server.players;
++
++import com.mojang.datafixers.DataFixer;
++import com.mojang.serialization.JsonOps;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.Callable;
++import java.util.concurrent.CyclicBarrier;
++import java.util.concurrent.Executors;
++import java.util.concurrent.TimeUnit;
++import net.minecraft.SharedConstants;
++import net.minecraft.advancements.AdvancementProgress;
++import net.minecraft.advancements.AdvancementRequirements;
++import net.minecraft.core.registries.BuiltInRegistries;
++import net.minecraft.resources.Identifier;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.PlayerAdvancements;
++import net.minecraft.stats.ServerStatsCounter;
++import net.minecraft.stats.Stat;
++import net.minecraft.stats.StatType;
++import net.minecraft.stats.Stats;
++import net.minecraft.util.datafix.DataFixers;
++import net.minecraft.util.datafix.DataFixTypes;
++import net.minecraft.world.item.Item;
++import net.minecraft.world.item.Items;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.mock;
++
++@Normal
++class PreparedPlayerProgressTest {
++    @TempDir
++    Path directory;
++
++    @Test
++    void preparedStatsAreUsedWithoutReadingTheFileAgain() throws Exception {
++        final Path file = this.directory.resolve("stats.json");
++        final int version = SharedConstants.getCurrentVersion().dataVersion().version();
++        Files.writeString(file, "{\"DataVersion\":" + version
++            + ",\"stats\":{\"minecraft:custom\":{\"minecraft:jump\":17}}}");
++        final DataFixer fixer = DataFixers.getDataFixer();
++        final var prepared = ServerStatsCounter.readData(fixer, file);
++        Files.delete(file);
++
++        final ServerStatsCounter counter = new ServerStatsCounter(mock(MinecraftServer.class), file, prepared);
++        assertEquals(17, counter.getValue(Stats.CUSTOM.get(Stats.JUMP)));
++    }
++
++    @Test
++    void advancementDecodePreservesCompletedCriteria() throws Exception {
++        final DataFixer fixer = DataFixers.getDataFixer();
++        final AdvancementProgress progress = new AdvancementProgress();
++        progress.update(new AdvancementRequirements(List.of(List.of("fixture"))));
++        assertTrue(progress.grantProgress("fixture"));
++        final Identifier key = Identifier.parse("minecraft:story/root");
++        final PlayerAdvancements.Data data = new PlayerAdvancements.Data(Map.of(key, progress));
++        final Path file = this.directory.resolve("advancements.json");
++        Files.writeString(file, DataFixTypes.ADVANCEMENTS.wrapCodec(PlayerAdvancements.Data.CODEC, fixer, 1343)
++            .encodeStart(JsonOps.INSTANCE, data).getOrThrow().toString());
++
++        final PlayerAdvancements.Data prepared = PlayerAdvancements.readData(fixer, file);
++        assertEquals(progress.getCriterion("fixture").getObtained().truncatedTo(java.time.temporal.ChronoUnit.SECONDS),
++            prepared.map().get(key).getCriterion("fixture").getObtained());
++        Files.delete(file);
++        assertEquals(1, prepared.map().size());
++    }
++
++    @Test
++    void missingAndMalformedProgressKeepTheVanillaEmptyFallback() throws Exception {
++        final DataFixer fixer = DataFixers.getDataFixer();
++        final Path file = this.directory.resolve("missing.json");
++        assertTrue(ServerStatsCounter.readData(fixer, file).isEmpty());
++        assertTrue(PlayerAdvancements.readData(fixer, file).map().isEmpty());
++        Files.writeString(file, "{broken");
++        assertTrue(ServerStatsCounter.readData(fixer, file).isEmpty());
++        assertTrue(PlayerAdvancements.readData(fixer, file).map().isEmpty());
++    }
++
++    @Test
++    void advancementSnapshotDoesNotChangeWhenLiveProgressIsRevoked() {
++        final AdvancementProgress live = new AdvancementProgress();
++        live.update(new AdvancementRequirements(List.of(List.of("fixture"))));
++        live.grantProgress("fixture");
++        final AdvancementProgress snapshot = live.copy();
++        live.revokeProgress("fixture");
++        assertTrue(snapshot.isDone());
++        assertFalse(live.isDone());
++        assertNotSame(snapshot.getCriterion("fixture"), live.getCriterion("fixture"));
++    }
++
++    @Test
++    void statsSnapshotRetainsTheCapturedValueWhileThePlayerChanges() {
++        final var stat = Stats.CUSTOM.get(Stats.JUMP);
++        final ServerStatsCounter counter = new ServerStatsCounter(mock(MinecraftServer.class),
++            this.directory.resolve("stats.json"), Map.of(stat, 17));
++        final var snapshot = counter.captureSaveData();
++        counter.setValue(null, stat, 99);
++        assertEquals(17, snapshot.get(stat));
++        assertEquals(99, counter.getValue(stat));
++    }
++
++    @Test
++    void parallelStatDecodeKeepsCanonicalStatsAndStableIteration() throws Exception {
++        final StatType<Item> type = Stats.ITEM_USED;
++        final List<Item> items = BuiltInRegistries.ITEM.stream().toList();
++        final int workers = 8;
++        final CyclicBarrier start = new CyclicBarrier(workers);
++        final List<Callable<Stat<Item>>> tasks = new java.util.ArrayList<>();
++        for (int worker = 0; worker < workers; ++worker) {
++            final int offset = worker;
++            tasks.add(() -> {
++                start.await(10, TimeUnit.SECONDS);
++                for (int i = 0; i < items.size(); ++i) {
++                    final Item item = items.get((i + offset) % items.size());
++                    assertSame(type.get(item), type.get(item));
++                    if (i % 32 == 0) {
++                        for (final Stat<Item> stat : type) {
++                            assertSame(stat, type.get(stat.getValue()));
++                        }
++                    }
++                }
++                return type.get(Items.DIAMOND_SWORD);
++            });
++        }
++        try (var executor = Executors.newFixedThreadPool(workers)) {
++            final var results = executor.invokeAll(tasks, 30, TimeUnit.SECONDS);
++            for (final var result : results) {
++                assertSame(type.get(Items.DIAMOND_SWORD), result.get());
++            }
++        }
++        assertEquals(items.size(), java.util.stream.StreamSupport.stream(type.spliterator(), false).count());
++    }
 +}

@@ -588,7 +588,7 @@ index 020b8b989b4ffda2bf32b6c4803fed2f910b8460..f59046b4df39107b378a8acdab660363
                          break;
                      }
 diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
-index 3aae70be4b99006517179d2129760951572ca6cf..76649cb96c2e0282fcd7bd830a6716e922fa09ee 100644
+index fcbea1eaa028fb77a67154d0ffa0afb0719343da..8fbbbc11856193996f3b8a99009c75604d147b0c 100644
 --- a/net/minecraft/network/Connection.java
 +++ b/net/minecraft/network/Connection.java
 @@ -27,6 +27,7 @@ import java.nio.channels.ClosedChannelException;
@@ -607,7 +607,7 @@ index 3aae70be4b99006517179d2129760951572ca6cf..76649cb96c2e0282fcd7bd830a6716e9
      public Channel channel;
      public SocketAddress address;
      // Spigot start
-@@ -445,6 +447,29 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -446,6 +448,29 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          }
      }
  
@@ -637,7 +637,7 @@ index 3aae70be4b99006517179d2129760951572ca6cf..76649cb96c2e0282fcd7bd830a6716e9
      public void runOnceConnected(final Consumer<Connection> action) {
          if (this.isConnected()) {
              this.flushQueue();
-@@ -500,7 +525,19 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -501,7 +526,19 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          if (this.channel.eventLoop().inEventLoop()) {
              this.doSendPacket(packet, listener, flush);
          } else {

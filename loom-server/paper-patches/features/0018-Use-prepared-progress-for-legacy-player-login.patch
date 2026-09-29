@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 30 Sep 2026 00:25:43 +0300
+Subject: [PATCH] Use prepared progress for legacy player login
+
+
+diff --git a/src/main/java/io/papermc/paper/connection/HorriblePlayerLoginEventHack.java b/src/main/java/io/papermc/paper/connection/HorriblePlayerLoginEventHack.java
+index e6511bddcdf1dc455d17d91d733aad055d2301dc..71586e8cc2f98fed6390cba923108fa74de83f5e 100644
+--- a/src/main/java/io/papermc/paper/connection/HorriblePlayerLoginEventHack.java
++++ b/src/main/java/io/papermc/paper/connection/HorriblePlayerLoginEventHack.java
+@@ -79,8 +79,9 @@ public class HorriblePlayerLoginEventHack {
+         if (connection.savedPlayerForLegacyEvents != null) {
+             player = connection.savedPlayerForLegacyEvents;
+         } else {
+-            ServerPlayer serverPlayer = new ServerPlayer(server, server.overworld(), profile, ClientInformation.createDefault());
++            ServerPlayer serverPlayer = new ServerPlayer(server, server.overworld(), profile, ClientInformation.createDefault(), connection.preparedPlayerProgress);
+             connection.savedPlayerForLegacyEvents = serverPlayer;
++            connection.preparedPlayerProgress = null;
+             player = serverPlayer;
+         }
+         connection.handledLegacyLoginEvent = true;

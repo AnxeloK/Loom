@@ -13,10 +13,10 @@ level, which is safe because both paths run on the single-threaded
 packet drain.
 
 diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
-index 76649cb96c2e0282fcd7bd830a6716e922fa09ee..9f38dbb30a8d0b60086206cda7c4916419ae7fa4 100644
+index 8fbbbc11856193996f3b8a99009c75604d147b0c..a37e34a4e1b6aaf75a702ebb98fee4070109aa9f 100644
 --- a/net/minecraft/network/Connection.java
 +++ b/net/minecraft/network/Connection.java
-@@ -654,26 +654,50 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -655,26 +655,50 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
      private static int joinAttemptsThisTick; // Paper - Buffer joins to world
      private static int currTick; // Paper - Buffer joins to world
  
@@ -75,7 +75,7 @@ index 76649cb96c2e0282fcd7bd830a6716e922fa09ee..9f38dbb30a8d0b60086206cda7c49164
              } finally {
                  net.minecraft.server.threading.TickRegions.popContext(context);
              }
-@@ -683,8 +707,8 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+@@ -684,8 +708,8 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
          action.run();
      }
  
