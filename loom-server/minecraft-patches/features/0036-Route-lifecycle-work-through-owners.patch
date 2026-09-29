@@ -523,7 +523,7 @@ index 299991905c24a7018f8ac60d0c16e56fa43cd710..315622400592063d7dcf90bd5ed9e944
      }
  }
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..b9748a691f1a21cb8a2ff61f318772ea1004b71d 100644
+index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..06871cc4e99a1379e566b0737c8b4023e2d0241c 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
 @@ -3,6 +3,7 @@ package net.minecraft.server.players;
@@ -544,25 +544,48 @@ index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..b9748a691f1a21cb8a2ff61f318772ea
  import java.util.function.Function;
  import java.util.function.Predicate;
  import net.minecraft.ChatFormatting;
-@@ -547,19 +551,79 @@ public abstract class PlayerList {
+@@ -116,6 +120,7 @@ public abstract class PlayerList {
+     private final MinecraftServer server;
+     private final List<ServerPlayer> players = new java.util.concurrent.CopyOnWriteArrayList(); // CraftBukkit - ArrayList -> CopyOnWriteArrayList: Iterator safety
+     private final Map<UUID, ServerPlayer> playersByUUID = Maps.newHashMap();
++    private final PlayerSaveQueue playerSaveQueue = new PlayerSaveQueue(); // Loom - keep async autosaves ordered with logout and shutdown
+     private final Map<NameAndId, PermissionLevel> playerPermissions = Maps.newHashMap();
+     private final UserBanList bans;
+     private final IpBanList ipBans;
+@@ -547,19 +552,79 @@ public abstract class PlayerList {
      }
  
      protected void save(final ServerPlayer player) {
 -        if (!player.getBukkitEntity().isPersistent()) return; // CraftBukkit
-+        final CapturedPlayerSave captured = this.capturePlayerSave(player);
-+        if (captured != null) {
-+            this.writePlayerSave(captured);
-+        }
-+    }
-+
-+    // Loom start - capture player state under PLAYER ownership and write it under ASYNC_IO
-+    private @Nullable CapturedPlayerSave capturePlayerSave(final ServerPlayer player) {
-+        if (!player.getBukkitEntity().isPersistent()) return null; // CraftBukkit
-         player.lastSave = DomainClock.currentServerTick(this.server); // Paper - Incremental chunk and player saving
+-        player.lastSave = DomainClock.currentServerTick(this.server); // Paper - Incremental chunk and player saving
 -        this.playerIo.save(player);
 -        ServerStatsCounter stats = player.getStats(); // CraftBukkit
 -        if (stats != null) {
 -            stats.save();
++        final PlayerSaveQueue.Reservation reservation = this.playerSaveQueue.reserve(player.getUUID());
++        try {
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.awaitCooperatively(
++                reservation.previous().handle((ignored, failure) -> null), "finish-previous-player-save"
++            );
++            final CapturedPlayerSave captured = this.capturePlayerSave(player);
++            if (captured != null) {
++                this.writePlayerSave(captured);
++            }
++            reservation.completion().complete(null);
++        } catch (final Throwable failure) {
++            reservation.completion().completeExceptionally(failure);
++            throw failure;
+         }
++    }
+ 
+-        PlayerAdvancements advancements = player.getAdvancements(); // CraftBukkit
+-        if (advancements != null) {
+-            advancements.save();
+-        }
++    // Loom start - capture player state under PLAYER ownership and write it under ASYNC_IO
++    private @Nullable CapturedPlayerSave capturePlayerSave(final ServerPlayer player) {
++        if (!player.getBukkitEntity().isPersistent()) return null; // CraftBukkit
++        player.lastSave = DomainClock.currentServerTick(this.server); // Paper - Incremental chunk and player saving
 +        final PlayerDataStorage.PendingSave playerData = this.playerIo.captureSave(player);
 +        final ServerStatsCounter stats = player.getStats(); // CraftBukkit
 +        final JsonElement statsData = stats == null ? null : stats.captureSave();
@@ -577,46 +600,33 @@ index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..b9748a691f1a21cb8a2ff61f318772ea
 +        }
 +        if (captured.stats() != null && captured.statsData() != null) {
 +            captured.stats().writeSave(captured.statsData());
-         }
++        }
 +        if (captured.advancements() != null && captured.advancementData() != null) {
 +            captured.advancements().writeSave(captured.advancementData());
 +        }
 +    }
- 
--        PlayerAdvancements advancements = player.getAdvancements(); // CraftBukkit
--        if (advancements != null) {
--            advancements.save();
++
 +    public CompletableFuture<Void> saveAllAsync() {
 +        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "save-all-players-async");
 +        final List<CompletableFuture<Void>> writes = new java.util.ArrayList<>(this.players.size());
 +        for (final ServerPlayer player : this.players) {
-+            final CompletableFuture<CapturedPlayerSave> capture = net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
-+                net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "capture-player-save"),
-+                () -> this.capturePlayerSave(player)
-+            );
-+            writes.add(
-+                capture.handle((captured, failure) -> {
-+                    if (failure == null) {
-+                        return captured;
-+                    }
++            writes.add(this.playerSaveQueue.submit(player.getUUID(), () ->
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
++                    net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "capture-player-save"),
++                    () -> this.capturePlayerSave(player)
++                ).handle((captured, failure) -> {
++                    if (failure == null) return captured;
 +                    final Throwable cause = failure instanceof CompletionException && failure.getCause() != null
-+                        ? failure.getCause()
-+                        : failure;
-+                    if (cause instanceof RejectedExecutionException && player.hasDisconnected()) {
-+                        return null;
-+                    }
++                        ? failure.getCause() : failure;
++                    if (cause instanceof RejectedExecutionException && player.hasDisconnected()) return null;
 +                    throw new CompletionException(cause);
-+                }).thenCompose(captured -> {
-+                    if (captured == null) {
-+                        return CompletableFuture.completedFuture(null);
-+                    }
-+                    return net.minecraft.server.threading.runtime.OwnerDomainExecutor.submit(
++                }).thenCompose(captured -> captured == null ? CompletableFuture.completedFuture(null)
++                    : net.minecraft.server.threading.runtime.OwnerDomainExecutor.submit(
 +                        net.minecraft.server.threading.runtime.OwnerDomainExecutor.asyncIo(this.server, "write-player-save"),
 +                        () -> this.writePlayerSave(captured)
-+                    );
-+                })
-+            );
-         }
++                    ))
++            ));
++        }
 +        return CompletableFuture.allOf(writes.toArray(CompletableFuture[]::new));
 +    }
 +
@@ -632,7 +642,7 @@ index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..b9748a691f1a21cb8a2ff61f318772ea
  
      public net.kyori.adventure.text.@Nullable Component remove(final ServerPlayer player) { // CraftBukkit - return string // Paper - return Component
          // Paper start - Fix kick event leave message not being sent
-@@ -1178,20 +1242,41 @@ public abstract class PlayerList {
+@@ -1178,20 +1243,58 @@ public abstract class PlayerList {
      }
      public void saveAll(final int interval) {
          // Paper end - Incremental chunk and player saving
@@ -670,7 +680,24 @@ index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..b9748a691f1a21cb8a2ff61f318772ea
 +                         net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "save-player")
 +                     )) {
 +                if (interval == -1 || now - player.lastSave >= interval) {
-+                    this.save(player);
++                    if (interval == -1) {
++                        this.save(player);
++                    } else {
++                        // A queued capture may wait for an earlier write; do not queue it again each tick.
++                        player.lastSave = now;
++                        this.playerSaveQueue.submit(player.getUUID(), () ->
++                            net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
++                                net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "capture-player-autosave"),
++                                () -> this.capturePlayerSave(player)
++                            ).thenCompose(captured -> captured == null ? CompletableFuture.completedFuture(null)
++                                : net.minecraft.server.threading.runtime.OwnerDomainExecutor.submit(
++                                    net.minecraft.server.threading.runtime.OwnerDomainExecutor.asyncIo(this.server, "write-player-autosave"),
++                                    () -> this.writePlayerSave(captured)
++                                ))
++                        ).whenComplete((ignoredSave, failure) -> {
++                            if (failure != null) LOGGER.error("Could not write autosave for {}", player.getPlainTextName(), failure);
++                        });
++                    }
 +                    saved = true;
                  }
              }
@@ -683,6 +710,49 @@ index 740abe3e1c0d83c46877a8da0cd5eeb81ce0df73..b9748a691f1a21cb8a2ff61f318772ea
      }
  
      public UserWhiteList getWhiteList() {
+diff --git a/net/minecraft/server/players/PlayerSaveQueue.java b/net/minecraft/server/players/PlayerSaveQueue.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc1b8b4c52b1daefbe550b98f015fc4fa642ad05
+--- /dev/null
++++ b/net/minecraft/server/players/PlayerSaveQueue.java
+@@ -0,0 +1,37 @@
++package net.minecraft.server.players;
++
++import java.util.UUID;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.function.Supplier;
++
++/** Orders captures and writes for one player without serializing different players. */
++final class PlayerSaveQueue {
++    private final ConcurrentHashMap<UUID, CompletableFuture<Void>> pending = new ConcurrentHashMap<>();
++
++    Reservation reserve(final UUID playerId) {
++        final CompletableFuture<Void> completion = new CompletableFuture<>();
++        final AtomicReference<CompletableFuture<Void>> predecessor = new AtomicReference<>(CompletableFuture.completedFuture(null));
++        this.pending.compute(playerId, (ignored, previous) -> {
++            if (previous != null) predecessor.set(previous);
++            return completion;
++        });
++        completion.whenComplete((ignored, failure) -> this.pending.remove(playerId, completion));
++        return new Reservation(predecessor.get(), completion);
++    }
++
++    CompletableFuture<Void> submit(final UUID playerId, final Supplier<CompletableFuture<Void>> operation) {
++        final Reservation reservation = this.reserve(playerId);
++        reservation.previous().handle((ignored, failure) -> null)
++            .thenCompose(ignored -> operation.get())
++            .whenComplete((ignored, failure) -> {
++                if (failure == null) reservation.completion().complete(null);
++                else reservation.completion().completeExceptionally(failure);
++            });
++        return reservation.completion();
++    }
++
++    record Reservation(CompletableFuture<Void> previous, CompletableFuture<Void> completion) {
++    }
++}
 diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 index 6b7cad2ff1b2490090e18925e4380d3202350527..ffc7103102639214c60201a213df3ad042a05c85 100644
 --- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java

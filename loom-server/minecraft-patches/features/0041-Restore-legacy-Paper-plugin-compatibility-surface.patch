@@ -410,10 +410,10 @@ index 3031fc69e554222c8bfd2339514e402213998a24..90930ff873e48ede1241503bab0d3b31
              if (this.server.getCompressionThreshold() >= 0 && !this.connection.isMemoryConnection()) {
                  // Paper start - Keep compression packet write and setup in the same Netty task
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index b9748a691f1a21cb8a2ff61f318772ea1004b71d..02acd1cb4f0cdec73da73f80f47f0546f04afb7b 100644
+index 06871cc4e99a1379e566b0737c8b4023e2d0241c..8013b48e7e5eae77c13e388871470ec5b08ac9ab 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
-@@ -812,6 +812,7 @@ public abstract class PlayerList {
+@@ -813,6 +813,7 @@ public abstract class PlayerList {
          final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason
      ) {
          final CompletableFuture<ServerPlayer> resultFuture = new CompletableFuture<>();
@@ -421,7 +421,7 @@ index b9748a691f1a21cb8a2ff61f318772ea1004b71d..02acd1cb4f0cdec73da73f80f47f0546
          serverPlayer.findRespawnPositionAndUseSpawnBlockAsync(
              !keepAllPlayerData, TeleportTransition.DO_NOTHING, respawnReason
          ).whenComplete((result, throwable) -> {
-@@ -855,7 +856,7 @@ public abstract class PlayerList {
+@@ -856,7 +857,7 @@ public abstract class PlayerList {
  
                              runWithRespawnOwnerContexts(serverPlayer, transition, () -> {
                                  final ServerPlayer respawned = this.respawnWithResult(
@@ -430,7 +430,7 @@ index b9748a691f1a21cb8a2ff61f318772ea1004b71d..02acd1cb4f0cdec73da73f80f47f0546
                                  );
                                  resultFuture.complete(respawned);
                              });
-@@ -876,11 +877,12 @@ public abstract class PlayerList {
+@@ -877,11 +878,12 @@ public abstract class PlayerList {
      }
  
      public ServerPlayer respawn(final ServerPlayer serverPlayer, final boolean keepAllPlayerData, final Entity.RemovalReason removalReason, final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason) {
@@ -444,7 +444,7 @@ index b9748a691f1a21cb8a2ff61f318772ea1004b71d..02acd1cb4f0cdec73da73f80f47f0546
      }
  
      private ServerPlayer respawnWithResult(
-@@ -888,7 +890,8 @@ public abstract class PlayerList {
+@@ -889,7 +891,8 @@ public abstract class PlayerList {
          final boolean keepAllPlayerData,
          final Entity.RemovalReason removalReason,
          final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason,
@@ -454,7 +454,7 @@ index b9748a691f1a21cb8a2ff61f318772ea1004b71d..02acd1cb4f0cdec73da73f80f47f0546
      ) {
          net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "player-respawn-transfer");
          TeleportTransition respawnInfo = result.transition();
-@@ -953,7 +956,7 @@ public abstract class PlayerList {
+@@ -954,7 +957,7 @@ public abstract class PlayerList {
          this.sendAllPlayerInfo(serverPlayer); // Update health
          serverPlayer.onUpdateAbilities(); // Update inventory, etc
          // Paper end
@@ -463,7 +463,7 @@ index b9748a691f1a21cb8a2ff61f318772ea1004b71d..02acd1cb4f0cdec73da73f80f47f0546
          if (!keepAllPlayerData && result.isAnchorSpawn() && respawnBlockPosition != null) {
              player.connection
                  .send(
-@@ -1301,7 +1304,7 @@ public abstract class PlayerList {
+@@ -1319,7 +1322,7 @@ public abstract class PlayerList {
      public void sendLevelInfo(final ServerPlayer player, final ServerLevel level) {
          WorldBorder worldBorder = level.getWorldBorder();
          player.connection.send(new ClientboundInitializeBorderPacket(worldBorder));

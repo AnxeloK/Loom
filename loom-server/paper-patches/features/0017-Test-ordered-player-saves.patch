@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 29 Sep 2026 11:43:59 +0300
+Subject: [PATCH] Test ordered player saves
+
+
+diff --git a/src/test/java/net/minecraft/server/players/PlayerSaveQueueTest.java b/src/test/java/net/minecraft/server/players/PlayerSaveQueueTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4d1514655ca774796609e0e7ff4034fefbd13039
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/players/PlayerSaveQueueTest.java
+@@ -0,0 +1,68 @@
++package net.minecraft.server.players;
++
++import java.io.IOException;
++import java.util.UUID;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.atomic.AtomicBoolean;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.*;
++
++@Normal
++class PlayerSaveQueueTest {
++    @Test
++    void laterSnapshotCannotOvertakeAnUnfinishedWrite() {
++        final PlayerSaveQueue queue = new PlayerSaveQueue();
++        final UUID player = UUID.randomUUID();
++        final CompletableFuture<Void> firstWrite = new CompletableFuture<>();
++        final AtomicBoolean secondStarted = new AtomicBoolean();
++
++        final CompletableFuture<Void> first = queue.submit(player, () -> firstWrite);
++        final CompletableFuture<Void> second = queue.submit(player, () -> {
++            secondStarted.set(true);
++            return CompletableFuture.completedFuture(null);
++        });
++        assertFalse(secondStarted.get());
++        assertFalse(second.isDone());
++
++        firstWrite.complete(null);
++        assertTrue(first.isDone());
++        assertTrue(secondStarted.get());
++        assertTrue(second.isDone());
++    }
++
++    @Test
++    void failedWriteDoesNotPreventTheNextSnapshot() {
++        final PlayerSaveQueue queue = new PlayerSaveQueue();
++        final UUID player = UUID.randomUUID();
++        final CompletableFuture<Void> firstWrite = new CompletableFuture<>();
++        final CompletableFuture<Void> first = queue.submit(player, () -> firstWrite);
++        final AtomicBoolean secondStarted = new AtomicBoolean();
++        final CompletableFuture<Void> second = queue.submit(player, () -> {
++            secondStarted.set(true);
++            return CompletableFuture.completedFuture(null);
++        });
++
++        firstWrite.completeExceptionally(new IOException("disk failed"));
++        assertTrue(first.isCompletedExceptionally());
++        assertTrue(secondStarted.get());
++        assertFalse(second.isCompletedExceptionally());
++    }
++
++    @Test
++    void logoutReservationHoldsLaterAutosavesUntilItCompletes() {
++        final PlayerSaveQueue queue = new PlayerSaveQueue();
++        final UUID player = UUID.randomUUID();
++        final PlayerSaveQueue.Reservation logout = queue.reserve(player);
++        final AtomicBoolean autosaveStarted = new AtomicBoolean();
++        final CompletableFuture<Void> autosave = queue.submit(player, () -> {
++            autosaveStarted.set(true);
++            return CompletableFuture.completedFuture(null);
++        });
++        assertFalse(autosaveStarted.get());
++        logout.completion().complete(null);
++        assertTrue(autosaveStarted.get());
++        assertTrue(autosave.isDone());
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/players/PlayerSaveQueueTestSuite.java b/src/test/java/net/minecraft/server/players/PlayerSaveQueueTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b0f4292c4a0f8177006d3ee1bba771cde203cf6e
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/players/PlayerSaveQueueTestSuite.java
+@@ -0,0 +1,15 @@
++package net.minecraft.server.players;
++
++import org.junit.platform.suite.api.ConfigurationParameter;
++import org.junit.platform.suite.api.IncludeTags;
++import org.junit.platform.suite.api.SelectClasses;
++import org.junit.platform.suite.api.Suite;
++import org.junit.platform.suite.api.SuiteDisplayName;
++
++@Suite
++@SuiteDisplayName("Ordered player saves")
++@IncludeTags("Normal")
++@SelectClasses(PlayerSaveQueueTest.class)
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class PlayerSaveQueueTestSuite {
++}
