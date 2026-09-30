@@ -42,20 +42,53 @@ index 59646a42ece4492d027baa0c2c182dd2d4a5d57a..8bfca8043c6a3f068591fb0d18db53ca
          this.currentNanos[section] += nanos;
          this.totalNanos[section] += nanos;
          this.maxNanos[section] = Math.max(this.maxNanos[section], nanos);
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index a5e1eac38dae8b8716913e5953d88818d34af543..682fb7c3bd9e3e88c513be25d598ef9fb32c2904 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -1061,18 +1061,23 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+ 
+         @Override
+         protected boolean pollTask() {
++            final long traceStarted = net.minecraft.server.threading.LoomProfileTrace.ENABLED ? System.nanoTime() : 0L;
++            boolean didWork = false;
+             final ServerChunkCache serverChunkCache = ServerChunkCache.this;
+             final net.minecraft.server.threading.TickRegions.RegionContext chunkTaskContext =
+                 net.minecraft.server.threading.TickRegions.pushLevelContext(serverChunkCache.level);
+             try {
+                 if (serverChunkCache.runDistanceManagerUpdates()) {
++                    didWork = true;
+                     return true;
+                 }
+ 
+                 // Paper - rewrite chunk system
+-                return super.pollTask() | ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)serverChunkCache.level).moonrise$getChunkTaskScheduler().executeMainThreadTask(); // Paper - rewrite chunk system
++                didWork = super.pollTask() | ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)serverChunkCache.level).moonrise$getChunkTaskScheduler().executeMainThreadTask(); // Paper - rewrite chunk system
++                return didWork;
+             } finally {
+                 net.minecraft.server.threading.TickRegions.popContext(chunkTaskContext);
++                net.minecraft.server.threading.LoomProfileTrace.chunkPoll(traceStarted, didWork);
+             }
+         }
+     }
 diff --git a/net/minecraft/server/threading/LoomProfileTrace.java b/net/minecraft/server/threading/LoomProfileTrace.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..75775c51898cce856c6e7d02025fc747aef31e08
+index 0000000000000000000000000000000000000000..6a3b79674dc85a9ddfa09aeb854bbc2c12679524
 --- /dev/null
 +++ b/net/minecraft/server/threading/LoomProfileTrace.java
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,233 @@
 +package net.minecraft.server.threading;
 +
 +import java.util.concurrent.atomic.AtomicLong;
++import java.util.concurrent.atomic.LongAdder;
++import java.util.WeakHashMap;
 +import jdk.jfr.Category;
 +import jdk.jfr.Enabled;
 +import jdk.jfr.Event;
++import jdk.jfr.FlightRecorder;
 +import jdk.jfr.Label;
 +import jdk.jfr.Name;
++import jdk.jfr.Period;
 +import jdk.jfr.StackTrace;
 +import jdk.jfr.Timespan;
 +
@@ -64,8 +97,77 @@ index 0000000000000000000000000000000000000000..75775c51898cce856c6e7d02025fc747
 +    public static final boolean ENABLED = Boolean.getBoolean("Loom.ProfileTrace");
 +    private static final AtomicLong IDS = new AtomicLong();
 +    private static final ThreadLocal<Span> CURRENT = new ThreadLocal<>();
++    private static final WeakHashMap<java.util.concurrent.CompletableFuture<?>, Long> FUTURES = new WeakHashMap<>();
++    private static final LongAdder POLLS = new LongAdder();
++    private static final LongAdder POLL_WORK = new LongAdder();
++    private static final LongAdder POLL_NANOS = new LongAdder();
++    private static final AtomicLong POLL_MAX = new AtomicLong();
++
++    static {
++        if (ENABLED) FlightRecorder.addPeriodicEvent(OperationCounterEvent.class, () -> {
++            final OperationCounterEvent event = new OperationCounterEvent();
++            if (!event.isEnabled()) return;
++            event.operation = "chunkTaskPoll";
++            // Cumulative counters avoid reset races; adjacent samples may be slightly skewed.
++            event.calls = POLLS.sum();
++            event.successes = POLL_WORK.sum();
++            event.elapsedNanos = POLL_NANOS.sum();
++            event.maxNanos = POLL_MAX.get();
++            event.commit();
++        });
++    }
 +
 +    private LoomProfileTrace() {}
++
++    public static long futureId(final java.util.concurrent.CompletableFuture<?> future) {
++        if (!ENABLED || future == null) return 0L;
++        synchronized (FUTURES) {
++            return FUTURES.computeIfAbsent(future, ignored -> nextId());
++        }
++    }
++
++    public static void awaiting(final java.util.concurrent.CompletableFuture<?> future) {
++        if (!ENABLED) return;
++        final Span span = CURRENT.get();
++        if (span != null) span.event.awaited = futureId(future);
++    }
++
++    public static void dependency(final java.util.concurrent.CompletableFuture<?> awaited,
++                                  final java.util.concurrent.CompletableFuture<?> prerequisite) {
++        if (!ENABLED) return;
++        final DependencyEvent event = new DependencyEvent();
++        if (!event.isEnabled()) return;
++        event.parent = currentId();
++        event.awaited = futureId(awaited);
++        event.prerequisite = futureId(prerequisite);
++        event.commit();
++    }
++
++    public static void chunkPoll(final long startedNanos, final boolean didWork) {
++        if (!ENABLED) return;
++        final long elapsed = Math.max(0L, System.nanoTime() - startedNanos);
++        POLLS.increment();
++        if (didWork) POLL_WORK.increment();
++        POLL_NANOS.add(elapsed);
++        POLL_MAX.accumulateAndGet(elapsed, Math::max);
++    }
++
++    public static void leaseConflict(final long lease, final long holderSpan, final long holderThread,
++                                     final int minX, final int minZ, final int maxX, final int maxZ) {
++        if (!ENABLED) return;
++        final LeaseConflictEvent event = new LeaseConflictEvent();
++        if (!event.isEnabled()) return;
++        event.parent = currentId();
++        event.lease = lease;
++        event.holderSpan = holderSpan;
++        event.holderThread = holderThread;
++        event.world = currentWorld();
++        event.minChunkX = minX;
++        event.minChunkZ = minZ;
++        event.maxChunkX = maxX;
++        event.maxChunkZ = maxZ;
++        event.commit();
++    }
 +
 +    public static long nextId() { return ENABLED ? IDS.incrementAndGet() : 0L; }
 +    public static long currentId() {
@@ -130,6 +232,10 @@ index 0000000000000000000000000000000000000000..75775c51898cce856c6e7d02025fc747
 +            this.event.maxChunkX = maxX;
 +            this.event.maxChunkZ = maxZ;
 +        }
++        public void owner(final String domain, final long completion) {
++            this.event.domain = domain;
++            this.event.completion = completion;
++        }
 +        @Override public void close() {
 +            if (this.closed) return;
 +            this.closed = true;
@@ -146,6 +252,8 @@ index 0000000000000000000000000000000000000000..75775c51898cce856c6e7d02025fc747
 +        public long parent;
 +        public long batch;
 +        public long tick;
++        public long awaited;
++        public long completion;
 +        public int task;
 +        public int count;
 +        public int minChunkX;
@@ -155,6 +263,7 @@ index 0000000000000000000000000000000000000000..75775c51898cce856c6e7d02025fc747
 +        public String phase;
 +        public String operation;
 +        public String world;
++        public String domain;
 +        @Timespan(Timespan.NANOSECONDS) public long queueNanos;
 +    }
 +
@@ -168,7 +277,68 @@ index 0000000000000000000000000000000000000000..75775c51898cce856c6e7d02025fc747
 +        public String operation;
 +        @Timespan(Timespan.NANOSECONDS) public long elapsedNanos;
 +    }
++
++    @Name("loom.OwnerDependency") @Label("Owner future dependency") @Category({"Loom", "Ticking"})
++    @Enabled(true) @StackTrace(false)
++    public static final class DependencyEvent extends Event {
++        public long parent;
++        public long awaited;
++        public long prerequisite;
++    }
++
++    @Name("loom.OperationCounter") @Label("Operation counters") @Category({"Loom", "Ticking"})
++    @Enabled(true) @StackTrace(false) @Period("1 s")
++    public static final class OperationCounterEvent extends Event {
++        public String operation;
++        public long calls;
++        public long successes;
++        @Timespan(Timespan.NANOSECONDS) public long elapsedNanos;
++        @Timespan(Timespan.NANOSECONDS) public long maxNanos;
++    }
++
++    @Name("loom.LeaseConflict") @Label("Conflicting region lease") @Category({"Loom", "Ticking"})
++    @Enabled(true) @StackTrace(false)
++    public static final class LeaseConflictEvent extends Event {
++        public long parent;
++        public long lease;
++        public long holderSpan;
++        public long holderThread;
++        public String world;
++        public int minChunkX;
++        public int minChunkZ;
++        public int maxChunkX;
++        public int maxChunkZ;
++    }
 +}
+diff --git a/net/minecraft/server/threading/RegionRuntime.java b/net/minecraft/server/threading/RegionRuntime.java
+index fd66ecfe6bc0d29cf55a679bc31b2daaf5a151bd..8dd878c9a7b9228cbd28c52dfa6e9d70703d5052 100644
+--- a/net/minecraft/server/threading/RegionRuntime.java
++++ b/net/minecraft/server/threading/RegionRuntime.java
+@@ -291,6 +291,8 @@ public class RegionRuntime {
+                 if (!this.leases.isEmpty()) {
+                     final Lease conflictingLease = this.findConflictingLease(minChunkX, minChunkZ, maxChunkX, maxChunkZ, ownerThreadId);
+                     if (conflictingLease != null) {
++                        LoomProfileTrace.leaseConflict(conflictingLease.id, conflictingLease.traceSpan,
++                            conflictingLease.ownerThreadId, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
+                         if (!required) {
+                             return false;
+                         }
+@@ -474,6 +476,7 @@ public class RegionRuntime {
+         @SuppressWarnings("unused")
+         private final String ownerThreadName;
+         private final long regionId;
++        private final long traceSpan;
+ 
+         private Lease(
+             final long id,
+@@ -494,6 +497,7 @@ public class RegionRuntime {
+             this.ownerThreadId = ownerThread.threadId();
+             this.ownerThreadName = ownerThreadName;
+             this.regionId = regionId;
++            this.traceSpan = LoomProfileTrace.currentId();
+         }
+ 
+         private boolean contains(final int chunkX, final int chunkZ) {
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
 index ab2624d9f23633c322ad66d4dea8fc9c891414f9..ecfcc549ee95b301b89205786b04e296ea23db01 100644
 --- a/net/minecraft/server/threading/TickRegions.java
@@ -283,7 +453,7 @@ index ab2624d9f23633c322ad66d4dea8fc9c891414f9..ecfcc549ee95b301b89205786b04e296
                  throw new IllegalStateException(
                      "Failed to claim region context for stage '" + stageName + "' in world "
 diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
-index b17465ccf1ca5ab6b05c73181b7faba9a702cccb..0e5591104a1b7d749f21ccb362dae030230edac4 100644
+index b17465ccf1ca5ab6b05c73181b7faba9a702cccb..20043882ecb2d1f5b81a1f7cf89022fa129e0df6 100644
 --- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 +++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
 @@ -449,6 +449,15 @@ public final class OwnerDomainExecutor {
@@ -302,3 +472,55 @@ index b17465ccf1ca5ab6b05c73181b7faba9a702cccb..0e5591104a1b7d749f21ccb362dae030
      ) {
          Objects.requireNonNull(futureSupplier, "futureSupplier");
          Objects.requireNonNull(operation, "operation");
+@@ -469,6 +478,7 @@ public final class OwnerDomainExecutor {
+         boolean interrupted = false;
+         try {
+             final CompletableFuture<T> future = Objects.requireNonNull(futureSupplier.get(), "futureSupplier returned null future");
++            net.minecraft.server.threading.LoomProfileTrace.awaiting(future);
+             wait.await(future);
+             future.whenComplete((result, throwable) -> wait.signal());
+             int workInSlice = 0;
+@@ -538,6 +548,7 @@ public final class OwnerDomainExecutor {
+                 ignored -> java.util.Collections.newSetFromMap(new IdentityHashMap<>())
+             ).add(prerequisite);
+         }
++        net.minecraft.server.threading.LoomProfileTrace.dependency(awaited, prerequisite);
+         awaited.whenComplete((result, throwable) -> {
+             synchronized (WAIT_DEPENDENCIES_LOCK) {
+                 WAIT_DEPENDENCIES.remove(awaited);
+@@ -797,12 +808,18 @@ public final class OwnerDomainExecutor {
+         private final Runnable task;
+         private final @Nullable CompletableFuture<?> completion;
+         private final long sequence;
++        private final long traceParent;
++        private final long traceSubmitted;
++        private final long traceCompletion;
+ 
+         private OwnerTask(final Owner owner, final Runnable task, final @Nullable CompletableFuture<?> completion) {
+             this.owner = owner;
+             this.task = task;
+             this.completion = completion;
+             this.sequence = OWNER_TASK_SEQUENCE.getAndIncrement();
++            this.traceParent = net.minecraft.server.threading.LoomProfileTrace.currentId();
++            this.traceSubmitted = net.minecraft.server.threading.LoomProfileTrace.ENABLED ? System.nanoTime() : 0L;
++            this.traceCompletion = net.minecraft.server.threading.LoomProfileTrace.futureId(completion);
+         }
+ 
+         private boolean completes(final CompletableFuture<?> future) {
+@@ -811,7 +828,15 @@ public final class OwnerDomainExecutor {
+ 
+         @Override
+         public void run() {
+-            try (Scope ignored = enter(owner)) {
++            try (var trace = net.minecraft.server.threading.LoomProfileTrace.begin("owner-task", this.owner.operation(),
++                    net.minecraft.server.threading.LoomProfileTrace.ENABLED && this.owner.level() != null
++                        ? this.owner.level().dimension().identifier().toString() : "",
++                    MinecraftServer.currentTick, this.traceParent, 0L, -1, 1, this.traceSubmitted);
++                 Scope ignored = enter(owner)) {
++                if (trace != null) {
++                    trace.owner(this.owner.domain().name(), this.traceCompletion);
++                    trace.bounds(this.owner.minChunkX(), this.owner.minChunkZ(), this.owner.maxChunkX(), this.owner.maxChunkZ());
++                }
+                 this.task.run();
+             }
+         }

@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 30 Sep 2026 20:22:01 +0300
+Subject: [PATCH] Test owner-domain profile correlations
+
+
+diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnerProfileTraceTest.java b/src/test/java/net/minecraft/server/threading/runtime/OwnerProfileTraceTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..81a38706ff1f87961bfd120f4c65f5588c9e075d
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/runtime/OwnerProfileTraceTest.java
+@@ -0,0 +1,88 @@
++package net.minecraft.server.threading.runtime;
++
++import java.nio.file.Files;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.atomic.AtomicReference;
++import jdk.jfr.Recording;
++import jdk.jfr.consumer.RecordingFile;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.threading.LoomProfileTrace;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++@Normal
++class OwnerProfileTraceTest {
++    @Test
++    void queuedOwnerProducerAndComposedWaitShareRecordedFutureIds() throws Exception {
++        Assertions.assertTrue(LoomProfileTrace.ENABLED, "suite must enable profile tracing");
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final AtomicReference<Runnable> queued = new AtomicReference<>();
++        Mockito.when(server.enqueueGlobalOwnerTask(Mockito.any())).thenAnswer(call -> {
++            queued.set(call.getArgument(0));
++            return true;
++        });
++        Mockito.when(server.runQueuedGlobalOwnerTask(Mockito.any())).thenAnswer(call -> {
++            final java.util.function.Predicate<Runnable> filter = call.getArgument(0);
++            final Runnable task = queued.get();
++            if (task == null || !filter.test(task) || !queued.compareAndSet(task, null)) return false;
++            task.run();
++            return true;
++        });
++        final var owner = OwnerDomainExecutor.global(server, "profile-test");
++        final var path = Files.createTempFile("owner-profile", ".jfr");
++        try (var recording = new Recording()) {
++            recording.enable("loom.TickPhase");
++            recording.enable("loom.OwnerDependency");
++            recording.start();
++            final CompletableFuture<String> produced = OwnerDomainExecutor.supply(owner, () -> "done");
++            final CompletableFuture<String> composed = produced.thenApply(String::toUpperCase);
++            OwnerDomainExecutor.linkWaitDependency(composed, produced);
++            try (var scope = OwnerDomainExecutor.enter(owner)) {
++                Assertions.assertEquals("DONE", OwnerDomainExecutor.awaitCooperatively(composed, "profile-test-wait"));
++            }
++            recording.stop();
++            recording.dump(path);
++            final var events = RecordingFile.readAllEvents(path);
++            final var wait = events.stream().filter(e -> e.getEventType().getName().equals("loom.TickPhase")
++                && e.getString("phase").equals("owner-wait")).findFirst().orElseThrow();
++            final var task = events.stream().filter(e -> e.getEventType().getName().equals("loom.TickPhase")
++                && e.getString("phase").equals("owner-task")).findFirst().orElseThrow();
++            final var dependency = events.stream().filter(e -> e.getEventType().getName().equals("loom.OwnerDependency"))
++                .findFirst().orElseThrow();
++            Assertions.assertEquals(dependency.getLong("awaited"), wait.getLong("awaited"));
++            Assertions.assertEquals(dependency.getLong("prerequisite"), task.getLong("completion"));
++            Assertions.assertEquals("GLOBAL_CONTROL", task.getString("domain"));
++            Assertions.assertTrue(task.getDuration("queueNanos").toNanos() > 0);
++            Assertions.assertNull(queued.get());
++        } finally {
++            Files.deleteIfExists(path);
++        }
++    }
++
++    @Test
++    void failedBodyClosesSpanAndRestoresParent() throws Exception {
++        final var path = Files.createTempFile("failed-profile", ".jfr");
++        try (var recording = new Recording()) {
++            recording.enable("loom.TickPhase");
++            recording.start();
++            try (var parent = LoomProfileTrace.begin("test-parent", "outer", "", 1)) {
++                final long parentId = LoomProfileTrace.currentId();
++                Assertions.assertThrows(IllegalArgumentException.class, () -> {
++                    try (var child = LoomProfileTrace.begin("test-child", "throws", "", 1)) {
++                        throw new IllegalArgumentException("test");
++                    }
++                });
++                Assertions.assertEquals(parentId, LoomProfileTrace.currentId());
++            }
++            Assertions.assertEquals(0L, LoomProfileTrace.currentId());
++            recording.stop();
++            recording.dump(path);
++            final var events = RecordingFile.readAllEvents(path);
++            Assertions.assertEquals(2, events.stream().filter(e -> e.getEventType().getName().equals("loom.TickPhase")).count());
++        } finally {
++            Files.deleteIfExists(path);
++        }
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnerProfileTraceTestSuite.java b/src/test/java/net/minecraft/server/threading/runtime/OwnerProfileTraceTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3fb43cc3bdad0f91ecabf22282131a7183dfb3d5
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/runtime/OwnerProfileTraceTestSuite.java
+@@ -0,0 +1,13 @@
++package net.minecraft.server.threading.runtime;
++
++import org.junit.platform.suite.api.ConfigurationParameter;
++import org.junit.platform.suite.api.IncludeTags;
++import org.junit.platform.suite.api.SelectClasses;
++import org.junit.platform.suite.api.Suite;
++
++@Suite
++@IncludeTags("Normal")
++@SelectClasses({OwnerProfileTraceTest.class, OwnerDomainExecutorCooperativeWaitTest.class})
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class OwnerProfileTraceTestSuite {
++}
