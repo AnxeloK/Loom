@@ -6,10 +6,10 @@ Subject: [PATCH] Test owner-domain profile correlations
 
 diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnerProfileTraceTest.java b/src/test/java/net/minecraft/server/threading/runtime/OwnerProfileTraceTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..81a38706ff1f87961bfd120f4c65f5588c9e075d
+index 0000000000000000000000000000000000000000..26c5e4cda82e5dd1afaed3fa3f62f6b1bcc0003c
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/threading/runtime/OwnerProfileTraceTest.java
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,90 @@
 +package net.minecraft.server.threading.runtime;
 +
 +import java.nio.file.Files;
@@ -22,9 +22,11 @@ index 0000000000000000000000000000000000000000..81a38706ff1f87961bfd120f4c65f558
 +import org.bukkit.support.environment.Normal;
 +import org.junit.jupiter.api.Assertions;
 +import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 +import org.mockito.Mockito;
 +
 +@Normal
++@EnabledIfSystemProperty(named = "Loom.ProfileTrace", matches = "true")
 +class OwnerProfileTraceTest {
 +    @Test
 +    void queuedOwnerProducerAndComposedWaitShareRecordedFutureIds() throws Exception {
