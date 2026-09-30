@@ -5,10 +5,10 @@ Subject: [PATCH] Service owner callbacks during serialized waits
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 1c1615ee2c682876f3302271801c18243dc7deb1..9a15398320ed9a057a660d7f606b65522287cf55 100644
+index 6b39e1e0b8ee1125d162e3575fa33bb246a0ec0f..8ea1faa8de822994975f042ba01e583e22c4d67d 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -2630,6 +2630,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2631,6 +2631,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          return true;
      }
  

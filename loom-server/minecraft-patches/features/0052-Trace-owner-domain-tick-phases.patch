@@ -5,10 +5,10 @@ Subject: [PATCH] Trace owner-domain tick phases
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 33b910a6274794c335df4149689a0aa86df81e49..86809c0bf9f356a41c2389e7e092676bd954498f 100644
+index 4935e96a99caf7f9b9aaaa8ce7b4b7685e2782c3..eac99a35ab2a56542bc1033a55ca6ff8e15cdb98 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -1953,6 +1953,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1954,6 +1954,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      }
  
      protected void tickServer(final BooleanSupplier haveTime) {

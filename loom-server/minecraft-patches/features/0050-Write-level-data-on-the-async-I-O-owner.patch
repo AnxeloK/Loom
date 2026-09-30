@@ -5,10 +5,10 @@ Subject: [PATCH] Write level data on the async-I/O owner
 
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 9a15398320ed9a057a660d7f606b65522287cf55..33b910a6274794c335df4149689a0aa86df81e49 100644
+index 8ea1faa8de822994975f042ba01e583e22c4d67d..4935e96a99caf7f9b9aaaa8ce7b4b7685e2782c3 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -1027,8 +1027,27 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1028,8 +1028,27 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.scoreboard.storeToSaveDataIfDirty(this.getDataStorage().computeIfAbsent(ScoreboardSaveData.TYPE));
          // Paper end - split out global level data
          GameProfile singleplayerProfile = this.getSingleplayerProfile();
@@ -37,7 +37,7 @@ index 9a15398320ed9a057a660d7f606b65522287cf55..33b910a6274794c335df4149689a0aa8
              this.savedDataStorage.saveAndJoin();
          } else {
              this.savedDataStorage.scheduleSave();
-@@ -1095,6 +1114,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1096,6 +1115,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              // removes the subsequent durability wait; every vanilla save is still scheduled.
              savedAny = this.saveAllChunks(silent, false, force);
              if (flush) {
