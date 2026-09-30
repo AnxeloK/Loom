@@ -6,6 +6,8 @@ This is the shortest safe path from a release jar to a useful test.
 
 Use the Loom release built for the exact Minecraft version you are running. Keep your existing world, plugins, and normal server files, but make a backup before replacing a production jar.
 
+Download releases from [AnxeloK/Loom](https://github.com/AnxeloK/Loom/releases). A prerelease label describes the Loom build's release channel.
+
 Loom needs Java 25 or newer:
 
 ```bash
@@ -29,11 +31,16 @@ Do not copy the heap value blindly. Leave memory available for the operating sys
 Wait for the startup message that begins with `Done`. Then run:
 
 ```text
+/version
 /loom tps
 /loom compatibility
 ```
 
-The first command gives a quick view of tick health. The second identifies plugin callbacks, owner-domain handoffs, fallback work, and refused paths. Use `/loom compatibility json` when you need to compare runs or attach evidence to a bug report.
+`/version` (also `/ver`) identifies the Loom release, Minecraft version, release channel, build and commit. Its update check uses Loom's published releases for that Minecraft version; development builds check the corresponding public version branch.
+
+`/loom tps` gives a quick view of tick health. `/loom compatibility` identifies plugin callbacks, owner-domain handoffs, fallback work, and refused paths. Use `/loom compatibility json` when you need to compare runs or attach evidence to a bug report.
+
+Report reproducible server issues to the [Loom issue tracker](https://github.com/AnxeloK/Loom/issues). Include the version output and the relevant log excerpt. Configuration field references still use Paper's documentation for the shared settings.
 
 ## 4. Perform a real smoke test
 

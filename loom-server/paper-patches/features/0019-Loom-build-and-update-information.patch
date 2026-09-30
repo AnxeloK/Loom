@@ -1,0 +1,1018 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 30 Sep 2026 17:20:07 +0300
+Subject: [PATCH] Loom build and update information
+
+
+diff --git a/src/main/java/com/destroystokyo/paper/LoomUpdateChecker.java b/src/main/java/com/destroystokyo/paper/LoomUpdateChecker.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..be20b163a534d997f0eee5afbdd2cd2f546516fc
+--- /dev/null
++++ b/src/main/java/com/destroystokyo/paper/LoomUpdateChecker.java
+@@ -0,0 +1,186 @@
++package com.destroystokyo.paper;
++
++import com.google.gson.Gson;
++import com.google.gson.JsonArray;
++import com.google.gson.JsonElement;
++import com.google.gson.JsonObject;
++import com.google.gson.JsonParseException;
++import java.io.IOException;
++import java.io.InputStreamReader;
++import java.net.HttpURLConnection;
++import java.net.URI;
++import java.net.URLEncoder;
++import java.nio.charset.StandardCharsets;
++import java.util.Optional;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++
++final class LoomUpdateChecker {
++    static final String REPOSITORY = "https://github.com/AnxeloK/Loom";
++    static final String DOWNLOADS = REPOSITORY + "/releases";
++    private static final String API = "https://api.github.com/repos/AnxeloK/Loom/";
++    private static final Pattern VERSION = Pattern.compile("v?([0-9]+)\\.([0-9]+)\\.([0-9]+)");
++    private static final Gson GSON = new Gson();
++    private final JsonSource source;
++
++    LoomUpdateChecker() {
++        this(LoomUpdateChecker::readJson);
++    }
++
++    LoomUpdateChecker(final JsonSource source) {
++        this.source = source;
++    }
++
++    Result check(final String minecraftVersion, final Optional<String> releaseVersion,
++                 final boolean includePrereleases, final Optional<String> gitCommit) {
++        try {
++            if (releaseVersion.isPresent()) {
++                return this.checkRelease(minecraftVersion, Version.parse(releaseVersion.get()).orElseThrow(), includePrereleases);
++            }
++            return this.checkDevelopment(minecraftVersion, gitCommit);
++        } catch (final IOException | IllegalArgumentException | IllegalStateException | JsonParseException exception) {
++            return new Result(Status.UNAVAILABLE, "Unable to check Loom updates right now.", DOWNLOADS);
++        }
++    }
++
++    private Result checkRelease(final String minecraftVersion, final Version current, final boolean includePrereleases) throws IOException {
++        Release latest = null;
++        for (int page = 1; page <= 10; page++) {
++            final JsonElement response = this.source.read("releases?per_page=100&page=" + page);
++            if (response == null || !response.isJsonArray()) {
++                throw new IllegalStateException("Invalid Loom releases response");
++            }
++            final JsonArray releases = response.getAsJsonArray();
++            for (final JsonElement element : releases) {
++                final JsonObject release = element.getAsJsonObject();
++                if (required(release, "draft").getAsBoolean() || (!includePrereleases && required(release, "prerelease").getAsBoolean())) {
++                    continue;
++                }
++                final Optional<Version> version = Version.parse(required(release, "tag_name").getAsString());
++                if (version.isEmpty()) {
++                    continue;
++                }
++                final String expectedAsset = "loom-" + version.get() + "-mc" + minecraftVersion + ".jar";
++                boolean hasRuntime = false;
++                for (final JsonElement asset : required(release, "assets").getAsJsonArray()) {
++                    if (expectedAsset.equals(required(asset.getAsJsonObject(), "name").getAsString())) {
++                        hasRuntime = true;
++                        break;
++                    }
++                }
++                if (hasRuntime && (latest == null || version.get().compareTo(latest.version) > 0)) {
++                    latest = new Release(version.get(), required(release, "prerelease").getAsBoolean());
++                }
++            }
++            if (releases.size() < 100) {
++                if (latest == null) {
++                    return new Result(Status.UNAVAILABLE, "No published Loom release matches Minecraft " + minecraftVersion + " and this release channel.", DOWNLOADS);
++                }
++                final int comparison = latest.version.compareTo(current);
++                final String downloads = DOWNLOADS + "/tag/v" + latest.version;
++                if (comparison > 0) {
++                    return new Result(Status.OUTDATED, "Loom " + latest.version + (latest.prerelease ? " (prerelease)" : "") + " is available for Minecraft " + minecraftVersion + ".", downloads);
++                }
++                if (comparison == 0) {
++                    return new Result(Status.CURRENT, "You are running the latest published Loom release for Minecraft " + minecraftVersion + ".", downloads);
++                }
++                return new Result(Status.CUSTOM, "This Loom build is newer than the published releases for Minecraft " + minecraftVersion + ".", DOWNLOADS);
++            }
++        }
++        return new Result(Status.UNAVAILABLE, "Unable to check the complete Loom release history right now.", DOWNLOADS);
++    }
++
++    private Result checkDevelopment(final String minecraftVersion, final Optional<String> gitCommit) throws IOException {
++        if (gitCommit.isEmpty() || !gitCommit.get().matches("[0-9a-fA-F]{7,40}")) {
++            return new Result(Status.CUSTOM, "This Loom development build has no public commit metadata.", DOWNLOADS);
++        }
++        if (!minecraftVersion.matches("[0-9]+\\.[0-9]+(?:\\.[0-9]+)?")) {
++            return new Result(Status.UNAVAILABLE, "No public Loom version line matches Minecraft " + minecraftVersion + ".", DOWNLOADS);
++        }
++        final String[] version = minecraftVersion.split("\\.");
++        final String branch = "ver/" + version[0] + "." + version[1] + ".x";
++        final JsonElement response = this.source.read("compare/" + gitCommit.get() + "..." + URLEncoder.encode(branch, StandardCharsets.UTF_8));
++        if (response != null && response.isJsonNull()) {
++            return new Result(Status.CUSTOM, "This build is outside the public Loom source line; update status is unavailable.", DOWNLOADS);
++        }
++        if (response == null || !response.isJsonObject()) {
++            throw new IllegalStateException("Invalid Loom comparison response");
++        }
++        final JsonObject comparison = response.getAsJsonObject();
++        return switch (required(comparison, "status").getAsString()) {
++            case "identical" -> new Result(Status.CURRENT, "You are running the latest Loom development build for Minecraft " + minecraftVersion + ".", DOWNLOADS);
++            case "ahead" -> new Result(Status.OUTDATED, "This Loom development build is " + required(comparison, "ahead_by").getAsInt() + " commit(s) behind " + branch + ".", REPOSITORY + "/actions");
++            case "behind", "diverged" -> new Result(Status.CUSTOM, "This build differs from the public Loom source line; check its source before updating.", DOWNLOADS);
++            default -> new Result(Status.UNAVAILABLE, "Unable to determine this Loom build's update status.", DOWNLOADS);
++        };
++    }
++
++    private static JsonElement required(final JsonObject object, final String field) {
++        final JsonElement value = object.get(field);
++        if (value == null || value.isJsonNull()) {
++            throw new IllegalStateException("Missing GitHub response field " + field);
++        }
++        return value;
++    }
++
++    private static JsonElement readJson(final String endpoint) throws IOException {
++        final HttpURLConnection connection = (HttpURLConnection) URI.create(API + endpoint).toURL().openConnection();
++        connection.setConnectTimeout(5000);
++        connection.setReadTimeout(5000);
++        connection.setRequestProperty("User-Agent", "Loom-update-checker (" + REPOSITORY + ")");
++        connection.setRequestProperty("Accept", "application/vnd.github+json");
++        connection.setRequestProperty("X-GitHub-Api-Version", "2022-11-28");
++        try {
++            final int status = connection.getResponseCode();
++            if (status == HttpURLConnection.HTTP_NOT_FOUND && endpoint.startsWith("compare/")) {
++                return com.google.gson.JsonNull.INSTANCE;
++            }
++            if (status != HttpURLConnection.HTTP_OK) {
++                throw new IOException("GitHub returned HTTP " + status);
++            }
++            try (final InputStreamReader reader = new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8)) {
++                return GSON.fromJson(reader, JsonElement.class);
++            }
++        } finally {
++            connection.disconnect();
++        }
++    }
++
++    enum Status {
++        CURRENT, OUTDATED, CUSTOM, UNAVAILABLE
++    }
++
++    record Result(Status status, String message, String downloadUrl) {
++    }
++
++    private record Release(Version version, boolean prerelease) {
++    }
++
++    private record Version(int major, int minor, int patch) implements Comparable<Version> {
++        static Optional<Version> parse(final String value) {
++            final Matcher matcher = VERSION.matcher(value);
++            if (!matcher.matches()) {
++                return Optional.empty();
++            }
++            return Optional.of(new Version(Integer.parseInt(matcher.group(1)), Integer.parseInt(matcher.group(2)), Integer.parseInt(matcher.group(3))));
++        }
++
++        @Override
++        public int compareTo(final Version other) {
++            int comparison = Integer.compare(this.major, other.major);
++            if (comparison == 0) comparison = Integer.compare(this.minor, other.minor);
++            if (comparison == 0) comparison = Integer.compare(this.patch, other.patch);
++            return comparison;
++        }
++
++        @Override
++        public String toString() {
++            return this.major + "." + this.minor + "." + this.patch;
++        }
++    }
++
++    @FunctionalInterface
++    interface JsonSource {
++        JsonElement read(String endpoint) throws IOException;
++    }
++}
+diff --git a/src/main/java/com/destroystokyo/paper/PaperVersionFetcher.java b/src/main/java/com/destroystokyo/paper/PaperVersionFetcher.java
+index ba32d58c33c65b1384baa7616da64f7a4a1f0d1d..103d63b8c2a8ded7e024fcd1b7075df65d4715c9 100644
+--- a/src/main/java/com/destroystokyo/paper/PaperVersionFetcher.java
++++ b/src/main/java/com/destroystokyo/paper/PaperVersionFetcher.java
+@@ -1,50 +1,21 @@
+ package com.destroystokyo.paper;
+ 
+ import com.destroystokyo.paper.util.VersionFetcher;
+-import com.google.gson.Gson;
+-import com.google.gson.JsonArray;
+-import com.google.gson.JsonElement;
+-import com.google.gson.JsonObject;
+-import com.google.gson.JsonSyntaxException;
+-import com.mojang.logging.LogUtils;
++import io.papermc.paper.LoomBuildInfo;
+ import io.papermc.paper.ServerBuildInfo;
+-import java.io.BufferedReader;
+-import java.io.IOException;
+-import java.io.InputStreamReader;
+-import java.net.HttpURLConnection;
+-import java.net.URI;
+-import java.net.URL;
+-import java.nio.charset.StandardCharsets;
+-import java.util.Optional;
+-import java.util.OptionalInt;
+-import java.util.stream.StreamSupport;
+ import net.kyori.adventure.text.Component;
+-import net.kyori.adventure.text.logger.slf4j.ComponentLogger;
+ import net.kyori.adventure.text.event.ClickEvent;
+ import net.kyori.adventure.text.format.NamedTextColor;
+ import net.kyori.adventure.text.format.TextDecoration;
+-import org.checkerframework.checker.nullness.qual.NonNull;
+-import org.checkerframework.checker.nullness.qual.Nullable;
+-import org.checkerframework.framework.qual.DefaultQualifier;
+-import org.apache.logging.log4j.LogManager;
++import org.jspecify.annotations.Nullable;
+ import org.slf4j.Logger;
+-import java.util.List;
++import com.mojang.logging.LogUtils;
+ 
+ import static net.kyori.adventure.text.Component.text;
+-import static net.kyori.adventure.text.format.TextColor.color;
+-import static io.papermc.paper.ServerBuildInfo.StringRepresentation.VERSION_SIMPLE;
+ 
+-@DefaultQualifier(NonNull.class)
+ public class PaperVersionFetcher implements VersionFetcher {
+     private static final Logger LOGGER = LogUtils.getClassLogger();
+-    private static final ComponentLogger COMPONENT_LOGGER = ComponentLogger.logger(LogManager.getRootLogger().getName());
+-    private static final int DISTANCE_ERROR = -1;
+-    private static final int DISTANCE_UNKNOWN = -2;
+-    private static final String DOWNLOAD_PAGE = "https://papermc.io/downloads/paper";
+-    private static final String REPOSITORY = "PaperMC/Paper";
+-    private static final ServerBuildInfo BUILD_INFO = ServerBuildInfo.buildInfo();
+-    private static final String USER_AGENT = BUILD_INFO.brandName() + "/" + BUILD_INFO.asString(VERSION_SIMPLE) + " (https://papermc.io)";
+-    private static final Gson GSON = new Gson();
++    private static final LoomUpdateChecker CHECKER = new LoomUpdateChecker();
+ 
+     @Override
+     public long getCacheTime() {
+@@ -53,214 +24,44 @@ public class PaperVersionFetcher implements VersionFetcher {
+ 
+     @Override
+     public Component getVersionMessage() {
+-        final Component updateMessage;
+-        if (BUILD_INFO.buildNumber().isEmpty() && BUILD_INFO.gitCommit().isEmpty()) {
+-            updateMessage = text("You are running a development version without access to version information", color(0xFF5300));
+-        } else {
+-            updateMessage = getUpdateStatusMessage();
++        final LoomUpdateChecker.Result result = checkUpdates();
++        final NamedTextColor color = switch (result.status()) {
++            case CURRENT -> NamedTextColor.GREEN;
++            case OUTDATED, UNAVAILABLE -> NamedTextColor.YELLOW;
++            case CUSTOM -> NamedTextColor.GRAY;
++        };
++        Component message = text(result.message(), color);
++        if (result.status() != LoomUpdateChecker.Status.CURRENT) {
++            message = message.append(Component.newline()).append(text("Loom downloads: "))
++                .append(text(result.downloadUrl(), NamedTextColor.GOLD)
++                    .hoverEvent(text("Click to open", NamedTextColor.WHITE))
++                    .clickEvent(ClickEvent.openUrl(result.downloadUrl())));
+         }
+         final @Nullable Component history = this.getHistory();
+-
+-        return history != null ? Component.textOfChildren(updateMessage, Component.newline(), history) : updateMessage;
++        return history == null ? message : Component.textOfChildren(message, Component.newline(), history);
+     }
+ 
+     public static void getUpdateStatusStartupMessage() {
+-        int distance = DISTANCE_ERROR;
+-
+-        final OptionalInt buildNumber = BUILD_INFO.buildNumber();
+-        if (buildNumber.isEmpty() && BUILD_INFO.gitCommit().isEmpty()) {
+-            COMPONENT_LOGGER.warn(text("*** You are running a development version without access to version information ***"));
+-        } else {
+-            final Optional<MinecraftVersionFetcher> apiResult = fetchMinecraftVersionList();
+-            if (buildNumber.isPresent()) {
+-                distance = fetchDistanceFromSiteApi(buildNumber.getAsInt());
+-            } else {
+-                final Optional<String> gitBranch = BUILD_INFO.gitBranch();
+-                final Optional<String> gitCommit = BUILD_INFO.gitCommit();
+-                if (gitBranch.isPresent() && gitCommit.isPresent()) {
+-                    distance = fetchDistanceFromGitHub(gitBranch.get(), gitCommit.get());
+-                }
+-            }
+-
+-            switch (distance) {
+-                case DISTANCE_ERROR -> COMPONENT_LOGGER.error(text("*** Error obtaining version information! Cannot fetch version info ***"));
+-                case 0 -> apiResult.ifPresent(result -> {
+-                    COMPONENT_LOGGER.warn(text("*************************************************************************************"));
+-                    COMPONENT_LOGGER.warn(text("You are running the latest build for your Minecraft version (" + BUILD_INFO.minecraftVersionId() + ")"));
+-                    COMPONENT_LOGGER.warn(text("However, you are " + result.distance() + " release" + (result.distance() == 1 ? "" : "s") + " behind the latest stable release (" + result.latestVersion() + ")!"));
+-                    COMPONENT_LOGGER.warn(text("It is recommended that you update as soon as possible"));
+-                    COMPONENT_LOGGER.warn(text(DOWNLOAD_PAGE));
+-                    COMPONENT_LOGGER.warn(text("*************************************************************************************"));
+-                });
+-                case DISTANCE_UNKNOWN -> COMPONENT_LOGGER.warn(text("*** You are running an unknown version! Cannot fetch version info ***"));
+-                default -> {
+-                    if (apiResult.isPresent()) {
+-                        final MinecraftVersionFetcher result = apiResult.get();
+-                        COMPONENT_LOGGER.warn(text("*** You are running an outdated version of Minecraft, which is " + result.distance() + " release" + (result.distance() == 1 ? "" : "s") + " and " + distance + " build" + (distance == 1 ? "" : "s") + " behind!"));
+-                        COMPONENT_LOGGER.warn(text("*** Please update to the latest stable version on " + DOWNLOAD_PAGE + " ***"));
+-                    } else {
+-                        COMPONENT_LOGGER.info(text("*** Currently you are " + distance + " build" + (distance == 1 ? "" : "s") + " behind ***"));
+-                        COMPONENT_LOGGER.info(text("*** It is highly recommended to download the latest build from " + DOWNLOAD_PAGE + " ***"));
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    private static Component getUpdateStatusMessage() {
+-        int distance = DISTANCE_ERROR;
+-
+-        final OptionalInt buildNumber = PaperVersionFetcher.BUILD_INFO.buildNumber();
+-        if (buildNumber.isPresent()) {
+-            distance = fetchDistanceFromSiteApi(buildNumber.getAsInt());
+-        } else {
+-            final Optional<String> gitBranch = PaperVersionFetcher.BUILD_INFO.gitBranch();
+-            final Optional<String> gitCommit = PaperVersionFetcher.BUILD_INFO.gitCommit();
+-            if (gitBranch.isPresent() && gitCommit.isPresent()) {
+-                distance = fetchDistanceFromGitHub(gitBranch.get(), gitCommit.get());
+-            }
+-        }
+-
+-        return switch (distance) {
+-            case DISTANCE_ERROR -> text("Error obtaining version information", NamedTextColor.YELLOW);
+-            case 0 -> text("You are running the latest version", NamedTextColor.GREEN);
+-            case DISTANCE_UNKNOWN -> text("Unknown version", NamedTextColor.YELLOW);
+-            default -> text("You are " + distance + " version(s) behind", NamedTextColor.YELLOW)
+-                .append(Component.newline())
+-                .append(text("Download the new version at: ")
+-                    .append(text(DOWNLOAD_PAGE, NamedTextColor.GOLD)
+-                        .hoverEvent(text("Click to open", NamedTextColor.WHITE))
+-                        .clickEvent(ClickEvent.openUrl(DOWNLOAD_PAGE))));
+-        };
+-    }
+-
+-    private record MinecraftVersionFetcher(String latestVersion, int distance) {}
+-
+-    private static Optional<MinecraftVersionFetcher> fetchMinecraftVersionList() {
+-        final String currentVersion = PaperVersionFetcher.BUILD_INFO.minecraftVersionId();
+-
+-        try {
+-            final URL versionsUrl = URI.create("https://fill.papermc.io/v3/projects/paper").toURL();
+-            final HttpURLConnection connection = (HttpURLConnection) versionsUrl.openConnection();
+-            connection.setConnectTimeout(5000);
+-            connection.setReadTimeout(5000);
+-            connection.setRequestProperty("User-Agent", PaperVersionFetcher.USER_AGENT);
+-            connection.setRequestProperty("Accept", "application/json");
+-
+-            try (final BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+-                final JsonObject json = GSON.fromJson(reader, JsonObject.class);
+-                final JsonObject versions = json.getAsJsonObject("versions");
+-                final List<String> versionList = versions.keySet().stream()
+-                    .map(versions::getAsJsonArray)
+-                    .flatMap(array -> StreamSupport.stream(array.spliterator(), false))
+-                    .map(JsonElement::getAsString)
+-                    .toList();
+-
+-                for (final String latestVersion : versionList) {
+-                    if (latestVersion.equals(currentVersion)) {
+-                        return Optional.empty();
+-                    }
+-
+-                    try {
+-                        final URL buildsUrl = URI.create("https://fill.papermc.io/v3/projects/paper/versions/" + latestVersion + "/builds/latest").toURL();
+-                        final HttpURLConnection connection2 = (HttpURLConnection) buildsUrl.openConnection();
+-                        connection2.setConnectTimeout(5000);
+-                        connection2.setReadTimeout(5000);
+-                        connection2.setRequestProperty("User-Agent", PaperVersionFetcher.USER_AGENT);
+-                        connection2.setRequestProperty("Accept", "application/json");
+-
+-                        try (final BufferedReader buildReader = new BufferedReader(new InputStreamReader(connection2.getInputStream(), StandardCharsets.UTF_8))) {
+-                            final JsonObject buildJson = GSON.fromJson(buildReader, JsonObject.class);
+-                            if ("STABLE".equals(buildJson.get("channel").getAsString())) {
+-                                final int currentIndex = versionList.indexOf(currentVersion);
+-                                final int latestIndex = versionList.indexOf(latestVersion);
+-                                final int distance = currentIndex - latestIndex;
+-                                if (distance < 0) {
+-                                    // Avoid logging warnings for early unpublished snapshot builds
+-                                    return Optional.empty();
+-                                }
+-
+-                                return Optional.of(new MinecraftVersionFetcher(latestVersion, distance));
+-                            }
+-                        } catch (final JsonSyntaxException ex) {
+-                            LOGGER.error("Error parsing json from Paper's downloads API", ex);
+-                        }
+-                    } catch (final IOException e) {
+-                        LOGGER.error("Error while parsing latest build", e);
+-                    }
+-                }
+-            } catch (final JsonSyntaxException ex) {
+-                LOGGER.error("Error parsing json from Paper's downloads API", ex);
+-            }
+-        } catch (final IOException e) {
+-            LOGGER.error("Error while parsing version list", e);
++        final LoomUpdateChecker.Result result = checkUpdates();
++        switch (result.status()) {
++            case OUTDATED -> LOGGER.warn("{} {}", result.message(), result.downloadUrl());
++            case UNAVAILABLE -> LOGGER.warn("{}", result.message());
++            case CUSTOM -> LOGGER.info("{}", result.message());
++            case CURRENT -> { }
+         }
+-        return Optional.empty();
+     }
+ 
+-    private static int fetchDistanceFromSiteApi(final int jenkinsBuild) {
+-        try {
+-            final URL buildsUrl = URI.create("https://fill.papermc.io/v3/projects/paper/versions/" + PaperVersionFetcher.BUILD_INFO.minecraftVersionId() + "/builds").toURL();
+-            final HttpURLConnection connection = (HttpURLConnection) buildsUrl.openConnection();
+-            connection.setConnectTimeout(5000);
+-            connection.setReadTimeout(5000);
+-            connection.setRequestProperty("User-Agent", PaperVersionFetcher.USER_AGENT);
+-            connection.setRequestProperty("Accept", "application/json");
+-            try (final BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+-                final JsonArray builds = GSON.fromJson(reader, JsonArray.class);
+-                final int latest = StreamSupport.stream(builds.spliterator(), false)
+-                    .mapToInt(build -> build.getAsJsonObject().get("id").getAsInt())
+-                    .max()
+-                    .orElseThrow();
+-                return Math.max(latest - jenkinsBuild, 0);
+-            } catch (final JsonSyntaxException ex) {
+-                LOGGER.error("Error parsing json from Paper's downloads API", ex);
+-                return DISTANCE_ERROR;
+-            }
+-        } catch (final IOException e) {
+-            LOGGER.error("Error while parsing version", e);
+-            return DISTANCE_ERROR;
+-        }
+-    }
+-
+-    // Contributed by Techcable <Techcable@outlook.com> in GH-65
+-    private static int fetchDistanceFromGitHub(final String branch, final String hash) {
+-        try {
+-            final HttpURLConnection connection = (HttpURLConnection) URI.create("https://api.github.com/repos/%s/compare/%s...%s".formatted(PaperVersionFetcher.REPOSITORY, branch, hash)).toURL().openConnection();
+-            connection.setConnectTimeout(5000);
+-            connection.setReadTimeout(5000);
+-            connection.setRequestProperty("User-Agent", PaperVersionFetcher.USER_AGENT);
+-            connection.connect();
+-            if (connection.getResponseCode() == HttpURLConnection.HTTP_NOT_FOUND) return DISTANCE_UNKNOWN; // Unknown commit
+-            try (final BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+-                final JsonObject obj = GSON.fromJson(reader, JsonObject.class);
+-                final String status = obj.get("status").getAsString();
+-                return switch (status) {
+-                    case "identical" -> 0;
+-                    case "behind" -> obj.get("behind_by").getAsInt();
+-                    default -> DISTANCE_ERROR;
+-                };
+-            } catch (final JsonSyntaxException | NumberFormatException e) {
+-                LOGGER.error("Error parsing json from GitHub's API", e);
+-                return DISTANCE_ERROR;
+-            }
+-        } catch (final IOException e) {
+-            LOGGER.error("Error while parsing version", e);
+-            return DISTANCE_ERROR;
+-        }
++    private static LoomUpdateChecker.Result checkUpdates() {
++        final ServerBuildInfo build = ServerBuildInfo.buildInfo();
++        final LoomBuildInfo loom = LoomBuildInfo.current();
++        return CHECKER.check(build.minecraftVersionId(), loom.releaseVersion(), loom.includesPrereleases(), build.gitCommit());
+     }
+ 
+     private @Nullable Component getHistory() {
+         final VersionHistoryManager.@Nullable VersionData data = VersionHistoryManager.INSTANCE.getVersionData();
+-        if (data == null) {
++        if (data == null || data.getOldVersion() == null) {
+             return null;
+         }
+-
+-        final @Nullable String oldVersion = data.getOldVersion();
+-        if (oldVersion == null) {
+-            return null;
+-        }
+-
+-        return text("Previous version: " + oldVersion, NamedTextColor.GRAY, TextDecoration.ITALIC);
++        return text("Previous version: " + data.getOldVersion(), NamedTextColor.GRAY, TextDecoration.ITALIC);
+     }
+ }
+diff --git a/src/main/java/io/papermc/paper/LoomBuildInfo.java b/src/main/java/io/papermc/paper/LoomBuildInfo.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4afadcd43040131539ff4a8b6884f492ea8d0421
+--- /dev/null
++++ b/src/main/java/io/papermc/paper/LoomBuildInfo.java
+@@ -0,0 +1,62 @@
++package io.papermc.paper;
++
++import io.papermc.paper.util.JarManifests;
++import java.time.Instant;
++import java.time.temporal.ChronoUnit;
++import java.util.Locale;
++import java.util.Optional;
++import java.util.OptionalInt;
++import java.util.jar.Manifest;
++import org.bukkit.craftbukkit.CraftServer;
++
++public record LoomBuildInfo(Optional<String> releaseVersion, String channel) {
++    public static LoomBuildInfo current() {
++        return Holder.INSTANCE;
++    }
++
++    static LoomBuildInfo fromManifest(final Manifest manifest) {
++        if (manifest == null) {
++            return new LoomBuildInfo(Optional.empty(), "DEVELOPMENT");
++        }
++        final String version = manifest.getMainAttributes().getValue("Loom-Version");
++        final String channel = manifest.getMainAttributes().getValue("Loom-Channel");
++        return new LoomBuildInfo(
++            Optional.ofNullable(version).map(String::trim).filter(value -> value.matches("[0-9]+\\.[0-9]+\\.[0-9]+")),
++            channel == null ? "DEVELOPMENT" : channel.trim().toUpperCase(Locale.ROOT)
++        );
++    }
++
++    public boolean includesPrereleases() {
++        return !this.channel.equals("STABLE");
++    }
++
++    String describe(final String minecraftVersion, final OptionalInt buildNumber,
++                    final Optional<String> branch, final Optional<String> commit, final Instant buildTime) {
++        final String channelName = switch (this.channel) {
++            case "STABLE" -> "Stable";
++            case "BETA" -> "Beta";
++            case "ALPHA" -> "Alpha";
++            default -> "Development";
++        };
++        final StringBuilder result = new StringBuilder(this.releaseVersion.orElse("Development"));
++        result.append(" (Minecraft ").append(minecraftVersion).append(", ").append(channelName).append(')');
++        if (buildNumber.isPresent()) {
++            result.append(" build ").append(buildNumber.getAsInt());
++        }
++        if (branch.isPresent() || commit.isPresent()) {
++            result.append(" [");
++            branch.ifPresent(result::append);
++            if (branch.isPresent() && commit.isPresent()) {
++                result.append('@');
++            }
++            commit.ifPresent(result::append);
++            result.append(']');
++        }
++        result.append(" (").append(buildTime.truncatedTo(ChronoUnit.SECONDS)).append(')');
++        return result.toString();
++    }
++
++    private static final class Holder {
++        private static final LoomBuildInfo INSTANCE = fromManifest(JarManifests.manifest(CraftServer.class));
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/ServerBuildInfoImpl.java b/src/main/java/io/papermc/paper/ServerBuildInfoImpl.java
+index 74ffdc823e66fc5ec027c4b7c462382bcbfe2be2..a4e710a97b0ae306688d6f0dc0030d1b29999e79 100644
+--- a/src/main/java/io/papermc/paper/ServerBuildInfoImpl.java
++++ b/src/main/java/io/papermc/paper/ServerBuildInfoImpl.java
+@@ -30,7 +30,8 @@ public record ServerBuildInfoImpl(
+     private static final String ATTRIBUTE_GIT_BRANCH = "Git-Branch";
+     private static final String ATTRIBUTE_GIT_COMMIT = "Git-Commit";
+ 
+-    private static final String BRAND_PAPER_NAME = "Paper";
++    private static final Key BRAND_LOOM_ID = Key.key("anxelok", "loom");
++    private static final String BRAND_LOOM_NAME = "Loom";
+ 
+     private static final String BUILD_DEV = "DEV";
+ 
+@@ -42,9 +43,9 @@ public record ServerBuildInfoImpl(
+         this(
+             getManifestAttribute(manifest, ATTRIBUTE_BRAND_ID)
+                 .map(Key::key)
+-                .orElse(BRAND_PAPER_ID),
++                .orElse(BRAND_LOOM_ID),
+             getManifestAttribute(manifest, ATTRIBUTE_BRAND_NAME)
+-                .orElse(BRAND_PAPER_NAME),
++                .orElse(BRAND_LOOM_NAME),
+             SharedConstants.getCurrentVersion().id(),
+             SharedConstants.getCurrentVersion().name(),
+             getManifestAttribute(manifest, ATTRIBUTE_BUILD_NUMBER)
+@@ -66,6 +67,9 @@ public record ServerBuildInfoImpl(
+ 
+     @Override
+     public @NotNull String asString(final @NotNull StringRepresentation representation) {
++        if (representation == StringRepresentation.VERSION_FULL) {
++            return LoomBuildInfo.current().describe(this.minecraftVersionId, this.buildNumber, this.gitBranch, this.gitCommit, this.buildTime);
++        }
+         final StringBuilder sb = new StringBuilder();
+         sb.append(this.minecraftVersionId);
+         sb.append('-');
+diff --git a/src/main/java/io/papermc/paper/configuration/Configurations.java b/src/main/java/io/papermc/paper/configuration/Configurations.java
+index b2c5e5cc2e798ac10c1c9cded65e1f8171a6cf98..67a876a183ccc2a007e5d56df455af7c012cff19 100644
+--- a/src/main/java/io/papermc/paper/configuration/Configurations.java
++++ b/src/main/java/io/papermc/paper/configuration/Configurations.java
+@@ -112,7 +112,7 @@ public abstract class Configurations<G, W> {
+             loader.save(node);
+         } catch (ConfigurateException ex) {
+             if (ex.getCause() instanceof AccessDeniedException) {
+-                LOGGER.warn("Could not save {}: Paper could not persist the full set of configuration settings in the configuration file. Any setting missing from the configuration file will be set with its default value in memory. Admins should make sure to review the configuration documentation at https://docs.papermc.io/paper/configuration for more details.", filename, ex);
++                LOGGER.warn("Could not save {}: Loom could not persist the full set of configuration settings in the configuration file. Any setting missing from the configuration file will be set with its default value in memory. Admins should make sure to review the configuration documentation at https://docs.papermc.io/paper/configuration for more details.", filename, ex);
+             } else throw ex;
+         }
+     }
+diff --git a/src/main/java/io/papermc/paper/configuration/PaperConfigurations.java b/src/main/java/io/papermc/paper/configuration/PaperConfigurations.java
+index de9a78d5b20d13a114591e986e990b4bd973097a..7d885aaf33462366d94d5688c3e0fb3fa31c5b4f 100644
+--- a/src/main/java/io/papermc/paper/configuration/PaperConfigurations.java
++++ b/src/main/java/io/papermc/paper/configuration/PaperConfigurations.java
+@@ -98,39 +98,37 @@ public class PaperConfigurations extends Configurations<GlobalConfiguration, Wor
+     private static final String BACKUP_DIR ="legacy-backup";
+ 
+     private static final String GLOBAL_HEADER = String.format("""
+-            This is the global configuration file for Paper.
++            This is the global configuration file for Loom.
+             As you can see, there's a lot to configure. Some options may impact gameplay, so use
+             with caution, and make sure you know what each option does before configuring.
+ 
+-            If you need help with the configuration or have any questions related to Paper,
+-            join us in our Discord or check the docs page.
++            For Loom setup and support, use the project documentation and issue tracker.
+ 
+             The world configuration options have been moved inside
+             their respective world folder. The files are named %s
+ 
+             File Reference: https://docs.papermc.io/paper/reference/global-configuration/
+-            Docs: https://docs.papermc.io/
+-            Discord: https://discord.gg/papermc
+-            Website: https://papermc.io/""", WORLD_CONFIG_FILE_NAME);
++            Loom Docs: https://github.com/AnxeloK/Loom#documentation
++            Support: https://github.com/AnxeloK/Loom/issues
++            Website: https://github.com/AnxeloK/Loom""", WORLD_CONFIG_FILE_NAME);
+ 
+     private static final String WORLD_DEFAULTS_HEADER = """
+-            This is the world defaults configuration file for Paper.
++            This is the world defaults configuration file for Loom.
+             As you can see, there's a lot to configure. Some options may impact gameplay, so use
+             with caution, and make sure you know what each option does before configuring.
+ 
+-            If you need help with the configuration or have any questions related to Paper,
+-            join us in our Discord or check the docs page.
++            For Loom setup and support, use the project documentation and issue tracker.
+ 
+             Configuration options here apply to all worlds, unless you specify overrides inside
+             the world-specific config file inside each world folder.
+ 
+             File Reference: https://docs.papermc.io/paper/reference/world-configuration/
+-            Docs: https://docs.papermc.io/
+-            Discord: https://discord.gg/papermc
+-            Website: https://papermc.io/""";
++            Loom Docs: https://github.com/AnxeloK/Loom#documentation
++            Support: https://github.com/AnxeloK/Loom/issues
++            Website: https://github.com/AnxeloK/Loom""";
+ 
+     private static final Function<ContextMap, String> WORLD_HEADER = map -> String.format("""
+-        This is a world configuration file for Paper.
++        This is a world configuration file for Loom.
+         This file may start empty but can be filled with settings to override ones in the %s/%s
+ 
+         For more information, see https://docs.papermc.io/paper/reference/configuration/#per-world-configuration
+@@ -367,17 +365,17 @@ public class PaperConfigurations extends Configurations<GlobalConfiguration, Wor
+             final String legacyFileName = legacyConfig.getFileName().toString();
+             try {
+                 if (Files.exists(configDir) && !Files.isDirectory(configDir)) {
+-                    throw new RuntimeException("Paper needs to create a '" + configDir.toAbsolutePath() + "' folder. You already have a non-directory named '" + configDir.toAbsolutePath() + "'. Please remove it and restart the server.");
++                    throw new RuntimeException("Loom needs to create a '" + configDir.toAbsolutePath() + "' folder. You already have a non-directory named '" + configDir.toAbsolutePath() + "'. Please remove it and restart the server.");
+                 }
+                 final Path backupDir = configDir.resolve(BACKUP_DIR);
+                 if (Files.exists(backupDir) && !Files.isDirectory(backupDir)) {
+-                    throw new RuntimeException("Paper needs to create a '" + BACKUP_DIR + "' directory in the '" + configDir.toAbsolutePath() + "' folder. You already have a non-directory named '" + BACKUP_DIR + "'. Please remove it and restart the server.");
++                    throw new RuntimeException("Loom needs to create a '" + BACKUP_DIR + "' directory in the '" + configDir.toAbsolutePath() + "' folder. You already have a non-directory named '" + BACKUP_DIR + "'. Please remove it and restart the server.");
+                 }
+                 createDirectoriesSymlinkAware(backupDir);
+                 final String backupFileName = legacyFileName + ".old";
+                 final Path legacyConfigBackup = backupDir.resolve(backupFileName);
+                 if (Files.exists(legacyConfigBackup) && !Files.isRegularFile(legacyConfigBackup)) {
+-                    throw new RuntimeException("Paper needs to create a '" + backupFileName + "' file in the '" + backupDir.toAbsolutePath() + "' folder. You already have a non-file named '" + backupFileName + "'. Please remove it and restart the server.");
++                    throw new RuntimeException("Loom needs to create a '" + backupFileName + "' file in the '" + backupDir.toAbsolutePath() + "' folder. You already have a non-file named '" + backupFileName + "'. Please remove it and restart the server.");
+                 }
+                 Files.move(legacyConfig.toRealPath(), legacyConfigBackup, StandardCopyOption.REPLACE_EXISTING); // make backup
+                 if (Files.isSymbolicLink(legacyConfig)) {
+diff --git a/src/main/java/io/papermc/paper/plugin/entrypoint/strategy/modern/LoadOrderTree.java b/src/main/java/io/papermc/paper/plugin/entrypoint/strategy/modern/LoadOrderTree.java
+index 28de97623fdcbbcb8ca9fd5e995448b5d67288d6..d0227e7b3b3123bd9983ca6f8a75d60ad6397b4d 100644
+--- a/src/main/java/io/papermc/paper/plugin/entrypoint/strategy/modern/LoadOrderTree.java
++++ b/src/main/java/io/papermc/paper/plugin/entrypoint/strategy/modern/LoadOrderTree.java
+@@ -99,7 +99,7 @@ class LoadOrderTree {
+             }
+         }
+ 
+-        LOGGER.error("Please report this to the plugin authors of the first plugin of each loop or join the PaperMC Discord server for further help.");
++        LOGGER.error("Please report this to the plugin authors of the first plugin of each loop. For Loom support, use https://github.com/AnxeloK/Loom/issues.");
+         LOGGER.error("=================================");
+     }
+ 
+diff --git a/src/main/java/io/papermc/paper/plugin/storage/SimpleProviderStorage.java b/src/main/java/io/papermc/paper/plugin/storage/SimpleProviderStorage.java
+index 26422904751647a061397ce978bba752149003cd..c964b800300e2a617b3ec4ec47dc819a2ea9d660 100644
+--- a/src/main/java/io/papermc/paper/plugin/storage/SimpleProviderStorage.java
++++ b/src/main/java/io/papermc/paper/plugin/storage/SimpleProviderStorage.java
+@@ -71,7 +71,7 @@ public abstract class SimpleProviderStorage<T> implements ProviderStorage<T> {
+         for (String logMessage : logMessages) {
+             LOGGER.error("  {}", logMessage);
+         }
+-        LOGGER.error("Please report this to the plugin authors of the first plugin of each loop or join the PaperMC Discord server for further help.");
++        LOGGER.error("Please report this to the plugin authors of the first plugin of each loop. For Loom support, use https://github.com/AnxeloK/Loom/issues.");
+         LOGGER.error("If you would like to still load these plugins, acknowledging that there may be unexpected plugin loading issues, run the server with -Dpaper.useLegacyPluginLoading=true");
+ 
+         if (this.throwOnCycle()) {
+diff --git a/src/main/java/org/spigotmc/SpigotConfig.java b/src/main/java/org/spigotmc/SpigotConfig.java
+index bcabc539a8742587e8ee43a15eb2c05c8a4f552f..5e06c7a9c4679fedbef5026842b680f53752e8ee 100644
+--- a/src/main/java/org/spigotmc/SpigotConfig.java
++++ b/src/main/java/org/spigotmc/SpigotConfig.java
+@@ -33,17 +33,16 @@ public class SpigotConfig {
+ 
+     private static File CONFIG_FILE;
+     private static final String HEADER = """
+-        This is the Spigot configuration file for Paper.
++        This is the Spigot configuration file for Loom.
+         As you can see, there's tons to configure. Some options may impact gameplay, so use
+         with caution, and make sure you know what each option does before configuring.
+         
+-        If you need help with the configuration or have any questions related to Paper,
+-        join us in our Discord or check the docs page.
++        For Loom setup and support, use the project documentation and issue tracker.
+         
+         File Reference: https://docs.papermc.io/paper/reference/spigot-configuration/
+-        Docs: https://docs.papermc.io/
+-        Discord: https://discord.gg/papermc
+-        Website: https://papermc.io/
++        Loom Docs: https://github.com/AnxeloK/Loom#documentation
++        Support: https://github.com/AnxeloK/Loom/issues
++        Website: https://github.com/AnxeloK/Loom
+         """;
+     /*========================================================================*/
+     public static YamlConfiguration config;
+diff --git a/src/main/java/org/spigotmc/WatchdogThread.java b/src/main/java/org/spigotmc/WatchdogThread.java
+index fc51d410d45a4c2010c2d27cb793e2e1aacfaa74..ac1f10c0bfb6a7e35951c25462508f7dde631089 100644
+--- a/src/main/java/org/spigotmc/WatchdogThread.java
++++ b/src/main/java/org/spigotmc/WatchdogThread.java
+@@ -35,7 +35,7 @@ public class WatchdogThread extends ca.spottedleaf.moonrise.common.util.TickThre
+     private volatile long shutdownDeadlineMillis;
+ 
+     private WatchdogThread(long timeoutTime, boolean restart) {
+-        super("Paper Watchdog Thread");
++        super("Loom Watchdog Thread");
+         this.timeoutTime = timeoutTime;
+         this.restart = restart;
+         this.earlyWarningEvery = Math.min(GlobalConfiguration.get().watchdog.earlyWarningEvery, timeoutTime);
+@@ -95,14 +95,14 @@ public class WatchdogThread extends ca.spottedleaf.moonrise.common.util.TickThre
+                 this.lastEarlyWarning = currentTime;
+                 if (isLongTimeout) {
+                     logger.log(Level.SEVERE, "------------------------------");
+-                    logger.log(Level.SEVERE, "The server has stopped responding! This is (probably) not a Paper bug."); // Paper
++                    logger.log(Level.SEVERE, "The server has stopped responding! Inspect the thread dumps below to identify the blocked path."); // Paper
+                     logger.log(Level.SEVERE, "If you see a plugin in the Server thread dump below, then please report it to that author");
+                     logger.log(Level.SEVERE, "\t *Especially* if it looks like HTTP or MySQL operations are occurring");
+                     logger.log(Level.SEVERE, "If you see a world save or edit, then it means you did far more than your server can handle at once");
+                     logger.log(Level.SEVERE, "\t If this is the case, consider increasing timeout-time in spigot.yml but note that this will replace the crash with LARGE lag spikes");
+-                    logger.log(Level.SEVERE, "If you are unsure or still think this is a Paper bug, please report this to https://github.com/PaperMC/Paper/issues");
++                    logger.log(Level.SEVERE, "Report reproducible Loom server issues to https://github.com/AnxeloK/Loom/issues");
+                     logger.log(Level.SEVERE, "Be sure to include ALL relevant console errors and Minecraft crash reports");
+-                    logger.log(Level.SEVERE, "Paper version: " + Bukkit.getServer().getVersion());
++                    logger.log(Level.SEVERE, "Loom version: " + Bukkit.getServer().getVersion());
+ 
+                     if (net.minecraft.world.level.Level.lastPhysicsProblem != null) {
+                         logger.log(Level.SEVERE, "------------------------------");
+@@ -122,12 +122,12 @@ public class WatchdogThread extends ca.spottedleaf.moonrise.common.util.TickThre
+                     }
+                     // Paper end
+                 } else {
+-                    logger.log(Level.SEVERE, "--- DO NOT REPORT THIS TO PAPER - THIS IS NOT A BUG OR A CRASH  - " + Bukkit.getServer().getVersion() + " ---");
++                    logger.log(Level.SEVERE, "--- Delayed tick diagnostics - " + Bukkit.getServer().getVersion() + " ---");
+                     logger.log(Level.SEVERE, "The server has not responded for " + (currentTime - lastTick) / 1000 + " seconds! Creating thread dump");
+                 }
+                 // Paper end - Different message for short timeout
+                 logger.log(Level.SEVERE, "------------------------------");
+-                logger.log(Level.SEVERE, "Server thread dump (Look for plugins here before reporting to Paper!):"); // Paper
++                logger.log(Level.SEVERE, "Server thread dump (Inspect plugin frames before reporting to Loom):"); // Paper
+                 FeatureHooks.dumpAllChunkLoadInfo(MinecraftServer.getServer(), isLongTimeout); // Paper - log detailed tick information
+                 WatchdogThread.dumpThread(ManagementFactory.getThreadMXBean().getThreadInfo(MinecraftServer.getServer().getRunningThread().threadId(), Integer.MAX_VALUE), logger);
+                 logger.log(Level.SEVERE, "------------------------------");
+@@ -140,7 +140,7 @@ public class WatchdogThread extends ca.spottedleaf.moonrise.common.util.TickThre
+                         WatchdogThread.dumpThread(thread, logger);
+                     }
+                 } else {
+-                    logger.log(Level.SEVERE, "--- DO NOT REPORT THIS TO PAPER - THIS IS NOT A BUG OR A CRASH ---");
++                    logger.log(Level.SEVERE, "--- End of delayed tick diagnostics ---");
+                 }
+ 
+                 logger.log(Level.SEVERE, "------------------------------");
+diff --git a/src/test/java/com/destroystokyo/paper/LoomUpdateCheckerTest.java b/src/test/java/com/destroystokyo/paper/LoomUpdateCheckerTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..076e410d9c226a72878fecdd36884fa04d1e0564
+--- /dev/null
++++ b/src/test/java/com/destroystokyo/paper/LoomUpdateCheckerTest.java
+@@ -0,0 +1,145 @@
++package com.destroystokyo.paper;
++
++import com.google.gson.JsonArray;
++import com.google.gson.JsonNull;
++import com.google.gson.JsonObject;
++import com.google.gson.JsonParser;
++import java.io.IOException;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Optional;
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.*;
++
++class LoomUpdateCheckerTest {
++    @Test
++    void releaseUpdatesMatchMinecraftVersionAndUseLoomDownload() {
++        final JsonArray releases = releases(
++            release("v2.3.0", "26.4", false, false),
++            release("v2.2.1", "26.3", false, false),
++            release("v2.2.0", "26.3", true, false)
++        );
++        final var result = published(releases, "2.2.0", true);
++        assertEquals(LoomUpdateChecker.Status.OUTDATED, result.status());
++        assertEquals("https://github.com/AnxeloK/Loom/releases/tag/v2.2.1", result.downloadUrl());
++        assertTrue(result.message().contains("Minecraft 26.3"));
++    }
++
++    @Test
++    void stableBuildsIgnorePrereleasesAndDrafts() {
++        final JsonArray releases = releases(
++            release("v2.4.0", "26.3", false, true),
++            release("v2.3.0", "26.3", true, false),
++            release("v2.2.0", "26.3", false, false)
++        );
++        assertEquals(LoomUpdateChecker.Status.CURRENT, published(releases, "2.2.0", false).status());
++        assertTrue(published(releases, "2.2.0", true).message().contains("2.3.0 (prerelease)"));
++    }
++
++    @Test
++    void versionsAreComparedNumerically() {
++        final JsonArray releases = releases(release("v2.9.9", "26.3", false, false), release("v2.10.0", "26.3", false, false));
++        assertTrue(published(releases, "2.9.9", false).downloadUrl().endsWith("v2.10.0"));
++    }
++
++    @Test
++    void releaseWithoutRuntimeIsNotAnUpdate() {
++        final JsonObject incomplete = release("v2.3.0", "26.3", false, false);
++        incomplete.add("assets", new JsonArray());
++        final var result = published(releases(incomplete, release("v2.2.0", "26.3", false, false)), "2.2.0", false);
++        assertEquals(LoomUpdateChecker.Status.CURRENT, result.status());
++    }
++
++    @Test
++    void noCompatibleReleaseDoesNotClaimCurrent() {
++        assertEquals(LoomUpdateChecker.Status.UNAVAILABLE, published(releases(release("v2.3.0", "26.30", false, false)), "2.2.0", false).status());
++    }
++
++    @Test
++    void newerUnpublishedBuildDoesNotGetDowngradeAdvice() {
++        assertEquals(LoomUpdateChecker.Status.CUSTOM, published(releases(release("v2.2.0", "26.3", false, false)), "2.3.0", false).status());
++    }
++
++    @Test
++    void releaseSearchContinuesOntoNextPage() {
++        final JsonArray first = new JsonArray();
++        for (int index = 0; index < 100; index++) first.add(release("v2.3.0", "26.4", false, false));
++        final List<String> requests = new ArrayList<>();
++        final var checker = new LoomUpdateChecker(endpoint -> {
++            requests.add(endpoint);
++            return endpoint.endsWith("page=1") ? first : releases(release("v2.2.1", "26.3", false, false));
++        });
++        assertEquals(LoomUpdateChecker.Status.OUTDATED, checker.check("26.3", Optional.of("2.2.0"), false, Optional.empty()).status());
++        assertEquals(List.of("releases?per_page=100&page=1", "releases?per_page=100&page=2"), requests);
++    }
++
++    @Test
++    void developmentBuildUsesCommitAndMinecraftBranchInsteadOfDetachedHead() {
++        final List<String> requests = new ArrayList<>();
++        final var checker = new LoomUpdateChecker(endpoint -> {
++            requests.add(endpoint);
++            return JsonParser.parseString("{\"status\":\"ahead\",\"ahead_by\":3}");
++        });
++        final var result = checker.check("26.3", Optional.empty(), true, Optional.of("abcdef0"));
++        assertEquals(LoomUpdateChecker.Status.OUTDATED, result.status());
++        assertTrue(result.message().contains("3 commit(s) behind"));
++        assertEquals(List.of("compare/abcdef0...ver%2F26.3.x"), requests);
++        assertEquals("https://github.com/AnxeloK/Loom/actions", result.downloadUrl());
++    }
++
++    @Test
++    void identicalDevelopmentBuildIsLabelledDevelopment() {
++        final var checker = new LoomUpdateChecker(endpoint -> JsonParser.parseString("{\"status\":\"identical\"}"));
++        final var result = checker.check("26.3", Optional.empty(), true, Optional.of("abcdef0"));
++        assertEquals(LoomUpdateChecker.Status.CURRENT, result.status());
++        assertTrue(result.message().contains("development build"));
++    }
++
++    @Test
++    void privateOrDivergedBuildDoesNotReceivePublicUpdateDistance() {
++        for (final String status : List.of("behind", "diverged")) {
++            final var checker = new LoomUpdateChecker(endpoint -> JsonParser.parseString("{\"status\":\"" + status + "\"}"));
++            assertEquals(LoomUpdateChecker.Status.CUSTOM, checker.check("26.3", Optional.empty(), true, Optional.of("abcdef0")).status());
++        }
++        final var unknown = new LoomUpdateChecker(endpoint -> JsonNull.INSTANCE);
++        assertEquals(LoomUpdateChecker.Status.CUSTOM, unknown.check("26.3", Optional.empty(), true, Optional.of("abcdef0")).status());
++    }
++
++    @Test
++    void missingCommitDoesNotQueryAnotherProject() {
++        final var checker = new LoomUpdateChecker(endpoint -> fail("No network request expected"));
++        assertEquals(LoomUpdateChecker.Status.CUSTOM, checker.check("26.3", Optional.empty(), true, Optional.empty()).status());
++    }
++
++    @Test
++    void failedOrMalformedResponseNeverClaimsCurrent() {
++        final var failed = new LoomUpdateChecker(endpoint -> { throw new IOException("rate limited"); });
++        assertEquals(LoomUpdateChecker.Status.UNAVAILABLE, failed.check("26.3", Optional.of("2.2.0"), true, Optional.empty()).status());
++        final var malformed = new LoomUpdateChecker(endpoint -> JsonParser.parseString("[{}]"));
++        assertEquals(LoomUpdateChecker.Status.UNAVAILABLE, malformed.check("26.3", Optional.of("2.2.0"), true, Optional.empty()).status());
++    }
++
++    private static LoomUpdateChecker.Result published(final JsonArray releases, final String version, final boolean prereleases) {
++        return new LoomUpdateChecker(endpoint -> releases).check("26.3", Optional.of(version), prereleases, Optional.empty());
++    }
++
++    private static JsonArray releases(final JsonObject... values) {
++        final JsonArray result = new JsonArray();
++        for (final JsonObject value : values) result.add(value);
++        return result;
++    }
++
++    private static JsonObject release(final String tag, final String minecraftVersion, final boolean prerelease, final boolean draft) {
++        final JsonObject result = new JsonObject();
++        result.addProperty("tag_name", tag);
++        result.addProperty("prerelease", prerelease);
++        result.addProperty("draft", draft);
++        final JsonObject asset = new JsonObject();
++        asset.addProperty("name", "loom-" + tag.substring(1) + "-mc" + minecraftVersion + ".jar");
++        final JsonArray assets = new JsonArray();
++        assets.add(asset);
++        result.add("assets", assets);
++        return result;
++    }
++}
+diff --git a/src/test/java/com/destroystokyo/paper/LoomVersionTestSuite.java b/src/test/java/com/destroystokyo/paper/LoomVersionTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1791e7ee326ac9fd21f5f5be2889cfeefe030ceb
+--- /dev/null
++++ b/src/test/java/com/destroystokyo/paper/LoomVersionTestSuite.java
+@@ -0,0 +1,10 @@
++package com.destroystokyo.paper;
++
++import io.papermc.paper.LoomBuildInfoTest;
++import org.junit.platform.suite.api.SelectClasses;
++import org.junit.platform.suite.api.Suite;
++
++@Suite
++@SelectClasses({LoomUpdateCheckerTest.class, LoomBuildInfoTest.class})
++public class LoomVersionTestSuite {
++}
+diff --git a/src/test/java/io/papermc/paper/LoomBuildInfoTest.java b/src/test/java/io/papermc/paper/LoomBuildInfoTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7cf21ebf2649fbd3cce641f8da4fa02dd57446e
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/LoomBuildInfoTest.java
+@@ -0,0 +1,47 @@
++package io.papermc.paper;
++
++import java.time.Instant;
++import java.util.Optional;
++import java.util.OptionalInt;
++import java.util.jar.Manifest;
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.*;
++
++public class LoomBuildInfoTest {
++    @Test
++    void releaseOutputSeparatesLoomMinecraftAndChannel() {
++        final Manifest manifest = new Manifest();
++        manifest.getMainAttributes().putValue("Loom-Version", "2.2.0");
++        manifest.getMainAttributes().putValue("Loom-Channel", "BETA");
++        final LoomBuildInfo info = LoomBuildInfo.fromManifest(manifest);
++        final String output = info.describe("26.3", OptionalInt.of(42), Optional.of("ver/26.3.x"), Optional.of("abcdef0"), Instant.parse("2026-09-30T12:00:00Z"));
++        assertEquals("2.2.0 (Minecraft 26.3, Beta) build 42 [ver/26.3.x@abcdef0] (2026-09-30T12:00:00Z)", output);
++        assertTrue(info.includesPrereleases());
++    }
++
++    @Test
++    void untaggedBuildDoesNotClaimToBeARelease() {
++        final Manifest manifest = new Manifest();
++        manifest.getMainAttributes().putValue("Loom-Version", "");
++        manifest.getMainAttributes().putValue("Loom-Channel", "BETA");
++        final LoomBuildInfo info = LoomBuildInfo.fromManifest(manifest);
++        assertTrue(info.releaseVersion().isEmpty());
++        assertTrue(info.describe("26.3", OptionalInt.empty(), Optional.empty(), Optional.of("abcdef0"), Instant.EPOCH).startsWith("Development (Minecraft 26.3, Beta) [abcdef0]"));
++    }
++
++    @Test
++    void stableChannelExcludesPrereleases() {
++        final Manifest manifest = new Manifest();
++        manifest.getMainAttributes().putValue("Loom-Channel", " stable ");
++        assertFalse(LoomBuildInfo.fromManifest(manifest).includesPrereleases());
++    }
++
++    @Test
++    void missingManifestAndInvalidReleaseRemainDevelopment() {
++        assertEquals(Optional.empty(), LoomBuildInfo.fromManifest(null).releaseVersion());
++        final Manifest manifest = new Manifest();
++        manifest.getMainAttributes().putValue("Loom-Version", "unknown");
++        assertEquals(Optional.empty(), LoomBuildInfo.fromManifest(manifest).releaseVersion());
++    }
++}

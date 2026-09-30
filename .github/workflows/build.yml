@@ -23,6 +23,11 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
       - name: Configure Git User Details
         run: git config --global user.email "actions@github.com" && git config --global user.name "Github Actions"
+      - name: Record Build Metadata
+        shell: bash
+        run: |
+          echo "BUILD_NUMBER=${GITHUB_RUN_NUMBER}" >> "${GITHUB_ENV}"
+          echo "BUILD_STARTED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "${GITHUB_ENV}"
       - name: Apply Patches
         run: ./gradlew applyAllPatches --stacktrace --no-daemon --max-workers=2
       - name: Prepare Paper ABI Baseline

@@ -54,6 +54,7 @@ jobs:
           esac
           echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
           echo "latest=${latest}" >> "${GITHUB_OUTPUT}"
+          echo "build_started_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "${GITHUB_OUTPUT}"
       - name: Set up JDK
         uses: actions/setup-java@v5
         with:
@@ -73,6 +74,10 @@ jobs:
           ./gradlew :paper-server:applyPatches --stacktrace --no-daemon --max-workers=2
           ./gradlew :paper-api:jar :paper-server:jar --stacktrace --no-daemon --max-workers=2
       - name: Build
+        env:
+          LOOM_VERSION: ${{ steps.metadata.outputs.loom_version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          BUILD_STARTED_AT: ${{ steps.metadata.outputs.build_started_at }}
         run: ./gradlew build :loom-server:createPaperclipJar -PpaperAbiBaselineDir="${RUNNER_TEMP}/paper-abi-baseline" --stacktrace --no-daemon --max-workers=2
       - name: Package Jar
         shell: bash

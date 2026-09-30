@@ -8,6 +8,8 @@ It runs world work in parallel while keeping mutable state inside the owner doma
 
 New Loom releases target one latest stable Minecraft line. The `mc` suffix states the exact Minecraft version required by each jar.
 
+Download the jar and checksum from [Loom releases](https://github.com/AnxeloK/Loom/releases).
+
 Historical releases through 2.0.9 retain their older multi-version assets. They remain downloadable, but only the repository's default version branch is maintained.
 
 Loom requires Java 25 or newer. A basic launch command looks like this:
