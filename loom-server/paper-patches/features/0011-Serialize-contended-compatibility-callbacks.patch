@@ -859,7 +859,7 @@ index 50dd4e1c08d432d6a244fbfe5e29b297192b28e7..fb853a4b543340f669f3f490df78089a
              throw throwable;
          } catch (final Throwable throwable) {
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
-index 0e874bc340f775424bec27ba2921ccc565ec6696..ae06139135f5c760e0bace5c1e6a7fa6a17cb6a5 100644
+index 368b6367cf5085ab3a4587fda52c1f3d917950d1..89dec3fd9751c7e7bfc04892c0fbe6905403e50b 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
 @@ -23,8 +23,7 @@ public final class PluginCompatibilityProfile {
@@ -1402,10 +1402,10 @@ index 0000000000000000000000000000000000000000..64149c73f8ece0b12e719ce7550f8154
 +public class CompatibilityCallbackTestSuite {
 +}
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
-index d59b1d22bb7fd50395ce18b0d5ce05b86ec26f03..6ff31ecb58024747dc79718a5e72af6e87f743bf 100644
+index 1d4ce2f0e57abaa9e9da07a4760300c45b2e1661..692f3fc795fe910b41cd94c979e5a60927788a85 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
-@@ -62,18 +62,19 @@ class CompatibilityKernelRoutingTest {
+@@ -64,18 +64,19 @@ class CompatibilityKernelRoutingTest {
      }
  
      @Test
@@ -1429,8 +1429,8 @@ index d59b1d22bb7fd50395ce18b0d5ce05b86ec26f03..6ff31ecb58024747dc79718a5e72af6e
 +        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.EMERGENCY_COMPATIBILITY_LANE, plan.lane());
      }
  
-     private static RegisteredListener listenerFor(final Plugin plugin) {
-@@ -116,4 +117,4 @@ class CompatibilityKernelRoutingTest {
+     @Test
+@@ -142,4 +143,4 @@ class CompatibilityKernelRoutingTest {
              return HANDLERS;
          }
      }
@@ -1574,7 +1574,7 @@ index b184d2638016c67c432362ae819ebab5fdd91e5a..120bae6f2aeda2c1ee1cd1a51ce0bf4e
  
      private static Plugin mockPlugin(final String name) {
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
-index 647a89d341e2abfe301d582edb2b0a8188f88083..2aa0f6e19526c9537052d663b74fa9f6f5cee314 100644
+index 824617892c324ec9383156ff6b4264138b00b344..875a6e8c737f1bd07d08729f9f71467630aa02c6 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
 @@ -38,15 +38,15 @@ class PluginCompatibilityProfileTest {

@@ -49,13 +49,28 @@ The plugin apartment prevents callbacks for one plugin from racing each other wh
 
 ## Notes for plugin authors
 
-The safest plugin design is still simple:
+Use the shared Paper scheduling API to select the owner of each operation:
 
-- use synchronous Bukkit APIs for live world and player state
-- keep async tasks limited to data fetching and computation
-- return to the server thread or the relevant owner route before changing game state
-- avoid blocking a server callback for a result that needs the server to progress
-- avoid reflection and internals unless the plugin has a maintained version-specific path
+- `Entity#getScheduler()` for player and entity state; tasks follow the entity when it moves
+- `Server#getRegionScheduler()` for blocks and chunks at a location
+- `Server#getGlobalRegionScheduler()` for server state that belongs to no particular region
+- `Server#getAsyncScheduler()` for I/O and computation without live world access
+
+Use asynchronous teleportation and schedule follow-up entity changes through the
+entity scheduler. Handle retirement when an entity disappears before a callback
+runs, and cancel repeating tasks when their feature stops. Keep shared plugin
+data safe when callbacks for different owners execute concurrently.
+
+Loom recognizes explicit native and region-threading support declarations from
+the primary plugin descriptor. The native declaration is `loom-supported: true`.
+A `paper-plugin.yml`, when present, takes precedence over `plugin.yml`.
+Declarations enable native callback routing; owner checks and violation
+escalation remain active.
+
+One plugin jar can support multiple runtimes through these shared APIs. Keep
+runtime-specific internals behind separate implementations and validate the
+affected behavior on each supported runtime and Minecraft version. A support
+declaration does not establish that a plugin's internals are portable.
 
 ## Source map
 

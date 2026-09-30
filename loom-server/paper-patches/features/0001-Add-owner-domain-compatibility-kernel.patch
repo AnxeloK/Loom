@@ -2705,7 +2705,7 @@ index 879a3b3c6c6266ab23288b4adaeb5eef2a80803b..021625f2d6af9ca62fedbb97cd1695b6
 \ No newline at end of file
 +}
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
-index 783a46529621a59437ceaf56f1a3ef6346f0e90b..0e874bc340f775424bec27ba2921ccc565ec6696 100644
+index 783a46529621a59437ceaf56f1a3ef6346f0e90b..368b6367cf5085ab3a4587fda52c1f3d917950d1 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfile.java
 @@ -1,12 +1,17 @@
@@ -2988,23 +2988,25 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..0e874bc340f775424bec27ba2921ccc5
 +        final String name = meta.getName().toLowerCase(Locale.ROOT);
 +        final String mainClass = meta.getMainClass().toLowerCase(Locale.ROOT);
 +
-+        if (declaresLoomSupport(plugin)) {
++        if (declaresNativeSupport(plugin)) {
              return Mode.NATIVE_LOOM_AWARE;
          }
  
-@@ -229,15 +359,46 @@ public final class PluginCompatibilityProfile {
+@@ -229,15 +359,48 @@ public final class PluginCompatibilityProfile {
          return Mode.LEGACY_NORMAL;
      }
  
-+    private static boolean declaresLoomSupport(final Plugin plugin) {
++    private static boolean declaresNativeSupport(final Plugin plugin) {
 +        for (final String manifest : List.of("paper-plugin.yml", "plugin.yml")) {
 +            try (InputStream stream = plugin.getResource(manifest)) {
 +                if (stream == null) {
 +                    continue;
 +                }
-+                return org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(
++                final org.bukkit.configuration.file.YamlConfiguration configuration = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(
 +                    new InputStreamReader(stream, StandardCharsets.UTF_8)
-+                ).getBoolean("loom-supported", false);
++                );
++                return configuration.getBoolean("loom-supported", false)
++                    || configuration.getBoolean("folia-supported", false);
 +            } catch (final Exception ignored) {
 +                return false;
 +            }
@@ -3040,7 +3042,7 @@ index 783a46529621a59437ceaf56f1a3ef6346f0e90b..0e874bc340f775424bec27ba2921ccc5
      private static boolean containsInternalHint(final String text) {
          return text.contains("protocol")
              || text.contains("packet")
-@@ -248,4 +409,12 @@ public final class PluginCompatibilityProfile {
+@@ -248,4 +411,12 @@ public final class PluginCompatibilityProfile {
              || text.contains("anticheat")
              || text.contains("npc");
      }
@@ -4066,10 +4068,19 @@ index 0000000000000000000000000000000000000000..179481e9a9a28aefe74b48130fc230be
 +    }
 +}
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
-index 1da4f39a3f418115034b49d6fa8715f2e4bd2831..d59b1d22bb7fd50395ce18b0d5ce05b86ec26f03 100644
+index 1da4f39a3f418115034b49d6fa8715f2e4bd2831..1d4ce2f0e57abaa9e9da07a4760300c45b2e1661 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityKernelRoutingTest.java
-@@ -32,6 +32,50 @@ class CompatibilityKernelRoutingTest {
+@@ -1,6 +1,8 @@
+ package io.papermc.paper.plugin.manager.compat;
+ 
+ import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.io.ByteArrayInputStream;
++import java.nio.charset.StandardCharsets;
+ import java.util.List;
+ import java.util.logging.Logger;
+ import org.bukkit.event.Event;
+@@ -32,6 +34,74 @@ class CompatibilityKernelRoutingTest {
          Assertions.assertEquals(PluginCompatibilityProfile.State.LEGACY_OBSERVED_SAFE, profile.stateForPath(coldPath));
      }
  
@@ -4115,6 +4126,30 @@ index 1da4f39a3f418115034b49d6fa8715f2e4bd2831..d59b1d22bb7fd50395ce18b0d5ce05b8
 +
 +        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.REFUSE, plan.policy());
 +        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.REFUSAL_LANE, plan.lane());
++    }
++
++    @Test
++    void regionPluginUsesNativeLaneAndStillDegradesAfterViolations() {
++        final CompatibilityKernel kernel = new CompatibilityKernel();
++        final Plugin plugin = mockPlugin("RegionAware", "com.example.Plugin", List.of(), List.of());
++        Mockito.when(plugin.getResource("plugin.yml")).thenAnswer(ignored -> new ByteArrayInputStream(
++            "folia-supported: true\n".getBytes(StandardCharsets.UTF_8)
++        ));
++        final RegisteredListener listener = listenerFor(plugin);
++        final RegisteredListener[] listeners = {listener};
++        final CompatibilityTransaction transaction = kernel.beginTransaction(new DummyEvent(), listeners);
++        final CompatibilityKernel.RoutingDecision nativeRoute = kernel.routingDecision(transaction, listeners);
++        final CompatibilityKernel.InvocationPlan nativePlan = kernel.planFor(listener, transaction, nativeRoute);
++
++        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.NATIVE, nativePlan.policy());
++        Assertions.assertEquals(CompatibilityKernel.ExecutionLane.FAST_LANE, nativePlan.lane());
++
++        kernel.profileFor(plugin).noteOwnerDomainWaitViolation("blocking regional callback");
++        final CompatibilityKernel.RoutingDecision fallbackRoute = kernel.routingDecision(transaction, listeners);
++        final CompatibilityKernel.InvocationPlan fallbackPlan = kernel.planFor(listener, transaction, fallbackRoute);
++
++        Assertions.assertEquals(CompatibilityKernel.DispatchRoute.STRICT_SERIALIZED, fallbackRoute.route());
++        Assertions.assertEquals(CompatibilityKernel.InvocationPolicy.EMERGENCY_COMPATIBILITY, fallbackPlan.policy());
 +    }
 +
      private static RegisteredListener listenerFor(final Plugin plugin) {
@@ -4490,7 +4525,7 @@ index a1e3974ac242e1ed63f27c98ba5bfd686e2b0c81..6da37be18083d7a9620f046b31ad3a71
 +    }
 +}
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
-index a8638b2b507cecac8ea0808651d2b864bf30d31e..647a89d341e2abfe301d582edb2b0a8188f88083 100644
+index a8638b2b507cecac8ea0808651d2b864bf30d31e..824617892c324ec9383156ff6b4264138b00b344 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
 @@ -1,6 +1,8 @@
@@ -4529,7 +4564,7 @@ index a8638b2b507cecac8ea0808651d2b864bf30d31e..647a89d341e2abfe301d582edb2b0a81
          final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
  
          profile.noteRefusal("unsafe raw handles");
-@@ -47,11 +49,86 @@ class PluginCompatibilityProfileTest {
+@@ -47,11 +49,134 @@ class PluginCompatibilityProfileTest {
          Assertions.assertEquals(1L, profile.snapshot().refusals());
      }
  
@@ -4606,6 +4641,54 @@ index a8638b2b507cecac8ea0808651d2b864bf30d31e..647a89d341e2abfe301d582edb2b0a81
 +        );
 +    }
 +
++    @Test
++    void regionSupportDeclarationOptsIntoNativeDispatch() {
++        final Plugin plugin = mockPlugin(
++            "RegionPlugin", "com.example.Plugin", List.of(), List.of(), null,
++            "loom-supported: false\nfolia-supported: true\n"
++        );
++        final Plugin paperPlugin = mockPlugin(
++            "RegionPaperPlugin", "com.example.Plugin", List.of(), List.of(),
++            "folia-supported: true\n", null
++        );
++
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.NATIVE_LOOM_AWARE, new PluginCompatibilityProfile(plugin).mode());
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.NATIVE_LOOM_AWARE, new PluginCompatibilityProfile(paperPlugin).mode());
++    }
++
++    @Test
++    void invalidRegionDeclarationsKeepLegacyDispatch() {
++        for (final String declaration : List.of("false", "\"true\"", "[")) {
++            final Plugin plugin = mockPlugin(
++                "InvalidRegionPlugin", "com.example.Plugin", List.of(), List.of(), null,
++                "folia-supported: " + declaration + "\n"
++            );
++            Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_NORMAL, new PluginCompatibilityProfile(plugin).mode());
++        }
++    }
++
++    @Test
++    void secondaryRegionDeclarationCannotOverridePrimaryManifest() {
++        final Plugin plugin = mockPlugin(
++            "RegionManifestConflict", "com.example.Plugin", List.of(), List.of(),
++            "folia-supported: false\n", "folia-supported: true\n"
++        );
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_NORMAL, new PluginCompatibilityProfile(plugin).mode());
++    }
++
++    @Test
++    void regionDeclarationRetainsViolationEscalation() {
++        final Plugin plugin = mockPlugin(
++            "UnsafeRegionPlugin", "com.example.Plugin", List.of(), List.of(), null,
++            "folia-supported: true\n"
++        );
++        final PluginCompatibilityProfile profile = new PluginCompatibilityProfile(plugin);
++        profile.noteOwnerDomainWaitViolation("blocked callback");
++
++        Assertions.assertEquals(PluginCompatibilityProfile.Mode.LEGACY_STRICT, profile.mode());
++        Assertions.assertEquals(1L, profile.snapshot().ownerDomainWaitViolations());
++    }
++
      private static Plugin mockPlugin(
          final String name,
          final String mainClass,
@@ -4617,7 +4700,7 @@ index a8638b2b507cecac8ea0808651d2b864bf30d31e..647a89d341e2abfe301d582edb2b0a81
      ) {
          final PluginMeta meta = Mockito.mock(PluginMeta.class);
          Mockito.when(meta.getName()).thenReturn(name);
-@@ -64,6 +141,12 @@ class PluginCompatibilityProfileTest {
+@@ -64,6 +189,12 @@ class PluginCompatibilityProfileTest {
          Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
          Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger(name));
          Mockito.when(plugin.isEnabled()).thenReturn(true);
@@ -4631,6 +4714,30 @@ index a8638b2b507cecac8ea0808651d2b864bf30d31e..647a89d341e2abfe301d582edb2b0a81
 +    private static ByteArrayInputStream manifestStream(final String manifest) {
 +        return manifest == null ? null : new ByteArrayInputStream(manifest.getBytes(StandardCharsets.UTF_8));
 +    }
++}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/RegionPluginContractTestSuite.java b/src/test/java/io/papermc/paper/plugin/manager/compat/RegionPluginContractTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..48e8b4f1128d38139f13e5cfebd27d7dbd244d80
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/compat/RegionPluginContractTestSuite.java
+@@ -0,0 +1,18 @@
++package io.papermc.paper.plugin.manager.compat;
++
++import io.papermc.paper.threadedregions.scheduler.RegionSchedulerRoutingTest;
++import org.junit.platform.suite.api.ConfigurationParameter;
++import org.junit.platform.suite.api.SelectClasses;
++import org.junit.platform.suite.api.Suite;
++
++@Suite
++@SelectClasses({
++    PluginCompatibilityProfileTest.class,
++    CompatibilityKernelRoutingTest.class,
++    CompatibilityTransactionTest.class,
++    CompatibilityApartmentTest.class,
++    RegionSchedulerRoutingTest.class
++})
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class RegionPluginContractTestSuite {
 +}
 diff --git a/src/test/java/io/papermc/paper/threadedregions/scheduler/RegionSchedulerRoutingTest.java b/src/test/java/io/papermc/paper/threadedregions/scheduler/RegionSchedulerRoutingTest.java
 new file mode 100644
