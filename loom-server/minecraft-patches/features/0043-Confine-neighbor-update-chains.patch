@@ -4,11 +4,148 @@ Date: Sat, 25 Jul 2026 22:51:50 +0000
 Subject: [PATCH] Confine neighbor update chains
 
 
+diff --git a/net/minecraft/server/threading/runtime/OwnershipRouter.java b/net/minecraft/server/threading/runtime/OwnershipRouter.java
+index f75fa8ee15efa0ee6b99c56409d5cd2efd456cf7..172cad1a6ce596efd5e5b2d7dfd9c9836815e9b1 100644
+--- a/net/minecraft/server/threading/runtime/OwnershipRouter.java
++++ b/net/minecraft/server/threading/runtime/OwnershipRouter.java
+@@ -282,7 +282,7 @@ public final class OwnershipRouter {
+         }
+     }
+ 
+-    static boolean areChunksReady(
++    public static boolean areChunksReady(
+         final ServerLevel level,
+         final int minChunkX,
+         final int minChunkZ,
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index 48f6772d5fb359cd29ad2331567fbeebb0f61832..18f4f56a5bc07333dfcd1fbcc17be1f9380264b1 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -119,6 +119,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+         .build();
+     public final List<TickingBlockEntity> blockEntityTickers = Lists.newArrayList();
+     protected final CollectingNeighborUpdater neighborUpdater;
++
++    public java.util.concurrent.CompletableFuture<Void> captureNeighborUpdates(final Runnable action) {
++        return this.neighborUpdater.captureUpdates(action);
++    }
+     private final List<TickingBlockEntity> pendingBlockEntityTickers = Lists.newArrayList();
+     private boolean tickingBlockEntities;
+     protected final Thread thread;
+diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
+index 3177f6d9b81df2952092c09c1a5002d730d2f6f2..73a590bb8e4d0c7e04ec9764f59c56691ca1fe03 100644
+--- a/net/minecraft/world/level/chunk/LevelChunk.java
++++ b/net/minecraft/world/level/chunk/LevelChunk.java
+@@ -109,6 +109,7 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+     private static final AtomicIntegerFieldUpdater<LevelChunk> POST_PROCESSING_SCHEDULED =
+         AtomicIntegerFieldUpdater.newUpdater(LevelChunk.class, "postProcessingScheduled");
+     private volatile int postProcessingScheduled;
++    private final java.util.concurrent.CompletableFuture<Void> postProcessingCompletion = new java.util.concurrent.CompletableFuture<>();
+     private ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder chunkAndHolder;
+ 
+     @Override
+@@ -130,8 +131,15 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+     // and block updates. Load and retain that halo asynchronously, then run under one bounded REGION owner
+     // instead of entering ServerChunkCache's forbidden synchronous wait. A loaded snapshot is insufficient:
+     // its tickets can disappear before a later neighbour update in the same post-processing pass.
++    public final java.util.concurrent.CompletableFuture<Void> moonrise$awaitPostProcessing(final ServerLevel level) {
++        this.moonrise$ensurePostProcessing(level);
++        return this.postProcessingCompletion;
++    }
++
+     public final boolean moonrise$ensurePostProcessing(final ServerLevel level) {
++        if (this.postProcessingCompletion.isCompletedExceptionally()) { return false; }
+         if (this.postProcessingDone) {
++            this.postProcessingCompletion.complete(null);
+             return true;
+         }
+ 
+@@ -161,11 +169,13 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+             ).whenComplete((ignored, throwable) -> {
+                 if (throwable != null) {
+                     POST_PROCESSING_SCHEDULED.set(this, 0);
++                    this.postProcessingCompletion.completeExceptionally(throwable);
+                     LOGGER.error("Failed to resume post-processing for chunk {}", pos, throwable);
+                 }
+             });
+         } catch (final RuntimeException | Error throwable) {
+             POST_PROCESSING_SCHEDULED.set(this, 0);
++            this.postProcessingCompletion.completeExceptionally(throwable);
+             throw throwable;
+         }
+         return this.postProcessingDone;
+@@ -206,11 +216,22 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+                 && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(
+                     level, minChunkX, minChunkZ, maxChunkX, maxChunkZ
+                 )) {
+-                this.postProcessGeneration(level);
++                this.moonrise$postProcessGeneration(level).whenComplete((ignored, error) -> {
++                    POST_PROCESSING_SCHEDULED.set(this, 0);
++                    if (error != null) {
++                        this.postProcessingCompletion.completeExceptionally(error);
++                        LOGGER.error("Failed to finish post-processing for chunk {}", pos, error);
++                    } else { this.postProcessingCompletion.complete(null); }
++                    final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder holder = this.chunkAndHolder;
++                    if (holder != null) { holder.moonrise$requeueFullStatusChange(); }
++                });
++                return;
+             }
+-        } finally {
++        } catch (final RuntimeException | Error error) {
+             POST_PROCESSING_SCHEDULED.set(this, 0);
++            throw error;
+         }
++        POST_PROCESSING_SCHEDULED.set(this, 0);
+         final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder holder = this.chunkAndHolder;
+         if (holder != null) {
+             holder.moonrise$requeueFullStatusChange();
+@@ -860,6 +881,11 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+     }
+ 
+     public void postProcessGeneration(final ServerLevel level) {
++        this.moonrise$ensurePostProcessing(level);
++    }
++
++    private java.util.concurrent.CompletableFuture<Void> moonrise$postProcessGeneration(final ServerLevel level) {
++        return level.captureNeighborUpdates(() -> {
+         ChunkPos chunkPos = this.getPos();
+ 
+         for (int sectionIndex = 0; sectionIndex < this.postProcessing.length; sectionIndex++) {
+@@ -887,13 +913,28 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+             }
+         }
+ 
++        }).thenCompose(ignored -> {
++            final java.util.concurrent.atomic.AtomicReference<java.util.concurrent.CompletableFuture<Void>> finished =
++                new java.util.concurrent.atomic.AtomicReference<>();
++            return net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
++                level, this.getPos().x() - 1, this.getPos().z() - 1, this.getPos().x() + 1, this.getPos().z() + 1,
++                ca.spottedleaf.concurrentutil.util.Priority.HIGHER, "finish-chunk-upgrade", chunks -> {
++                    finished.set(level.captureNeighborUpdates(() -> {
+         for (BlockPos pos : ImmutableList.copyOf(this.pendingBlockEntities.keySet())) {
+             this.getBlockEntity(pos);
+         }
+ 
+         this.pendingBlockEntities.clear();
+         this.upgradeData.upgrade(this);
+-        this.postProcessingDone = true; // Paper - rewrite chunk system
++                    }));
++                }).thenCompose(done -> finished.get());
++        }).thenCompose(ignored -> net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
++            level, this.getPos().x(), this.getPos().z(), this.getPos().x(), this.getPos().z(),
++            ca.spottedleaf.concurrentutil.util.Priority.HIGHER, "finish-chunk-post-processing", chunks -> {
++                if (level.getChunkSource().getChunkAtIfLoadedImmediately(this.getPos().x(), this.getPos().z()) == this) {
++                    this.postProcessingDone = true;
++                } else { throw new java.util.concurrent.CancellationException("Chunk retired during post-processing"); }
++            }));
+     }
+ 
+     private @Nullable BlockEntity promotePendingBlockEntity(final BlockPos pos, final CompoundTag tag) {
 diff --git a/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java b/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java
-index 1c7862ae4eaeb4d83e0fb423c86489f534e92be5..c3c35fa9de1ccd2d19ff9c82145646475f92a64c 100644
+index 1c7862ae4eaeb4d83e0fb423c86489f534e92be5..f273000806c6f3ffdb04dd4c1474a8b270ca9555 100644
 --- a/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java
 +++ b/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java
-@@ -18,10 +18,8 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
+@@ -18,10 +18,20 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
      private static final Logger LOGGER = LogUtils.getLogger();
      private final Level level;
      private final int maxChainedNeighborUpdates;
@@ -18,10 +155,22 @@ index 1c7862ae4eaeb4d83e0fb423c86489f534e92be5..c3c35fa9de1ccd2d19ff9c8214564647
 -    private @Nullable Consumer<BlockPos> debugListener;
 +    private final ThreadLocal<UpdateState> updateState = ThreadLocal.withInitial(UpdateState::new);
 +    private volatile @Nullable Consumer<BlockPos> debugListener;
++    private final ThreadLocal<List<java.util.concurrent.CompletableFuture<Void>>> completions = new ThreadLocal<>();
++
++    public java.util.concurrent.CompletableFuture<Void> captureUpdates(final Runnable action) {
++        final List<java.util.concurrent.CompletableFuture<Void>> previous = this.completions.get();
++        final List<java.util.concurrent.CompletableFuture<Void>> captured = new ArrayList<>();
++        this.completions.set(captured);
++        try { action.run(); } finally { this.completions.set(previous); }
++        final java.util.concurrent.CompletableFuture<Void> done = java.util.concurrent.CompletableFuture.allOf(
++            captured.toArray(java.util.concurrent.CompletableFuture[]::new));
++        if (previous != null) { previous.add(done); }
++        return done;
++    }
  
      public CollectingNeighborUpdater(final Level level, final int maxChainedNeighborUpdates) {
          this.level = level;
-@@ -66,51 +64,59 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
+@@ -66,53 +76,105 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
      }
  
      private void addAndRun(final BlockPos pos, final CollectingNeighborUpdater.NeighborUpdates update) {
@@ -47,48 +196,90 @@ index 1c7862ae4eaeb4d83e0fb423c86489f534e92be5..c3c35fa9de1ccd2d19ff9c8214564647
  
          if (!runningAlready) {
 -            this.runUpdates();
++            final List<java.util.concurrent.CompletableFuture<Void>> captured = this.completions.get();
++            if (captured != null) { captured.add(state.completion); }
 +            this.runUpdates(state);
          }
      }
  
 -    private void runUpdates() {
 +    private void runUpdates(final UpdateState state) {
++        final UpdateState previous = this.updateState.get();
++        this.updateState.set(state);
++        boolean suspended = false;
++        boolean completed = false;
          try {
 -            while (!this.stack.isEmpty() || !this.addedThisLayer.isEmpty()) {
 -                for (int i = this.addedThisLayer.size() - 1; i >= 0; i--) {
 -                    this.stack.push(this.addedThisLayer.get(i));
 +            while (!state.stack.isEmpty() || !state.addedThisLayer.isEmpty()) {
++                if (!state.addedThisLayer.isEmpty()) { state.notified = false; }
 +                for (int i = state.addedThisLayer.size() - 1; i >= 0; i--) {
 +                    state.stack.push(state.addedThisLayer.get(i));
                  }
- 
+-
 -                this.addedThisLayer.clear();
 -                CollectingNeighborUpdater.NeighborUpdates nextUpdates = this.stack.peek();
 -                if (this.debugListener != null) {
 -                    nextUpdates.forEachUpdatedPos(this.debugListener);
-+                state.addedThisLayer.clear();
-+                CollectingNeighborUpdater.NeighborUpdates nextUpdates = state.stack.peek();
-+                final Consumer<BlockPos> listener = this.debugListener;
-+                if (listener != null) {
-+                    nextUpdates.forEachUpdatedPos(listener);
-                 }
- 
+-                }
+-
 -                while (this.addedThisLayer.isEmpty()) {
++                state.addedThisLayer.clear();
++                final NeighborUpdates nextUpdates = state.stack.peek();
 +                while (state.addedThisLayer.isEmpty()) {
++                    if (this.level instanceof net.minecraft.server.level.ServerLevel serverLevel) {
++                        // Liquid neighbour reactions read adjacent fluid states. A cascade can leave
++                        // the caller's loaded halo: suspend before advancing, reads or plugin events.
++                        final BlockPos pos = nextUpdates.nextPos();
++                        final int minX = (pos.getX() - 1) >> 4;
++                        final int minZ = (pos.getZ() - 1) >> 4;
++                        final int maxX = (pos.getX() + 1) >> 4;
++                        final int maxZ = (pos.getZ() + 1) >> 4;
++                        if (!net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(serverLevel, minX, minZ, maxX, maxZ)
++                            || !net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(serverLevel, minX, minZ, maxX, maxZ)
++                            || !net.minecraft.server.threading.runtime.OwnershipRouter.areChunksReady(serverLevel, minX, minZ, maxX, maxZ,
++                                net.minecraft.world.level.chunk.status.ChunkStatus.FULL)) {
++                            suspended = true;
++                            net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(serverLevel,
++                                minX, minZ, maxX, maxZ, ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
++                                "neighbor-updates", ignored -> this.runUpdates(state)).whenComplete((ignored, error) -> {
++                                    if (error != null) {
++                                        state.completion.completeExceptionally(error);
++                                        LOGGER.error("Failed to resume neighbour updates at {}", pos, error);
++                                    }
++                                });
++                            return;
++                        }
++                    }
++                    if (!state.notified) {
++                        final Consumer<BlockPos> listener = this.debugListener;
++                        if (listener != null) { nextUpdates.forEachUpdatedPos(listener); }
++                        state.notified = true;
++                    }
                      if (!nextUpdates.runNext(this.level)) {
 -                        this.stack.pop();
 +                        state.stack.pop();
++                        state.notified = false;
                          break;
                      }
                  }
              }
++            completed = true;
++        } catch (final RuntimeException | Error error) {
++            state.completion.completeExceptionally(error);
++            throw error;
          } finally {
 -            this.stack.clear();
 -            this.addedThisLayer.clear();
 -            this.count = 0;
-+            state.stack.clear();
-+            state.addedThisLayer.clear();
-+            state.count = 0;
++            if (!suspended) {
++                state.stack.clear();
++                state.addedThisLayer.clear();
++                state.count = 0;
++            }
++            this.updateState.set(previous == state ? new UpdateState() : previous);
++            if (completed) { state.completion.complete(null); }
          }
      }
  
@@ -96,8 +287,54 @@ index 1c7862ae4eaeb4d83e0fb423c86489f534e92be5..c3c35fa9de1ccd2d19ff9c8214564647
 +        private final ArrayDeque<CollectingNeighborUpdater.NeighborUpdates> stack = new ArrayDeque<>();
 +        private final List<CollectingNeighborUpdater.NeighborUpdates> addedThisLayer = new ArrayList<>();
 +        private int count;
++        private boolean notified;
++        private final java.util.concurrent.CompletableFuture<Void> completion = new java.util.concurrent.CompletableFuture<>();
 +    }
 +
      private record FullNeighborUpdate(BlockState state, BlockPos pos, Block block, @Nullable Orientation orientation, boolean movedByPiston)
          implements CollectingNeighborUpdater.NeighborUpdates {
++        @Override
++        public BlockPos nextPos() { return this.pos; }
++
          @Override
+         public boolean runNext(final Level level) {
+             NeighborUpdater.executeUpdate(level, this.state, this.pos, this.block, this.orientation, this.movedByPiston);
+@@ -144,6 +206,9 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
+             }
+         }
+ 
++        @Override
++        public BlockPos nextPos() { return this.sourcePos.relative(NeighborUpdater.UPDATE_ORDER[this.idx]); }
++
+         @Override
+         public boolean runNext(final Level level) {
+             Direction direction = NeighborUpdater.UPDATE_ORDER[this.idx++];
+@@ -180,6 +245,8 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
+     }
+ 
+     private interface NeighborUpdates {
++        BlockPos nextPos();
++
+         boolean runNext(Level level);
+ 
+         void forEachUpdatedPos(Consumer<BlockPos> output);
+@@ -188,6 +255,9 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
+     private record ShapeUpdate(
+         Direction direction, BlockState neighborState, BlockPos pos, BlockPos neighborPos, @Block.UpdateFlags int updateFlags, int updateLimit
+     ) implements CollectingNeighborUpdater.NeighborUpdates {
++        @Override
++        public BlockPos nextPos() { return this.pos; }
++
+         @Override
+         public boolean runNext(final Level level) {
+             NeighborUpdater.executeShapeUpdate(level, this.direction, this.pos, this.neighborPos, this.neighborState, this.updateFlags, this.updateLimit);
+@@ -201,6 +271,9 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
+     }
+ 
+     private record SimpleNeighborUpdate(BlockPos pos, Block block, @Nullable Orientation orientation) implements CollectingNeighborUpdater.NeighborUpdates {
++        @Override
++        public BlockPos nextPos() { return this.pos; }
++
+         @Override
+         public boolean runNext(final Level level) {
+             BlockState state = level.getBlockState(this.pos);

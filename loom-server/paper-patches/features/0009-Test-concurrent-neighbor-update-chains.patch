@@ -4,6 +4,128 @@ Date: Sat, 25 Jul 2026 22:51:52 +0000
 Subject: [PATCH] Test concurrent neighbor update chains
 
 
+diff --git a/src/test/java/net/minecraft/server/threading/runtime/NeighborReadinessTest.java b/src/test/java/net/minecraft/server/threading/runtime/NeighborReadinessTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4bb2f1a53ae3dc540ceadd310f6d6006f96aea69
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/runtime/NeighborReadinessTest.java
+@@ -0,0 +1,100 @@
++package net.minecraft.server.threading.runtime;
++
++import ca.spottedleaf.concurrentutil.util.Priority;
++import java.util.*;
++import java.util.concurrent.*;
++import java.util.concurrent.atomic.*;
++import java.util.function.Consumer;
++import net.minecraft.core.BlockPos;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.world.level.block.Block;
++import net.minecraft.world.level.block.state.BlockState;
++import net.minecraft.world.level.chunk.ChunkAccess;
++import net.minecraft.world.level.chunk.status.ChunkStatus;
++import net.minecraft.world.level.redstone.CollectingNeighborUpdater;
++import org.bukkit.craftbukkit.CraftServer;
++import org.bukkit.craftbukkit.block.data.CraftBlockData;
++import org.bukkit.event.block.BlockPhysicsEvent;
++import org.bukkit.plugin.PluginManager;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import org.mockito.MockedStatic;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class NeighborReadinessTest {
++    @Test void cascadeSuspendsBeforePhysicsAndRetainsOrderAcrossOwners() {
++        try (Fixture f = new Fixture(10)) {
++            List<Integer> order = new ArrayList<>();
++            BlockState first = f.state(), second = f.state();
++            doAnswer(call -> {
++                order.add(1); f.ready.set(false);
++                f.updater.neighborChanged(second, new BlockPos(-400, 64, -80), f.block, null, false);
++                return null;
++            }).when(first).handleNeighborChanged(eq(f.level), any(), eq(f.block), isNull(), eq(false));
++            doAnswer(call -> { order.add(2); return null; })
++                .when(second).handleNeighborChanged(eq(f.level), any(), eq(f.block), isNull(), eq(false));
++            CompletableFuture<Void> completed = f.updater.captureUpdates(() ->
++                f.updater.neighborChanged(first, new BlockPos(-416, 64, -80), f.block, null, false));
++            assertEquals(List.of(1), order);
++            assertFalse(completed.isDone(), "Generation must wait for the cascading update");
++            verify(f.plugins, times(1)).callEvent(any(BlockPhysicsEvent.class));
++            f.resume();
++            assertEquals(List.of(1, 2), order);
++            assertTrue(completed.isDone()); assertFalse(completed.isCompletedExceptionally());
++            verify(f.plugins, times(2)).callEvent(any(BlockPhysicsEvent.class));
++        }
++    }
++
++    @Test void cancellationStillPreventsVanillaMutationAfterReadiness() {
++        try (Fixture f = new Fixture(10)) {
++            f.ready.set(false); BlockState state = f.state();
++            doAnswer(call -> { ((BlockPhysicsEvent)call.getArgument(0)).setCancelled(true); return null; })
++                .when(f.plugins).callEvent(any(BlockPhysicsEvent.class));
++            CompletableFuture<Void> completed = f.updater.captureUpdates(() ->
++                f.updater.neighborChanged(state, BlockPos.ZERO, f.block, null, false));
++            verify(f.plugins, never()).callEvent(any());
++            f.resume(); assertTrue(completed.isDone());
++            verify(state, never()).handleNeighborChanged(any(), any(), any(), any(), anyBoolean());
++        }
++    }
++
++    @Test void failedReadinessFailsGenerationBarrierWithoutPublishingSuccess() {
++        try (Fixture f = new Fixture(10)) {
++            f.ready.set(false); BlockState state = f.state();
++            CompletableFuture<Void> completed = f.updater.captureUpdates(() ->
++                f.updater.neighborChanged(state, BlockPos.ZERO, f.block, null, false));
++            f.pending.completeExceptionally(new IllegalStateException("world retired"));
++            assertTrue(completed.isCompletedExceptionally());
++            verify(f.plugins, never()).callEvent(any());
++        }
++    }
++
++    private static final class Fixture implements AutoCloseable {
++        final ServerLevel level = mock(ServerLevel.class);
++        final PluginManager plugins = mock(PluginManager.class);
++        final Block block = mock(Block.class);
++        final AtomicBoolean ready = new AtomicBoolean(true);
++        final MockedStatic<OwnerDomainExecutor> owners = mockStatic(OwnerDomainExecutor.class);
++        final MockedStatic<TickRegions> ticks = mockStatic(TickRegions.class);
++        final MockedStatic<OwnershipRouter> routing = mockStatic(OwnershipRouter.class);
++        final CollectingNeighborUpdater updater;
++        CompletableFuture<Void> pending;
++        Consumer<List<ChunkAccess>> continuation;
++        Fixture(int limit) {
++            CraftServer server = mock(CraftServer.class);
++            when(level.getCraftServer()).thenReturn(server); when(server.getPluginManager()).thenReturn(plugins);
++            owners.when(() -> OwnerDomainExecutor.isRegionOwner(eq(level), anyInt(), anyInt(), anyInt(), anyInt())).thenAnswer(call -> ready.get());
++            ticks.when(() -> TickRegions.isCurrentThreadOwnerQuiet(eq(level), anyInt(), anyInt(), anyInt(), anyInt())).thenAnswer(call -> ready.get());
++            routing.when(() -> OwnershipRouter.areChunksReady(eq(level), anyInt(), anyInt(), anyInt(), anyInt(), eq(ChunkStatus.FULL))).thenAnswer(call -> ready.get());
++            routing.when(() -> OwnershipRouter.runWhenChunksReady(eq(level), anyInt(), anyInt(), anyInt(), anyInt(), any(Priority.class), anyString(), any()))
++                .thenAnswer(call -> { continuation = call.getArgument(7); pending = new CompletableFuture<>(); return pending; });
++            updater = new CollectingNeighborUpdater(level, limit);
++        }
++        BlockState state() { BlockState state = mock(BlockState.class); when(state.asBlockData()).thenReturn(mock(CraftBlockData.class)); return state; }
++        void resume() { ready.set(true); continuation.accept(List.of()); pending.complete(null); }
++        @Override public void close() { routing.close(); ticks.close(); owners.close(); }
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/threading/runtime/NeighborReadinessTestSuite.java b/src/test/java/net/minecraft/server/threading/runtime/NeighborReadinessTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..5a30a1062fe10a54a04cdf0d6ff381bb8733e0ca
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/runtime/NeighborReadinessTestSuite.java
+@@ -0,0 +1,10 @@
++package net.minecraft.server.threading.runtime;
++
++import org.junit.platform.suite.api.*;
++
++@Suite
++@IncludeTags("Normal")
++@SelectClasses(NeighborReadinessTest.class)
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class NeighborReadinessTestSuite {
++}
 diff --git a/src/test/java/org/bukkit/CollectingNeighborUpdaterConcurrencyTest.java b/src/test/java/org/bukkit/CollectingNeighborUpdaterConcurrencyTest.java
 new file mode 100644
 index 0000000000000000000000000000000000000000..c005c0f84d719a1bdcab8c57a2317bc21891ddef
