@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 6 Oct 2026 13:46:39 +0300
+Subject: [PATCH] Expose asynchronous player respawn completion
+
+
+diff --git a/src/main/java/org/bukkit/entity/Player.java b/src/main/java/org/bukkit/entity/Player.java
+index 190313bc060d5f8440cec7c249ad1d2f1074f5bc..58bf2db14adc8966449b5cb96c731242e2e2e091 100644
+--- a/src/main/java/org/bukkit/entity/Player.java
++++ b/src/main/java/org/bukkit/entity/Player.java
+@@ -294,6 +294,18 @@ public interface Player extends HumanEntity, Conversable, OfflinePlayer, PluginM
+      */
+     public boolean isTransferred();
+ 
++    /**
++     * Respawns this player without blocking while destination chunks load.
++     * Already living players complete immediately. Overlapping client and plugin
++     * requests share the same respawn, including its events and spawn-block use.
++     *
++     * @return a future completed after respawn and client state are updated;
++     *         disconnected sessions and failed transfers complete exceptionally
++     */
++    default CompletableFuture<Void> respawnAsync() {
++        return CompletableFuture.failedFuture(new UnsupportedOperationException("Asynchronous respawn is not supported"));
++    }
++
+     /**
+      * Retrieves a cookie from this player.
+      *

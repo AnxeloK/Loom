@@ -1,0 +1,165 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 6 Oct 2026 13:46:39 +0300
+Subject: [PATCH] Complete player respawns asynchronously
+
+
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index a936c7b0fd4a4743a1a710670a5b7d1cdca5c1e8..86cc8a9249b5b9f1df8237e31169765a7b701b57 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -329,7 +329,7 @@ public class ServerGamePacketListenerImpl
+     private final FutureChain chatMessageChain;
+     private boolean waitingForSwitchToConfig;
+     private boolean waitingForRespawn;
+-    private volatile boolean respawnInProgress;
++    private final net.minecraft.server.players.PlayerRespawnOperation respawnOperation = new net.minecraft.server.players.PlayerRespawnOperation();
+     private int clientLoadedTimeoutTimer;
+     private int lastSupportedBlocksSend;
+     private final ServerCommandSuggestionsProvider commandSuggestionsProvider;
+@@ -3148,44 +3148,12 @@ public class ServerGamePacketListenerImpl
+         ServerboundClientCommandPacket.Action action = packet.getAction();
+         switch (action) {
+             case PERFORM_RESPAWN:
+-                final ServerPlayer respawningPlayer = this.player;
+-                final boolean returningFromEnd = respawningPlayer.wonGame;
+-                if (!returningFromEnd && respawningPlayer.getHealth() > 0.0F) {
+-                    return;
+-                }
+-                if (this.respawnInProgress) {
+-                    return;
+-                }
+-                this.respawnInProgress = true;
+-                respawningPlayer.wonGame = false;
+-                this.server.getPlayerList().respawnAsync(
+-                    respawningPlayer,
+-                    returningFromEnd,
+-                    returningFromEnd ? Entity.RemovalReason.CHANGED_DIMENSION : Entity.RemovalReason.KILLED,
+-                    returningFromEnd ? RespawnReason.END_PORTAL : RespawnReason.DEATH
+-                ).whenComplete((respawnedPlayer, throwable) -> {
+-                    try {
++                this.respawnAsync(this.player.wonGame ? RespawnReason.END_PORTAL : RespawnReason.DEATH)
++                    .whenComplete((ignored, throwable) -> {
+                         if (throwable != null) {
+-                            LOGGER.error("Failed to respawn player {}", respawningPlayer.getGameProfile().name(), throwable);
+-                            return;
+-                        }
+-                        if (this.isDisconnected() || this.player != respawningPlayer || respawnedPlayer == null) {
+-                            return;
++                            LOGGER.error("Failed to respawn player {}", this.player.getGameProfile().name(), throwable);
+                         }
+-
+-                        this.player = respawnedPlayer;
+-                        this.resetPosition();
+-                        this.restartClientLoadTimerAfterRespawn();
+-                        if (returningFromEnd) {
+-                            CriteriaTriggers.CHANGED_DIMENSION.trigger(this.player, Level.END, Level.OVERWORLD);
+-                        } else if (this.server.isHardcore()) {
+-                            this.player.setGameMode(GameType.SPECTATOR, org.bukkit.event.player.PlayerGameModeChangeEvent.Cause.HARDCORE_DEATH, null); // Paper - Expand PlayerGameModeChangeEvent
+-                            this.player.level().getGameRules().set(GameRules.SPECTATORS_GENERATE_CHUNKS, false, this.player.level()); // CraftBukkit - per-world
+-                        }
+-                    } finally {
+-                        this.respawnInProgress = false;
+-                    }
+-                });
++                    });
+                 break;
+             case REQUEST_STATS:
+                 this.player.getStats().sendStats(this.player);
+@@ -3195,6 +3163,52 @@ public class ServerGamePacketListenerImpl
+         }
+     }
+ 
++    public CompletableFuture<Void> respawnAsync(final RespawnReason reason) {
++        return this.respawnOperation.start(() -> {
++            final ServerPlayer respawningPlayer = this.player;
++            final boolean returningFromEnd = reason == RespawnReason.END_PORTAL;
++            if (this.isDisconnected()) {
++                return CompletableFuture.failedFuture(new java.util.concurrent.CancellationException("Player disconnected"));
++            }
++            if (!returningFromEnd && respawningPlayer.getHealth() > 0.0F) {
++                return CompletableFuture.completedFuture(null);
++            }
++            respawningPlayer.wonGame = false;
++            return this.server.getPlayerList().respawnAsync(
++                respawningPlayer,
++                returningFromEnd,
++                returningFromEnd ? Entity.RemovalReason.CHANGED_DIMENSION : Entity.RemovalReason.KILLED,
++                reason
++            ).thenCompose(respawnedPlayer -> net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(respawningPlayer, "respawn-completion"),
++                () -> {
++                    if (this.isDisconnected() || this.player != respawningPlayer || respawnedPlayer == null) {
++                        throw new java.util.concurrent.CancellationException("Player session retired during respawn");
++                    }
++                    this.player = respawnedPlayer;
++                    this.resetPosition();
++                    this.restartClientLoadTimerAfterRespawn();
++                    if (returningFromEnd) {
++                        CriteriaTriggers.CHANGED_DIMENSION.trigger(this.player, Level.END, Level.OVERWORLD);
++                    } else if (reason == RespawnReason.DEATH && this.server.isHardcore()) {
++                        this.player.setGameMode(GameType.SPECTATOR, org.bukkit.event.player.PlayerGameModeChangeEvent.Cause.HARDCORE_DEATH, null);
++                    }
++                    return null;
++                }
++            )).thenCompose(ignored -> {
++                if (reason != RespawnReason.DEATH || !this.server.isHardcore()) {
++                    return CompletableFuture.completedFuture(null);
++                }
++                return net.minecraft.server.threading.runtime.OwnershipRouter.runOnServer(this.server, () -> {
++                    if (this.isDisconnected() || this.player != respawningPlayer) {
++                        throw new java.util.concurrent.CancellationException("Player session retired during respawn");
++                    }
++                    this.player.level().getGameRules().set(GameRules.SPECTATORS_GENERATE_CHUNKS, false, this.player.level());
++                });
++            });
++        });
++    }
++
+     private void sendGameRuleValues() {
+         if (!this.player.permissions().hasPermission(Permissions.COMMANDS_GAMEMASTER) && !this.player.getBukkitEntity().hasPermission("minecraft.command.gamerule")) { // Paper - add permission check
+             LOGGER.warn("Player {} tried to request game rule values without required permissions", this.player.getGameProfile().name());
+diff --git a/net/minecraft/server/players/PlayerRespawnOperation.java b/net/minecraft/server/players/PlayerRespawnOperation.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..0bf3b71503e83a139dafc0fc29bbdade885ea0ef
+--- /dev/null
++++ b/net/minecraft/server/players/PlayerRespawnOperation.java
+@@ -0,0 +1,38 @@
++package net.minecraft.server.players;
++
++import java.util.concurrent.CompletableFuture;
++import java.util.function.Supplier;
++
++/** Shares one respawn across client and plugin requests until transfer has completed. */
++public final class PlayerRespawnOperation {
++    private CompletableFuture<Void> pending;
++
++    public CompletableFuture<Void> start(final Supplier<CompletableFuture<Void>> operation) {
++        final CompletableFuture<Void> completion;
++        synchronized (this) {
++            if (this.pending != null) {
++                return this.pending.copy();
++            }
++            completion = new CompletableFuture<>();
++            this.pending = completion;
++        }
++        try {
++            operation.get().whenComplete((ignored, failure) -> this.finish(completion, failure));
++        } catch (final Throwable failure) {
++            this.finish(completion, failure);
++        }
++        // Cancelling one caller must not permit another transfer while the first still runs.
++        return completion.copy();
++    }
++
++    private void finish(final CompletableFuture<Void> completion, final Throwable failure) {
++        synchronized (this) {
++            this.pending = null;
++        }
++        if (failure == null) {
++            completion.complete(null);
++        } else {
++            completion.completeExceptionally(failure);
++        }
++    }
++}

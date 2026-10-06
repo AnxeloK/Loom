@@ -1,0 +1,205 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 6 Oct 2026 13:46:39 +0300
+Subject: [PATCH] Route plugin respawns through owner continuations
+
+
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index 06fa3d20c7f9b8606983dd2df3de1bcee7c65c64..f343b3b97dd21aa78120b74a8bcbd93a21aaab2a 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -3048,6 +3048,20 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+         getHandle().resetAttackStrengthTicker();
+     }
+     // Paper end
++    @Override
++    public CompletableFuture<Void> respawnAsync() {
++        final ServerPlayer player = this.getHandle();
++        return net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "plugin-respawn"),
++            () -> {
++                if (this.getHandle() != player || player.connection.isDisconnected()) {
++                    throw new java.util.concurrent.CancellationException("Player session retired");
++                }
++                return player.connection.respawnAsync(org.bukkit.event.player.PlayerRespawnEvent.RespawnReason.PLUGIN);
++            }
++        ).thenCompose(java.util.function.Function.identity());
++    }
++
+     // Spigot start
+     private final Player.Spigot spigot = new Player.Spigot() {
+ 
+@@ -3058,10 +3072,11 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+ 
+         @Override
+         public void respawn() {
+-            if (CraftPlayer.this.getHealth() <= 0 && CraftPlayer.this.isOnline()) {
+-                CraftPlayer.this.server.getServer().getPlayerList().respawn(CraftPlayer.this.getHandle(), false, Entity.RemovalReason.KILLED, org.bukkit.event.player.PlayerRespawnEvent.RespawnReason.PLUGIN);
+-                CraftPlayer.this.getHandle().connection.restartClientLoadTimerAfterRespawn();
+-            }
++            CraftPlayer.this.respawnAsync().whenComplete((ignored, failure) -> {
++                if (failure != null) {
++                    CraftPlayer.this.server.getLogger().log(Level.SEVERE, "Could not complete plugin respawn", failure);
++                }
++            });
+         }
+ 
+         @Override
+diff --git a/src/test/java/net/minecraft/server/players/PlayerRespawnOperationTest.java b/src/test/java/net/minecraft/server/players/PlayerRespawnOperationTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..bd798e59caaf07cce5d68c2c76b8adff0fca212a
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/players/PlayerRespawnOperationTest.java
+@@ -0,0 +1,60 @@
++package net.minecraft.server.players;
++
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionException;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++@Normal
++class PlayerRespawnOperationTest {
++    @Test
++    void overlappingClientAndPluginRequestsWaitForOneTransfer() {
++        final PlayerRespawnOperation operation = new PlayerRespawnOperation();
++        final CompletableFuture<Void> transfer = new CompletableFuture<>();
++        final AtomicInteger starts = new AtomicInteger();
++        final CompletableFuture<Void> plugin = operation.start(() -> { starts.incrementAndGet(); return transfer; });
++        final CompletableFuture<Void> client = operation.start(() -> { starts.incrementAndGet(); return transfer; });
++        assertEquals(1, starts.get());
++        assertFalse(plugin.isDone());
++        assertFalse(client.isDone());
++        transfer.complete(null);
++        assertDoesNotThrow(plugin::join);
++        assertDoesNotThrow(client::join);
++    }
++
++    @Test
++    void callerCancellationCannotReleaseThePendingRespawn() {
++        final PlayerRespawnOperation operation = new PlayerRespawnOperation();
++        final CompletableFuture<Void> transfer = new CompletableFuture<>();
++        operation.start(() -> transfer).cancel(false);
++        final CompletableFuture<Void> next = operation.start(() -> fail("Second respawn started"));
++        assertFalse(next.isDone());
++        assertFalse(transfer.isCancelled());
++        transfer.complete(null);
++        assertDoesNotThrow(next::join);
++    }
++
++    @Test
++    void failedTransferReachesEveryCallerAndAllowsRetry() {
++        final PlayerRespawnOperation operation = new PlayerRespawnOperation();
++        final CompletableFuture<Void> transfer = new CompletableFuture<>();
++        final CompletableFuture<Void> first = operation.start(() -> transfer);
++        final CompletableFuture<Void> second = operation.start(() -> fail("Duplicate respawn"));
++        final IllegalStateException failure = new IllegalStateException("Destination unavailable");
++        transfer.completeExceptionally(failure);
++        assertSame(failure, assertThrows(CompletionException.class, first::join).getCause());
++        assertSame(failure, assertThrows(CompletionException.class, second::join).getCause());
++        assertDoesNotThrow(() -> operation.start(() -> CompletableFuture.completedFuture(null)).join());
++    }
++
++    @Test
++    void failedStartDoesNotLeaveTheSessionStuck() {
++        final PlayerRespawnOperation operation = new PlayerRespawnOperation();
++        final IllegalStateException failure = new IllegalStateException("No current player");
++        assertSame(failure, assertThrows(CompletionException.class,
++            () -> operation.start(() -> { throw failure; }).join()).getCause());
++        assertDoesNotThrow(() -> operation.start(() -> CompletableFuture.completedFuture(null)).join());
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/players/PlayerRespawnOperationTestSuite.java b/src/test/java/net/minecraft/server/players/PlayerRespawnOperationTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..100a1932291273b294a075d9153ab41d42714ac6
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/players/PlayerRespawnOperationTestSuite.java
+@@ -0,0 +1,10 @@
++package net.minecraft.server.players;
++
++import org.junit.platform.suite.api.*;
++
++@Suite
++@IncludeTags("Normal")
++@SelectClasses({PlayerRespawnOperationTest.class, org.bukkit.craftbukkit.entity.CraftPlayerRespawnTest.class})
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class PlayerRespawnOperationTestSuite {
++}
+diff --git a/src/test/java/org/bukkit/craftbukkit/entity/CraftPlayerRespawnTest.java b/src/test/java/org/bukkit/craftbukkit/entity/CraftPlayerRespawnTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..fae023546e7ab8ca10cfdcd327cb0e98da889c6f
+--- /dev/null
++++ b/src/test/java/org/bukkit/craftbukkit/entity/CraftPlayerRespawnTest.java
+@@ -0,0 +1,70 @@
++package org.bukkit.craftbukkit.entity;
++
++import java.util.concurrent.*;
++import java.util.function.Supplier;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.network.ServerGamePacketListenerImpl;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import org.bukkit.event.player.PlayerRespawnEvent.RespawnReason;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import org.mockito.MockedStatic;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++public class CraftPlayerRespawnTest {
++    @Test void completionWaitsForDestinationRespawn() {
++        try (Fixture f = new Fixture()) {
++            CompletableFuture<Void> completed = f.craft.respawnAsync();
++            assertFalse(completed.isDone());
++            verify(f.connection).respawnAsync(RespawnReason.PLUGIN);
++            f.transfer.complete(null);
++            assertDoesNotThrow(completed::join);
++        }
++    }
++    @Test void transferFailuresReachTheCaller() {
++        try (Fixture f = new Fixture()) {
++            CompletableFuture<Void> completed = f.craft.respawnAsync();
++            IllegalStateException failure = new IllegalStateException("Spawn unavailable");
++            f.transfer.completeExceptionally(failure);
++            assertSame(failure, assertThrows(CompletionException.class, completed::join).getCause());
++        }
++    }
++    @Test void disconnectedPlayerCannotStartARespawn() {
++        try (Fixture f = new Fixture()) {
++            when(f.connection.isDisconnected()).thenReturn(true);
++            assertInstanceOf(CancellationException.class,
++                assertThrows(CompletionException.class, () -> f.craft.respawnAsync().join()).getCause());
++            verify(f.connection, never()).respawnAsync(any());
++        }
++    }
++    @Test void retiredHandleCannotRespawnAReplacementSession() {
++        try (Fixture f = new Fixture()) {
++            when(f.craft.getHandle()).thenReturn(f.player, mock(ServerPlayer.class));
++            assertInstanceOf(CancellationException.class,
++                assertThrows(CompletionException.class, () -> f.craft.respawnAsync().join()).getCause());
++            verify(f.connection, never()).respawnAsync(any());
++        }
++    }
++    private static final class Fixture implements AutoCloseable {
++        final CraftPlayer craft = mock(CraftPlayer.class);
++        final ServerPlayer player = mock(ServerPlayer.class);
++        final ServerGamePacketListenerImpl connection = mock(ServerGamePacketListenerImpl.class);
++        final CompletableFuture<Void> transfer = new CompletableFuture<>();
++        final MockedStatic<OwnerDomainExecutor> owners = mockStatic(OwnerDomainExecutor.class);
++        Fixture() {
++            player.connection = connection;
++            when(craft.getHandle()).thenReturn(player);
++            when(craft.respawnAsync()).thenCallRealMethod();
++            when(connection.respawnAsync(RespawnReason.PLUGIN)).thenReturn(transfer);
++            OwnerDomainExecutor.Owner owner = mock(OwnerDomainExecutor.Owner.class);
++            owners.when(() -> OwnerDomainExecutor.player(player, "plugin-respawn")).thenReturn(owner);
++            owners.when(() -> OwnerDomainExecutor.supply(eq(owner), any())).thenAnswer(call -> {
++                try { return CompletableFuture.completedFuture(((Supplier<?>) call.getArgument(1)).get()); }
++                catch (Throwable failure) { return CompletableFuture.failedFuture(failure); }
++            });
++        }
++        @Override public void close() { owners.close(); }
++    }
++}
