@@ -19,7 +19,7 @@ index 45c927417d34ddd48c92116efd9b5777bfc52e35..020b8b989b4ffda2bf32b6c4803fed2f
          for (final ServerPlayer player : new java.util.ArrayList<>(this.world.players())) {
              final PlayerChunkLoaderData loader = ((ChunkSystemServerPlayer)player).moonrise$getChunkLoader();
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
-index eb7c5ba7168ba4903e93938dd8671227194bec99..f5bb1fbabc5c786b451b06ffd50d6db87e8684f3 100644
+index eb7c5ba7168ba4903e93938dd8671227194bec99..911a2753f7090cc8d4283d3957df12dd984c7f01 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
 @@ -41,6 +41,7 @@ import net.minecraft.server.level.FullChunkStatus;
@@ -30,7 +30,15 @@ index eb7c5ba7168ba4903e93938dd8671227194bec99..f5bb1fbabc5c786b451b06ffd50d6db8
  import net.minecraft.util.SortedArraySet;
  import net.minecraft.world.level.ChunkPos;
  import net.minecraft.world.level.chunk.LevelChunk;
-@@ -118,6 +119,17 @@ public final class ChunkHolderManager {
+@@ -86,6 +87,7 @@ public final class ChunkHolderManager {
+     private long currentTick;
+ 
+     private final ArrayDeque<NewChunkHolder> pendingFullLoadUpdate = new ArrayDeque<>();
++    private boolean processingPendingFullUpdates;
+     private final MultiThreadedQueue<NewChunkHolder> offThreadPendingFullLoadUpdate = new MultiThreadedQueue<>();
+     private final ObjectRBTreeSet<NewChunkHolder> autoSaveQueue = new ObjectRBTreeSet<>((final NewChunkHolder c1, final NewChunkHolder c2) -> {
+         if (c1 == c2) {
+@@ -118,6 +120,17 @@ public final class ChunkHolderManager {
          this.unloadQueue = new ChunkUnloadQueue(((ChunkSystemServerLevel)world).moonrise$getRegionChunkShift());
      }
  
@@ -48,7 +56,7 @@ index eb7c5ba7168ba4903e93938dd8671227194bec99..f5bb1fbabc5c786b451b06ffd50d6db8
      public boolean processTicketUpdates(final int chunkX, final int chunkZ) {
          final int ticketShift = ThreadedTicketLevelPropagator.SECTION_SHIFT;
          final int ticketMask = (1 << ticketShift) - 1;
-@@ -193,7 +205,7 @@ public final class ChunkHolderManager {
+@@ -193,7 +206,7 @@ public final class ChunkHolderManager {
      }
  
      public void close(final boolean save, final boolean halt) {
@@ -57,7 +65,7 @@ index eb7c5ba7168ba4903e93938dd8671227194bec99..f5bb1fbabc5c786b451b06ffd50d6db8
          if (halt) {
              LOGGER.info("Waiting 60s for chunk system to halt for world '" + WorldUtil.getWorldName(this.world) + "'");
              if (!this.taskScheduler.halt(true, TimeUnit.SECONDS.toNanos(60L))) {
-@@ -1153,9 +1165,9 @@ public final class ChunkHolderManager {
+@@ -1153,9 +1166,9 @@ public final class ChunkHolderManager {
          if (changedFullStatus.isEmpty()) {
              return;
          }
@@ -70,7 +78,7 @@ index eb7c5ba7168ba4903e93938dd8671227194bec99..f5bb1fbabc5c786b451b06ffd50d6db8
              this.offThreadPendingFullLoadUpdate.addAll(changedFullStatus);
          } else {
              final ArrayDeque<NewChunkHolder> pendingFullLoadUpdate = this.pendingFullLoadUpdate;
-@@ -1175,7 +1187,7 @@ public final class ChunkHolderManager {
+@@ -1175,7 +1188,7 @@ public final class ChunkHolderManager {
  
      // note: never call while inside the chunk system, this will absolutely break everything
      public void processUnloads() {
@@ -79,7 +87,7 @@ index eb7c5ba7168ba4903e93938dd8671227194bec99..f5bb1fbabc5c786b451b06ffd50d6db8
  
          if (BLOCK_TICKET_UPDATES.get() == Boolean.TRUE) {
              throw new IllegalStateException("Cannot unload chunks recursively");
-@@ -1447,7 +1459,7 @@ public final class ChunkHolderManager {
+@@ -1447,7 +1460,7 @@ public final class ChunkHolderManager {
          final boolean isTickThread = TickThread.isTickThread();
  
          if (!PlatformHooks.get().allowAsyncTicketUpdates() && isTickThread) {
@@ -88,7 +96,7 @@ index eb7c5ba7168ba4903e93938dd8671227194bec99..f5bb1fbabc5c786b451b06ffd50d6db8
          }
  
          boolean ret = false;
-@@ -1473,7 +1485,7 @@ public final class ChunkHolderManager {
+@@ -1473,7 +1486,7 @@ public final class ChunkHolderManager {
              }
          }
  
@@ -97,16 +105,69 @@ index eb7c5ba7168ba4903e93938dd8671227194bec99..f5bb1fbabc5c786b451b06ffd50d6db8
              ret |= this.processPendingFullUpdate();
          }
  
-@@ -1499,6 +1511,9 @@ public final class ChunkHolderManager {
+@@ -1499,32 +1512,45 @@ public final class ChunkHolderManager {
  
      // only call on tick thread
      private boolean processPendingFullUpdate() {
+-        this.processOffThreadFullUpdates();
 +        if (!canProcessPendingFullStatusUpdates(this.world)) {
 +            throw new IllegalStateException("Cannot process pending full status updates without ownership of the whole world");
 +        }
-         this.processOffThreadFullUpdates();
++        // A full-status callback can request its post-processing halo and update tickets again.
++        // Leave those transitions in this queue until the current callback has returned.
++        if (this.processingPendingFullUpdates) {
++            return false;
++        }
++        this.processingPendingFullUpdates = true;
++        try {
++            this.processOffThreadFullUpdates();
  
-         final ArrayDeque<NewChunkHolder> pendingFullLoadUpdate = this.pendingFullLoadUpdate;
+-        final ArrayDeque<NewChunkHolder> pendingFullLoadUpdate = this.pendingFullLoadUpdate;
++            final ArrayDeque<NewChunkHolder> pendingFullLoadUpdate = this.pendingFullLoadUpdate;
+ 
+-        boolean ret = false;
++            boolean ret = false;
+ 
+-        if (pendingFullLoadUpdate.isEmpty()) {
+-            // avoid allocating changedFullStatus
+-            return ret;
+-        }
++            if (pendingFullLoadUpdate.isEmpty()) {
++                // avoid allocating changedFullStatus
++                return ret;
++            }
+ 
+-        final List<NewChunkHolder> changedFullStatus = new ArrayList<>();
++            final List<NewChunkHolder> changedFullStatus = new ArrayList<>();
+ 
+-        NewChunkHolder holder;
+-        while ((holder = pendingFullLoadUpdate.poll()) != null) {
+-            ret |= holder.handleFullStatusChange(changedFullStatus);
++            NewChunkHolder holder;
++            while ((holder = pendingFullLoadUpdate.poll()) != null) {
++                ret |= holder.handleFullStatusChange(changedFullStatus);
+ 
+-            if (!changedFullStatus.isEmpty()) {
+-                for (int i = 0, len = changedFullStatus.size(); i < len; ++i) {
+-                    pendingFullLoadUpdate.add(changedFullStatus.get(i));
++                if (!changedFullStatus.isEmpty()) {
++                    for (int i = 0, len = changedFullStatus.size(); i < len; ++i) {
++                        pendingFullLoadUpdate.add(changedFullStatus.get(i));
++                    }
++                    changedFullStatus.clear();
+                 }
+-                changedFullStatus.clear();
+             }
+-        }
+ 
+-        return ret;
++            return ret;
++        } finally {
++            this.processingPendingFullUpdates = false;
++        }
+     }
+ 
+     public CompletableFuture<?> addTicketAndLoadWithRadius(final TicketType ticketType, final ChunkPos chunkPos, final int radius,
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
 index bbba1766ed9da671022c467a45f7de479fb6abb4..259f51179000834eac4d5e21677fb5127e1b10a9 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java

@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 10 Oct 2026 15:13:57 +0300
+Subject: [PATCH] Test nonrecursive full chunk status draining
+
+
+diff --git a/src/test/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManagerOwnerRoutingTest.java b/src/test/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManagerOwnerRoutingTest.java
+index 1a8fc14f84842d8475b7ae24a76c22af83d672f2..55f03d290ddef244cc04fbfb522c268e6a3d2b86 100644
+--- a/src/test/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManagerOwnerRoutingTest.java
++++ b/src/test/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManagerOwnerRoutingTest.java
+@@ -85,6 +85,60 @@ class ChunkHolderManagerOwnerRoutingTest {
+         });
+     }
+ 
++    @Test
++    void recursiveHaloLoadsLeaveFullStatusDrainingToTheOuterLoop() throws InterruptedException {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++        final ChunkHolderManager manager = new ChunkHolderManager(level, Mockito.mock(ChunkTaskScheduler.class));
++        final NewChunkHolder first = Mockito.mock(NewChunkHolder.class);
++        final NewChunkHolder second = Mockito.mock(NewChunkHolder.class);
++        final java.util.List<String> order = new java.util.ArrayList<>();
++        Mockito.when(first.handleFullStatusChange(Mockito.anyList())).thenAnswer(call -> {
++            order.add("first-start");
++            manager.addChangedStatuses(java.util.List.of(second));
++            Assertions.assertFalse(manager.processTicketUpdates(), "A halo load must not recursively drain other holders");
++            Mockito.verifyNoInteractions(second);
++            order.add("first-end");
++            return true;
++        });
++        Mockito.when(second.handleFullStatusChange(Mockito.anyList())).thenAnswer(call -> {
++            order.add("second");
++            return true;
++        });
++        runOnTickThread(() -> {
++            try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enterGlobal(server, "recursive-full-status-test")) {
++                manager.addChangedStatuses(java.util.List.of(first));
++                Assertions.assertTrue(manager.processTicketUpdates());
++                Assertions.assertEquals(java.util.List.of("first-start", "first-end", "second"), order);
++                Assertions.assertFalse(manager.processTicketUpdates());
++                Mockito.verify(first).handleFullStatusChange(Mockito.anyList());
++                Mockito.verify(second).handleFullStatusChange(Mockito.anyList());
++            }
++        });
++    }
++
++    @Test
++    void failedFullTransitionReleasesTheDrainForSubsequentWork() throws InterruptedException {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++        final ChunkHolderManager manager = new ChunkHolderManager(level, Mockito.mock(ChunkTaskScheduler.class));
++        final NewChunkHolder first = Mockito.mock(NewChunkHolder.class);
++        final NewChunkHolder second = Mockito.mock(NewChunkHolder.class);
++        Mockito.when(first.handleFullStatusChange(Mockito.anyList())).thenThrow(new IllegalStateException("transition failed"));
++        Mockito.when(second.handleFullStatusChange(Mockito.anyList())).thenReturn(true);
++        runOnTickThread(() -> {
++            try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enterGlobal(server, "failed-full-status-test")) {
++                manager.addChangedStatuses(java.util.List.of(first, second));
++                Assertions.assertThrows(IllegalStateException.class, manager::processTicketUpdates);
++                Assertions.assertTrue(manager.processTicketUpdates(), "The remaining transition must still drain");
++                Mockito.verify(second).handleFullStatusChange(Mockito.anyList());
++                Assertions.assertFalse(manager.processTicketUpdates());
++            }
++        });
++    }
++
+     private static void runOnTickThread(final Runnable action) throws InterruptedException {
+         final AtomicReference<Throwable> failure = new AtomicReference<>();
+         final Thread thread = new TickThread(() -> {
