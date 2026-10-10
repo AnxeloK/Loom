@@ -1,0 +1,362 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 10 Oct 2026 14:15:23 +0300
+Subject: [PATCH] Resume custom spawns after chunk readiness
+
+
+diff --git a/net/minecraft/server/threading/runtime/OwnershipRouter.java b/net/minecraft/server/threading/runtime/OwnershipRouter.java
+index 62fa7d2b4cf07b9086e863768ab0075355658a10..96e4a82a5d62a8b025c7889f710cf405e97c3557 100644
+--- a/net/minecraft/server/threading/runtime/OwnershipRouter.java
++++ b/net/minecraft/server/threading/runtime/OwnershipRouter.java
+@@ -111,19 +111,40 @@ public final class OwnershipRouter {
+         final Priority priority,
+         final String operation,
+         final Consumer<List<ChunkAccess>> onReady
++    ) {
++        Objects.requireNonNull(operation, "operation");
++        return runWhenChunksReady(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, priority,
++            OwnerDomainExecutor.region(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation), onReady);
++    }
++
++    public static CompletableFuture<Void> runWhenChunksReady(
++        final ServerLevel level,
++        final int minChunkX,
++        final int minChunkZ,
++        final int maxChunkX,
++        final int maxChunkZ,
++        final ChunkStatus chunkStatus,
++        final Priority priority,
++        final OwnerDomainExecutor.Owner owner,
++        final Consumer<List<ChunkAccess>> onReady
+     ) {
+         Objects.requireNonNull(level, "level");
+         Objects.requireNonNull(chunkStatus, "chunkStatus");
+         Objects.requireNonNull(priority, "priority");
+-        Objects.requireNonNull(operation, "operation");
++        Objects.requireNonNull(owner, "owner");
+         Objects.requireNonNull(onReady, "onReady");
++        if (owner.domain() != OwnerDomainExecutor.Domain.REGION || owner.level() != level
++            || owner.minChunkX() > minChunkX || owner.minChunkZ() > minChunkZ
++            || owner.maxChunkX() < maxChunkX || owner.maxChunkZ() < maxChunkZ) {
++            throw new IllegalArgumentException("Chunk callback owner must contain the requested level and chunks");
++        }
+         if (maxChunkX < minChunkX || maxChunkZ < minChunkZ) {
+             throw new IllegalArgumentException("Invalid chunk bounds for runWhenChunksReady");
+         }
+ 
+         final CompletableFuture<Void> future = new CompletableFuture<>();
+         loadAndDispatch(
+-            future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, priority, operation, onReady
++            future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, priority, owner, onReady
+         );
+         return future;
+     }
+@@ -170,7 +191,7 @@ public final class OwnershipRouter {
+         final int maxChunkZ,
+         final ChunkStatus chunkStatus,
+         final Priority priority,
+-        final String operation,
++        final OwnerDomainExecutor.Owner owner,
+         final Consumer<List<ChunkAccess>> onReady
+     ) {
+         if (future.isDone()) {
+@@ -181,7 +202,7 @@ public final class OwnershipRouter {
+             if (future.isDone()) {
+                 return;
+             }
+-            if (OwnerDomainExecutor.isRegionOwner(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ)
++            if (OwnerDomainExecutor.isOwner(owner)
+                 && areChunksReady(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus)) {
+                 try {
+                     validateLoadedChunks(minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunks);
+@@ -203,7 +224,7 @@ public final class OwnershipRouter {
+             }
+ 
+             dispatchReadyCallback(
+-                future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, operation, chunks, onReady, lease
++                future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, owner, chunks, onReady, lease
+             );
+         });
+     }
+@@ -216,7 +237,7 @@ public final class OwnershipRouter {
+         final int maxChunkX,
+         final int maxChunkZ,
+         final ChunkStatus chunkStatus,
+-        final String operation,
++        final OwnerDomainExecutor.Owner owner,
+         final List<ChunkAccess> chunks,
+         final Consumer<List<ChunkAccess>> onReady,
+         final ChunkReadyLease lease
+@@ -228,7 +249,7 @@ public final class OwnershipRouter {
+ 
+         try {
+             OwnerDomainExecutor.executeCompleting(
+-                OwnerDomainExecutor.region(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation),
++                owner,
+                 () -> {
+                     if (future.isDone()) {
+                         lease.close();
+@@ -236,7 +257,7 @@ public final class OwnershipRouter {
+                     }
+                     if (!areChunksReady(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus)) {
+                         retryReadyCallback(
+-                            future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, operation, chunks, onReady, lease
++                            future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, owner, chunks, onReady, lease
+                         );
+                         return;
+                     }
+@@ -261,7 +282,7 @@ public final class OwnershipRouter {
+         final int maxChunkX,
+         final int maxChunkZ,
+         final ChunkStatus chunkStatus,
+-        final String operation,
++        final OwnerDomainExecutor.Owner owner,
+         final List<ChunkAccess> chunks,
+         final Consumer<List<ChunkAccess>> onReady,
+         final ChunkReadyLease lease
+@@ -274,9 +295,9 @@ public final class OwnershipRouter {
+ 
+         try {
+             OwnerDomainExecutor.execute(
+-                OwnerDomainExecutor.asyncIo(level.getServer(), operation + "-chunk-ready-retry"),
++                OwnerDomainExecutor.asyncIo(level.getServer(), owner.operation() + "-chunk-ready-retry"),
+                 () -> dispatchReadyCallback(
+-                    future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, operation, chunks, onReady, lease
++                    future, level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, owner, chunks, onReady, lease
+                 )
+             );
+         } catch (final Throwable throwable) {
+diff --git a/net/minecraft/world/entity/npc/wanderingtrader/WanderingTraderSpawner.java b/net/minecraft/world/entity/npc/wanderingtrader/WanderingTraderSpawner.java
+index 625996a7e1c6ec51312d25d7a94a08caccba32de..fec1bb9dbac46aadb1a4851e2f1ba0e541a6f54d 100644
+--- a/net/minecraft/world/entity/npc/wanderingtrader/WanderingTraderSpawner.java
++++ b/net/minecraft/world/entity/npc/wanderingtrader/WanderingTraderSpawner.java
+@@ -30,6 +30,8 @@ public class WanderingTraderSpawner implements CustomSpawner {
+     private static final int SPAWN_CHANCE_INCREASE = 25;
+     private static final int SPAWN_ONE_IN_X_CHANCE = 10;
+     private static final int NUMBER_OF_SPAWN_ATTEMPTS = 10;
++    private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
++    private final java.util.concurrent.atomic.AtomicBoolean pendingSpawn = new java.util.concurrent.atomic.AtomicBoolean();
+     private final RandomSource random = RandomSource.create();
+     private final SavedDataStorage savedDataStorage;
+     private int tickDelay;
+@@ -61,11 +63,21 @@ public class WanderingTraderSpawner implements CustomSpawner {
+                     int chanceToSpawn = data.spawnChance();
+                     int newSpawnChance = Mth.clamp(chanceToSpawn + level.paperConfig().entities.spawning.wanderingTrader.spawnChanceFailureIncrement, level.paperConfig().entities.spawning.wanderingTrader.spawnChanceMin, level.paperConfig().entities.spawning.wanderingTrader.spawnChanceMax);
+                     data.setSpawnChance(newSpawnChance);
+-                    if (this.random.nextInt(100) <= chanceToSpawn) {
+-                        if (this.spawn(level)) {
+-                            data.setSpawnChance(level.paperConfig().entities.spawning.wanderingTrader.spawnChanceMin);
+-                            // Paper end - Add Wandering Trader spawn rate config options
++                    if (this.random.nextInt(100) <= chanceToSpawn && this.pendingSpawn.compareAndSet(false, true)) {
++                        try {
++                            this.spawn(level).whenComplete((spawned, failure) -> {
++                                this.pendingSpawn.set(false);
++                                if (failure != null) {
++                                    LOGGER.error("Failed to complete wandering trader spawn", failure);
++                                } else if (spawned) {
++                                    data.setSpawnChance(level.paperConfig().entities.spawning.wanderingTrader.spawnChanceMin);
++                                }
++                            });
++                        } catch (final RuntimeException failure) {
++                            this.pendingSpawn.set(false);
++                            LOGGER.error("Failed to prepare wandering trader spawn", failure);
+                         }
++                        // Paper end - Add Wandering Trader spawn rate config options
+                     }
+                 }
+             } else { this.tickDelay--; } // Paper - Prevent tickDelay going below 0
+@@ -80,22 +92,65 @@ public class WanderingTraderSpawner implements CustomSpawner {
+         return this.traderData;
+     }
+ 
+-    private boolean spawn(final ServerLevel level) {
++    private java.util.concurrent.CompletableFuture<Boolean> spawn(final ServerLevel level) {
+         Player player = level.getRandomPlayer();
+         if (player == null) {
+-            return true;
++            return java.util.concurrent.CompletableFuture.completedFuture(true);
+         }
+-
+         if (this.random.nextInt(10) != 0) {
+-            return false;
++            return java.util.concurrent.CompletableFuture.completedFuture(false);
+         }
+-
+         BlockPos playerPos = player.blockPosition();
+-        int radius = 48;
+-        PoiManager poiManager = level.getPoiManager();
+-        Optional<BlockPos> poiPos = poiManager.find(p -> p.is(PoiTypes.MEETING), p -> true, playerPos, 48, PoiManager.Occupancy.ANY);
++        Optional<BlockPos> poiPos = level.getPoiManager().find(p -> p.is(PoiTypes.MEETING), p -> true,
++            playerPos, 48, PoiManager.Occupancy.ANY);
+         BlockPos referencePos = poiPos.orElse(playerPos);
+-        BlockPos spawnPosition = this.findSpawnPositionNear(level, referencePos, 48);
++        final java.util.concurrent.CompletableFuture<Boolean> result = new java.util.concurrent.CompletableFuture<>();
++        this.spawnCandidate(level, player, playerPos, referencePos, 10, result);
++        return result;
++    }
++
++    private void spawnCandidate(final ServerLevel level, final Player player, final BlockPos playerPos,
++        final BlockPos referencePos, final int remaining, final java.util.concurrent.CompletableFuture<Boolean> result) {
++        if (result.isDone()) {
++            return;
++        }
++        if (remaining == 0) {
++            result.complete(false);
++            return;
++        }
++        final int x = referencePos.getX() + this.random.nextInt(96) - 48;
++        final int z = referencePos.getZ() + this.random.nextInt(96) - 48;
++        final net.minecraft.server.threading.runtime.OwnerDomainExecutor.Owner owner =
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.region(level,
++                Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, "wandering-trader-spawn");
++        // Include the space check, spawn collision box and the two llamas' four-block search radius.
++        net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(level,
++            (x - 5) >> 4, (z - 5) >> 4, (x + 5) >> 4, (z + 5) >> 4,
++            net.minecraft.world.level.chunk.status.ChunkStatus.FULL,
++            ca.spottedleaf.concurrentutil.util.Priority.NORMAL, owner, chunks -> {
++                if (level.getServer().isStopped() || level.getServer().getLevel(level.dimension()) != level
++                    || !level.players().contains(player) || player.level() != level || player.isRemoved()
++                    || !player.blockPosition().equals(playerPos)
++                    || !level.getGameRules().get(GameRules.SPAWN_WANDERING_TRADERS)) {
++                    result.complete(false);
++                    return;
++                }
++                final BlockPos candidate = new BlockPos(x,
++                    level.getHeight(SpawnPlacements.getHeightmapType(EntityTypes.WANDERING_TRADER), x, z), z);
++                if (SpawnPlacements.getPlacementType(EntityTypes.WANDERING_TRADER)
++                    .isSpawnPositionOk(level, candidate, EntityTypes.WANDERING_TRADER)) {
++                    result.complete(this.spawnAt(level, candidate, referencePos));
++                } else {
++                    this.spawnCandidate(level, player, playerPos, referencePos, remaining - 1, result);
++                }
++            }).whenComplete((ignored, failure) -> {
++                if (failure != null) {
++                    result.completeExceptionally(failure);
++                }
++            });
++    }
++
++    private boolean spawnAt(final ServerLevel level, final BlockPos spawnPosition, final BlockPos referencePos) {
+         if (spawnPosition != null && this.hasEnoughSpace(level, spawnPosition)) {
+             if (level.getBiome(spawnPosition).is(BiomeTags.WITHOUT_WANDERING_TRADER_SPAWNS)) {
+                 return false;
+diff --git a/net/minecraft/world/level/levelgen/PhantomSpawner.java b/net/minecraft/world/level/levelgen/PhantomSpawner.java
+index 9900096652c6a3c114b31fb6813a791ba5021db4..6de14bf9fc342833c5b5e1a17b944695ff11b95d 100644
+--- a/net/minecraft/world/level/levelgen/PhantomSpawner.java
++++ b/net/minecraft/world/level/levelgen/PhantomSpawner.java
+@@ -19,6 +19,8 @@ import net.minecraft.world.level.gamerules.GameRules;
+ import net.minecraft.world.level.material.FluidState;
+ 
+ public class PhantomSpawner implements CustomSpawner {
++    private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
++    private final java.util.Set<java.util.UUID> pendingSpawns = java.util.concurrent.ConcurrentHashMap.newKeySet();
+     private int nextTick;
+ 
+     @Override
+@@ -52,31 +54,7 @@ public class PhantomSpawner implements CustomSpawner {
+                                             BlockPos spawnPos = playerPos.above(20 + random.nextInt(15))
+                                                 .east(-10 + random.nextInt(21))
+                                                 .south(-10 + random.nextInt(21));
+-                                            BlockState blockState = level.getBlockState(spawnPos);
+-                                            FluidState fluidState = level.getFluidState(spawnPos);
+-                                            if (NaturalSpawner.isValidEmptySpawnBlock(level, spawnPos, blockState, fluidState, EntityTypes.PHANTOM)) {
+-                                                SpawnGroupData groupData = null;
+-                                                int groupSize = 1 + random.nextInt(difficulty.getDifficulty().getId() + 1);
+-
+-                                                for (int i = 0; i < groupSize; i++) {
+-                                                    // Paper start - PhantomPreSpawnEvent
+-                                                    com.destroystokyo.paper.event.entity.PhantomPreSpawnEvent event = new com.destroystokyo.paper.event.entity.PhantomPreSpawnEvent(org.bukkit.craftbukkit.util.CraftLocation.toBukkit(spawnPos, level), player.getBukkitEntity(), org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.NATURAL);
+-                                                    if (!event.callEvent()) {
+-                                                        if (event.shouldAbortSpawn()) {
+-                                                            break;
+-                                                        }
+-                                                        continue;
+-                                                    }
+-                                                    // Paper end - PhantomPreSpawnEvent
+-                                                    Phantom phantom = EntityTypes.PHANTOM.create(level, EntitySpawnReason.NATURAL);
+-                                                    if (phantom != null) {
+-                                                        phantom.spawningEntity = player.getUUID(); // Paper - PhantomPreSpawnEvent
+-                                                        phantom.snapTo(spawnPos, 0.0F, 0.0F);
+-                                                        groupData = phantom.finalizeSpawn(level, difficulty, EntitySpawnReason.NATURAL, groupData);
+-                                                        level.addFreshEntityWithPassengers(phantom, org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.NATURAL); // CraftBukkit
+-                                                    }
+-                                                }
+-                                            }
++                                            this.spawnWhenReady(level, player, playerPos, spawnPos, difficulty);
+                                         }
+                                     }
+                                 }
+@@ -87,4 +65,73 @@ public class PhantomSpawner implements CustomSpawner {
+             }
+         }
+     }
++
++    private void spawnWhenReady(final ServerLevel level, final ServerPlayer player, final BlockPos playerPos,
++        final BlockPos spawnPos, final DifficultyInstance difficulty) {
++        if (!this.pendingSpawns.add(player.getUUID())) {
++            return;
++        }
++        // The attempt reads player state and fires plugin events, so retain the original full-level owner.
++        final net.minecraft.server.threading.runtime.OwnerDomainExecutor.Owner owner =
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.region(level,
++                Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, "phantom-spawn");
++        try {
++            net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(level,
++                Math.min(playerPos.getX(), spawnPos.getX() - 1) >> 4,
++                Math.min(playerPos.getZ(), spawnPos.getZ() - 1) >> 4,
++                Math.max(playerPos.getX(), spawnPos.getX() + 1) >> 4,
++                Math.max(playerPos.getZ(), spawnPos.getZ() + 1) >> 4,
++                net.minecraft.world.level.chunk.status.ChunkStatus.FULL,
++                ca.spottedleaf.concurrentutil.util.Priority.NORMAL, owner, chunks -> {
++                    if (level.getServer().isStopped() || level.getServer().getLevel(level.dimension()) != level
++                        || !level.players().contains(player) || player.level() != level || player.isRemoved()
++                        || !player.blockPosition().equals(playerPos) || player.isSpectator()
++                        || !level.getGameRules().get(GameRules.SPAWN_PHANTOMS)
++                        || (level.paperConfig().entities.behavior.phantomsDoNotSpawnOnCreativePlayers && player.isCreative())
++                        || player.getStats().getValue(Stats.CUSTOM.get(Stats.TIME_SINCE_REST))
++                            < level.paperConfig().entities.behavior.playerInsomniaStartTicks) {
++                        return;
++                    }
++                    this.spawnGroup(level, player, spawnPos, difficulty);
++                }).whenComplete((ignored, failure) -> {
++                    this.pendingSpawns.remove(player.getUUID());
++                    if (failure != null) {
++                        LOGGER.error("Failed to complete phantom spawn at {}", spawnPos, failure);
++                    }
++                });
++        } catch (final RuntimeException failure) {
++            this.pendingSpawns.remove(player.getUUID());
++            LOGGER.error("Failed to prepare phantom spawn at {}", spawnPos, failure);
++        }
++    }
++
++    private void spawnGroup(final ServerLevel level, final ServerPlayer player, final BlockPos spawnPos,
++        final DifficultyInstance difficulty) {
++        final RandomSource random = level.getRandom();
++        BlockState blockState = level.getBlockState(spawnPos);
++        FluidState fluidState = level.getFluidState(spawnPos);
++        if (NaturalSpawner.isValidEmptySpawnBlock(level, spawnPos, blockState, fluidState, EntityTypes.PHANTOM)) {
++            SpawnGroupData groupData = null;
++            int groupSize = 1 + random.nextInt(difficulty.getDifficulty().getId() + 1);
++
++            for (int i = 0; i < groupSize; i++) {
++                // Paper start - PhantomPreSpawnEvent
++                com.destroystokyo.paper.event.entity.PhantomPreSpawnEvent event = new com.destroystokyo.paper.event.entity.PhantomPreSpawnEvent(org.bukkit.craftbukkit.util.CraftLocation.toBukkit(spawnPos, level), player.getBukkitEntity(), org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.NATURAL);
++                if (!event.callEvent()) {
++                    if (event.shouldAbortSpawn()) {
++                        break;
++                    }
++                    continue;
++                }
++                // Paper end - PhantomPreSpawnEvent
++                Phantom phantom = EntityTypes.PHANTOM.create(level, EntitySpawnReason.NATURAL);
++                if (phantom != null) {
++                    phantom.spawningEntity = player.getUUID(); // Paper - PhantomPreSpawnEvent
++                    phantom.snapTo(spawnPos, 0.0F, 0.0F);
++                    groupData = phantom.finalizeSpawn(level, difficulty, EntitySpawnReason.NATURAL, groupData);
++                    level.addFreshEntityWithPassengers(phantom, org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.NATURAL); // CraftBukkit
++                }
++            }
++        }
++    }
+ }

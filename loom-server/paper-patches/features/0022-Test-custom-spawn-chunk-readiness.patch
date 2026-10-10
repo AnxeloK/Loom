@@ -1,0 +1,472 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 10 Oct 2026 14:16:34 +0300
+Subject: [PATCH] Test custom spawn chunk readiness
+
+
+diff --git a/src/test/java/net/minecraft/server/threading/runtime/CustomSpawnerOwnerTest.java b/src/test/java/net/minecraft/server/threading/runtime/CustomSpawnerOwnerTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ffa1dfed86c20917c8a196754d05a4292aca21f
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/runtime/CustomSpawnerOwnerTest.java
+@@ -0,0 +1,61 @@
++package net.minecraft.server.threading.runtime;
++
++import ca.spottedleaf.concurrentutil.util.Priority;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.function.Consumer;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerChunkCache;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.chunk.ChunkAccess;
++import net.minecraft.world.level.chunk.LevelChunk;
++import net.minecraft.world.level.chunk.status.ChunkStatus;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import org.mockito.MockedStatic;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class CustomSpawnerOwnerTest {
++    @Test void broaderLevelOwnerCompletesAfterPublishedChunks() {
++        ServerLevel level = mock(ServerLevel.class);
++        when(level.getServer()).thenReturn(mock(MinecraftServer.class));
++        ServerChunkCache source = mock(ServerChunkCache.class);
++        when(level.getChunkSource()).thenReturn(source);
++        LevelChunk chunk = mock(LevelChunk.class);
++        when(chunk.getPos()).thenReturn(new ChunkPos(4, 7));
++        when(source.getChunkAtIfLoadedImmediately(4, 7)).thenReturn(chunk);
++        OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.region(level,
++            Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, "custom-spawner");
++        AtomicBoolean called = new AtomicBoolean();
++        doAnswer(call -> { ((Consumer<List<ChunkAccess>>)call.getArgument(6)).accept(List.of(chunk)); return null; })
++            .when(level).moonrise$loadChunksAsync(eq(4), eq(4), eq(7), eq(7), eq(ChunkStatus.FULL), eq(Priority.NORMAL), any());
++        try (MockedStatic<OwnerDomainExecutor> owners = mockStatic(OwnerDomainExecutor.class)) {
++            owners.when(() -> OwnerDomainExecutor.isOwner(owner)).thenReturn(true);
++            assertDoesNotThrow(() -> OwnershipRouter.runWhenChunksReady(level, 4, 7, 4, 7,
++                ChunkStatus.FULL, Priority.NORMAL, owner, chunks -> called.set(true)).join());
++            assertTrue(called.get());
++            owners.verify(() -> OwnerDomainExecutor.isOwner(owner));
++        }
++    }
++
++    @Test void callbackOwnerMustContainAllRequestedChunks() {
++        ServerLevel level = mock(ServerLevel.class);
++        when(level.getServer()).thenReturn(mock(MinecraftServer.class));
++        OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.region(level, 4, 7, "custom-spawner");
++        assertThrows(IllegalArgumentException.class, () -> OwnershipRouter.runWhenChunksReady(level,
++            3, 7, 4, 7, ChunkStatus.FULL, Priority.NORMAL, owner, ignored -> fail("callback")));
++        verify(level, never()).moonrise$loadChunksAsync(anyInt(), anyInt(), anyInt(), anyInt(), any(), any(), any());
++    }
++
++    @Test void callbackOwnerCannotBelongToAnotherWorld() {
++        ServerLevel level = mock(ServerLevel.class), other = mock(ServerLevel.class);
++        when(other.getServer()).thenReturn(mock(MinecraftServer.class));
++        OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.region(other, 4, 7, "custom-spawner");
++        assertThrows(IllegalArgumentException.class, () -> OwnershipRouter.runWhenChunksReady(level,
++            4, 7, 4, 7, ChunkStatus.FULL, Priority.NORMAL, owner, ignored -> fail("callback")));
++        verify(level, never()).moonrise$loadChunksAsync(anyInt(), anyInt(), anyInt(), anyInt(), any(), any(), any());
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/threading/runtime/CustomSpawnerOwnerTestSuite.java b/src/test/java/net/minecraft/server/threading/runtime/CustomSpawnerOwnerTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..8febf568d56aec7efef821d9cc76a77a523a400b
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/runtime/CustomSpawnerOwnerTestSuite.java
+@@ -0,0 +1,10 @@
++package net.minecraft.server.threading.runtime;
++
++import org.junit.platform.suite.api.*;
++
++@Suite
++@IncludeTags("Normal")
++@SelectClasses(CustomSpawnerOwnerTest.class)
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class CustomSpawnerOwnerTestSuite {
++}
+diff --git a/src/test/java/net/minecraft/world/level/levelgen/CustomSpawnerReadinessTest.java b/src/test/java/net/minecraft/world/level/levelgen/CustomSpawnerReadinessTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f63e4ffc04900444124555eb60d73bd78eb08c8e
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/level/levelgen/CustomSpawnerReadinessTest.java
+@@ -0,0 +1,197 @@
++package net.minecraft.world.level.levelgen;
++
++import ca.spottedleaf.concurrentutil.util.Priority;
++import io.papermc.paper.configuration.WorldConfiguration;
++import java.util.List;
++import java.util.UUID;
++import java.util.concurrent.CompletableFuture;
++import java.util.function.Consumer;
++import net.minecraft.core.BlockPos;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.server.threading.runtime.OwnershipRouter;
++import net.minecraft.stats.ServerStatsCounter;
++import net.minecraft.stats.Stats;
++import net.minecraft.util.RandomSource;
++import net.minecraft.world.Difficulty;
++import net.minecraft.world.DifficultyInstance;
++import net.minecraft.world.entity.EntityTypes;
++import net.minecraft.world.level.NaturalSpawner;
++import net.minecraft.world.level.block.Blocks;
++import net.minecraft.world.level.chunk.ChunkAccess;
++import net.minecraft.world.level.chunk.status.ChunkStatus;
++import net.minecraft.world.level.dimension.DimensionType;
++import net.minecraft.world.level.gamerules.GameRules;
++import net.minecraft.world.level.material.Fluids;
++import org.bukkit.Bukkit;
++import org.bukkit.craftbukkit.CraftWorld;
++import org.bukkit.craftbukkit.entity.CraftPlayer;
++import org.bukkit.plugin.PluginManager;
++import org.bukkit.support.environment.VanillaFeature;
++import org.junit.jupiter.api.Test;
++import org.mockito.MockedStatic;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@VanillaFeature
++class CustomSpawnerReadinessTest {
++    @Test void phantomWaitsForAdjacentChunkBeforeFluidRead() {
++        try (Fixture f = new Fixture()) {
++            assertDoesNotThrow(() -> f.spawner.tick(f.level, true));
++            assertNotNull(f.continuation);
++            assertEquals(List.of(56, 255, 57, 255), f.bounds);
++            assertEquals(Integer.MIN_VALUE, f.owner.minChunkX());
++            assertEquals(Integer.MAX_VALUE, f.owner.maxChunkX());
++            verify(f.level, never()).getFluidState(any());
++            f.resume();
++            verify(f.level).getFluidState(new BlockPos(905, 87, 4081));
++        }
++    }
++
++    @Test void aPendingPlayerAttemptDoesNotQueueAgain() {
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            for (int i = 0; i < 100; i++) f.spawner.tick(f.level, true);
++            assertEquals(1, f.requests);
++            f.resume();
++            for (int i = 0; i < 21; i++) f.spawner.tick(f.level, true);
++            assertEquals(2, f.requests);
++        }
++    }
++
++    @Test void failedLoadReleasesThePendingAttempt() {
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            f.pending.completeExceptionally(new IllegalStateException("generation failed"));
++            verify(f.level, never()).getFluidState(any());
++            for (int i = 0; i < 21; i++) f.spawner.tick(f.level, true);
++            assertEquals(2, f.requests);
++        }
++    }
++
++    @Test void teleportRetiresTheOriginalAttempt() {
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            when(f.player.blockPosition()).thenReturn(new BlockPos(5000, 70, 5000));
++            f.resume();
++            verify(f.level, never()).getFluidState(any());
++        }
++    }
++
++    @Test void logoutAndReplacementRetireTheOriginalAttempt() {
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            when(f.level.players()).thenReturn(List.of(mock(ServerPlayer.class)));
++            f.resume();
++            verify(f.level, never()).getFluidState(any());
++        }
++    }
++
++    @Test void unloadedWorldCannotResumeAnAttempt() {
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            when(f.server.getLevel(any())).thenReturn(mock(ServerLevel.class));
++            f.resume();
++            verify(f.level, never()).getFluidState(any());
++        }
++    }
++
++    @Test void sleepingAndChangedRulesCancelPendingAttempts() {
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            when(f.stats.getValue(Stats.CUSTOM.get(Stats.TIME_SINCE_REST))).thenReturn(0);
++            f.resume();
++            verify(f.level, never()).getFluidState(any());
++        }
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            when(f.rules.get(GameRules.SPAWN_PHANTOMS)).thenReturn(false);
++            f.resume();
++            verify(f.level, never()).getFluidState(any());
++        }
++    }
++
++    @Test void cancelledPreSpawnEventStillPreventsSpawningAfterReadiness() {
++        try (Fixture f = new Fixture(); MockedStatic<Bukkit> bukkit = mockStatic(Bukkit.class)) {
++            PluginManager plugins = mock(PluginManager.class);
++            bukkit.when(Bukkit::getPluginManager).thenReturn(plugins);
++            doAnswer(call -> {
++                ((com.destroystokyo.paper.event.entity.PhantomPreSpawnEvent)call.getArgument(0)).setCancelled(true);
++                return null;
++            }).when(plugins).callEvent(any());
++            f.natural.when(() -> NaturalSpawner.isValidEmptySpawnBlock(eq(f.level), any(), any(), any(), eq(EntityTypes.PHANTOM)))
++                .thenReturn(true);
++            f.spawner.tick(f.level, true);
++            verify(plugins, never()).callEvent(any());
++            f.resume();
++            verify(plugins).callEvent(any(com.destroystokyo.paper.event.entity.PhantomPreSpawnEvent.class));
++            verify(f.level, never()).addFreshEntityWithPassengers(any(), any());
++        }
++    }
++
++    private static final class Fixture implements AutoCloseable {
++        final ServerLevel level = mock(ServerLevel.class);
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerPlayer player = mock(ServerPlayer.class);
++        final ServerStatsCounter stats = mock(ServerStatsCounter.class);
++        final GameRules rules = mock(GameRules.class);
++        final PhantomSpawner spawner = new PhantomSpawner();
++        final MockedStatic<OwnershipRouter> routing = mockStatic(OwnershipRouter.class);
++        final MockedStatic<NaturalSpawner> natural = mockStatic(NaturalSpawner.class);
++        CompletableFuture<Void> pending;
++        Consumer<List<ChunkAccess>> continuation;
++        OwnerDomainExecutor.Owner owner;
++        List<Integer> bounds;
++        boolean ready;
++        int requests;
++        Fixture() {
++            WorldConfiguration config = mock(WorldConfiguration.class);
++            config.entities = mock(WorldConfiguration.Entities.class);
++            config.entities.behavior = mock(WorldConfiguration.Entities.Behavior.class);
++            config.entities.behavior.phantomsSpawnAttemptMinSeconds = 1;
++            config.entities.behavior.phantomsSpawnAttemptMaxSeconds = 1;
++            config.entities.behavior.playerInsomniaStartTicks = 1;
++            when(level.paperConfig()).thenReturn(config);
++            when(level.getServer()).thenReturn(server);
++            when(server.getLevel(any())).thenReturn(level);
++            when(level.getGameRules()).thenReturn(rules);
++            when(rules.get(GameRules.SPAWN_PHANTOMS)).thenReturn(true);
++            when(level.players()).thenReturn(List.of(player));
++            when(player.level()).thenReturn(level);
++            when(player.getUUID()).thenReturn(UUID.randomUUID());
++            when(player.blockPosition()).thenReturn(new BlockPos(915, 67, 4091));
++            when(player.getBukkitEntity()).thenReturn(mock(CraftPlayer.class));
++            when(level.getWorld()).thenReturn(mock(CraftWorld.class));
++            when(player.getStats()).thenReturn(stats);
++            when(stats.getValue(Stats.CUSTOM.get(Stats.TIME_SINCE_REST))).thenReturn(1000);
++            DimensionType dimension = mock(DimensionType.class);
++            when(level.dimensionType()).thenReturn(dimension);
++            DifficultyInstance difficulty = mock(DifficultyInstance.class);
++            when(level.getCurrentDifficultyAt(any())).thenReturn(difficulty);
++            when(difficulty.isHarderThan(anyFloat())).thenReturn(true);
++            when(difficulty.getDifficulty()).thenReturn(Difficulty.HARD);
++            RandomSource random = mock(RandomSource.class);
++            when(level.getRandom()).thenReturn(random);
++            when(random.nextInt(anyInt())).thenAnswer(call -> (int)call.getArgument(0) == 1000 ? 100 : 0);
++            when(level.getFluidState(any())).thenAnswer(call -> {
++                if (!ready) throw new IllegalStateException("Non-blocking runtime cannot synchronously wait for chunk 56,255");
++                return Fluids.EMPTY.defaultFluidState();
++            });
++            when(level.getBlockState(any())).thenReturn(Blocks.AIR.defaultBlockState());
++            routing.when(() -> OwnershipRouter.runWhenChunksReady(eq(level), anyInt(), anyInt(), anyInt(), anyInt(),
++                eq(ChunkStatus.FULL), any(Priority.class), any(OwnerDomainExecutor.Owner.class), any()))
++                .thenAnswer(call -> {
++                    requests++;
++                    bounds = List.of(call.getArgument(1), call.getArgument(2), call.getArgument(3), call.getArgument(4));
++                    owner = call.getArgument(7);
++                    continuation = call.getArgument(8);
++                    pending = new CompletableFuture<>();
++                    return pending;
++                });
++        }
++        void resume() { ready = true; continuation.accept(List.of()); pending.complete(null); }
++        @Override public void close() { natural.close(); routing.close(); }
++    }
++}
+diff --git a/src/test/java/net/minecraft/world/level/levelgen/CustomSpawnerReadinessTestSuite.java b/src/test/java/net/minecraft/world/level/levelgen/CustomSpawnerReadinessTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ed24d3fe5d882e61eb77060ea506bdab3dc40605
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/level/levelgen/CustomSpawnerReadinessTestSuite.java
+@@ -0,0 +1,10 @@
++package net.minecraft.world.level.levelgen;
++
++import org.junit.platform.suite.api.*;
++
++@Suite
++@IncludeTags("VanillaFeature")
++@SelectClasses({CustomSpawnerReadinessTest.class, WanderingTraderReadinessTest.class})
++@ConfigurationParameter(key = "TestSuite", value = "VanillaFeature")
++public class CustomSpawnerReadinessTestSuite {
++}
+diff --git a/src/test/java/net/minecraft/world/level/levelgen/WanderingTraderReadinessTest.java b/src/test/java/net/minecraft/world/level/levelgen/WanderingTraderReadinessTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..5c7451041358064f4bff9afdf301b2c86c085c6d
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/level/levelgen/WanderingTraderReadinessTest.java
+@@ -0,0 +1,158 @@
++package net.minecraft.world.level.levelgen;
++
++import ca.spottedleaf.concurrentutil.util.Priority;
++import io.papermc.paper.configuration.WorldConfiguration;
++import java.util.ArrayDeque;
++import java.util.List;
++import java.util.Optional;
++import java.util.Queue;
++import java.util.concurrent.CompletableFuture;
++import java.util.function.Consumer;
++import net.minecraft.core.BlockPos;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.server.threading.runtime.OwnershipRouter;
++import net.minecraft.util.RandomSource;
++import net.minecraft.world.entity.EntityTypes;
++import net.minecraft.world.entity.SpawnPlacementType;
++import net.minecraft.world.entity.SpawnPlacements;
++import net.minecraft.world.entity.ai.village.poi.PoiManager;
++import net.minecraft.world.entity.npc.wanderingtrader.WanderingTraderSpawner;
++import net.minecraft.world.level.chunk.ChunkAccess;
++import net.minecraft.world.level.chunk.status.ChunkStatus;
++import net.minecraft.world.level.gamerules.GameRules;
++import net.minecraft.world.level.saveddata.WanderingTraderData;
++import net.minecraft.world.level.storage.SavedDataStorage;
++import org.bukkit.support.environment.VanillaFeature;
++import org.junit.jupiter.api.Test;
++import org.mockito.MockedStatic;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@VanillaFeature
++class WanderingTraderReadinessTest {
++    @Test void terrainSearchWaitsAndRetainsTheTenAttemptLimit() {
++        try (Fixture f = new Fixture()) {
++            assertDoesNotThrow(() -> f.spawner.tick(f.level, true));
++            verify(f.level, never()).getHeight(any(), anyInt(), anyInt());
++            assertEquals(1, f.requests);
++            for (int i = 0; i < 10; i++) f.resume();
++            assertTrue(f.callbacks.isEmpty());
++            assertEquals(10, f.requests);
++            verify(f.level, times(10)).getHeight(any(), anyInt(), anyInt());
++            verify(f.level, never()).addFreshEntityWithPassengers(any());
++        }
++    }
++
++    @Test void pendingSearchCannotFanOutEverySpawnInterval() {
++        try (Fixture f = new Fixture()) {
++            for (int i = 0; i < 100; i++) f.spawner.tick(f.level, true);
++            assertEquals(1, f.requests);
++        }
++    }
++
++    @Test void failedLoadAllowsTheNextAttempt() {
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            f.futures.remove().completeExceptionally(new IllegalStateException("generation failed"));
++            f.callbacks.remove();
++            f.spawner.tick(f.level, true);
++            assertEquals(2, f.requests);
++            verify(f.level, never()).getHeight(any(), anyInt(), anyInt());
++        }
++    }
++
++    @Test void movedPlayerCannotStartTheOldTerrainSearch() {
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            when(f.player.blockPosition()).thenReturn(BlockPos.ZERO);
++            f.resume();
++            verify(f.level, never()).getHeight(any(), anyInt(), anyInt());
++            assertEquals(1, f.requests);
++        }
++    }
++
++    @Test void retiredWorldAndChangedRuleCancelSearch() {
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            when(f.server.getLevel(any())).thenReturn(null);
++            f.resume();
++            verify(f.level, never()).getHeight(any(), anyInt(), anyInt());
++        }
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            when(f.rules.get(GameRules.SPAWN_WANDERING_TRADERS)).thenReturn(false);
++            f.resume();
++            verify(f.level, never()).getHeight(any(), anyInt(), anyInt());
++        }
++    }
++
++    private static final class Fixture implements AutoCloseable {
++        final ServerLevel level = mock(ServerLevel.class);
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerPlayer player = mock(ServerPlayer.class);
++        final GameRules rules = mock(GameRules.class);
++        final MockedStatic<OwnershipRouter> routing = mockStatic(OwnershipRouter.class);
++        final MockedStatic<RandomSource> randomFactory = mockStatic(RandomSource.class);
++        final MockedStatic<SpawnPlacements> placements = mockStatic(SpawnPlacements.class);
++        final Queue<Consumer<List<ChunkAccess>>> callbacks = new ArrayDeque<>();
++        final Queue<CompletableFuture<Void>> futures = new ArrayDeque<>();
++        final WanderingTraderSpawner spawner;
++        boolean ready;
++        int requests;
++        Fixture() {
++            RandomSource random = mock(RandomSource.class);
++            randomFactory.when(RandomSource::create).thenReturn(random);
++            SavedDataStorage storage = mock(SavedDataStorage.class);
++            when(storage.computeIfAbsent(WanderingTraderData.TYPE)).thenReturn(new WanderingTraderData());
++            spawner = new WanderingTraderSpawner(storage);
++            WorldConfiguration config = mock(WorldConfiguration.class);
++            config.entities = mock(WorldConfiguration.Entities.class);
++            config.entities.spawning = mock(WorldConfiguration.Entities.Spawning.class);
++            config.entities.spawning.wanderingTrader = mock(WorldConfiguration.Entities.Spawning.WanderingTrader.class);
++            config.entities.spawning.wanderingTrader.spawnMinuteLength = 1;
++            config.entities.spawning.wanderingTrader.spawnDayLength = 1;
++            config.entities.spawning.wanderingTrader.spawnChanceMin = 100;
++            config.entities.spawning.wanderingTrader.spawnChanceMax = 100;
++            when(level.paperConfig()).thenReturn(config);
++            when(level.getServer()).thenReturn(server);
++            when(server.getLevel(any())).thenReturn(level);
++            when(level.getGameRules()).thenReturn(rules);
++            when(rules.get(GameRules.SPAWN_WANDERING_TRADERS)).thenReturn(true);
++            when(level.getRandomPlayer()).thenReturn(player);
++            when(level.players()).thenReturn(List.of(player));
++            when(player.level()).thenReturn(level);
++            when(player.blockPosition()).thenReturn(new BlockPos(915, 67, 4091));
++            PoiManager poi = mock(PoiManager.class);
++            when(level.getPoiManager()).thenReturn(poi);
++            when(poi.find(any(), any(), any(), anyInt(), any())).thenReturn(Optional.empty());
++            SpawnPlacementType type = mock(SpawnPlacementType.class);
++            placements.when(() -> SpawnPlacements.getPlacementType(EntityTypes.WANDERING_TRADER)).thenReturn(type);
++            placements.when(() -> SpawnPlacements.getHeightmapType(EntityTypes.WANDERING_TRADER)).thenReturn(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES);
++            when(level.getHeight(any(), anyInt(), anyInt())).thenAnswer(call -> {
++                if (!ready) throw new IllegalStateException("Non-blocking runtime cannot synchronously wait for terrain");
++                return 67;
++            });
++            routing.when(() -> OwnershipRouter.runWhenChunksReady(eq(level), anyInt(), anyInt(), anyInt(), anyInt(),
++                eq(ChunkStatus.FULL), any(Priority.class), any(OwnerDomainExecutor.Owner.class), any()))
++                .thenAnswer(call -> {
++                    requests++;
++                    OwnerDomainExecutor.Owner owner = call.getArgument(7);
++                    assertEquals(Integer.MIN_VALUE, owner.minChunkX());
++                    assertEquals(Integer.MAX_VALUE, owner.maxChunkX());
++                    callbacks.add(call.getArgument(8));
++                    CompletableFuture<Void> future = new CompletableFuture<>(); futures.add(future);
++                    return future;
++                });
++        }
++        void resume() {
++            ready = true;
++            Consumer<List<ChunkAccess>> callback = callbacks.remove();
++            CompletableFuture<Void> future = futures.remove();
++            callback.accept(List.of()); future.complete(null);
++        }
++        @Override public void close() { placements.close(); randomFactory.close(); routing.close(); }
++    }
++}
