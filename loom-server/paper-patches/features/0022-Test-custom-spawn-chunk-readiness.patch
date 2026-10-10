@@ -89,10 +89,10 @@ index 0000000000000000000000000000000000000000..8febf568d56aec7efef821d9cc76a77a
 +}
 diff --git a/src/test/java/net/minecraft/world/level/levelgen/CustomSpawnerReadinessTest.java b/src/test/java/net/minecraft/world/level/levelgen/CustomSpawnerReadinessTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..f63e4ffc04900444124555eb60d73bd78eb08c8e
+index 0000000000000000000000000000000000000000..e5116c016a25bb960696d5ba5b025630bd9e7c6c
 --- /dev/null
 +++ b/src/test/java/net/minecraft/world/level/levelgen/CustomSpawnerReadinessTest.java
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,235 @@
 +package net.minecraft.world.level.levelgen;
 +
 +import ca.spottedleaf.concurrentutil.util.Priority;
@@ -104,6 +104,7 @@ index 0000000000000000000000000000000000000000..f63e4ffc04900444124555eb60d73bd7
 +import net.minecraft.core.BlockPos;
 +import net.minecraft.server.MinecraftServer;
 +import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerChunkCache;
 +import net.minecraft.server.level.ServerPlayer;
 +import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
 +import net.minecraft.server.threading.runtime.OwnershipRouter;
@@ -226,6 +227,39 @@ index 0000000000000000000000000000000000000000..f63e4ffc04900444124555eb60d73bd7
 +        }
 +    }
 +
++    @Test void changedEnvironmentCancelsPendingPhantoms() {
++        try (Fixture f = new Fixture()) {
++            when(f.level.dimensionType().hasSkyLight()).thenReturn(true);
++            when(f.level.getSkyDarken()).thenReturn(6);
++            when(f.level.canSeeSky(any())).thenReturn(true);
++            f.spawner.tick(f.level, true);
++            when(f.level.getSkyDarken()).thenReturn(0);
++            f.resume();
++            verify(f.level, never()).getFluidState(any());
++        }
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            f.level.getChunkSource().spawnEnemies = false;
++            f.resume();
++            verify(f.level, never()).getFluidState(any());
++        }
++    }
++
++    @Test void changedConfigurationAndMobRuleCancelPendingPhantoms() {
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            f.level.paperConfig().entities.behavior.phantomsSpawnAttemptMaxSeconds = 0;
++            f.resume();
++            verify(f.level, never()).getFluidState(any());
++        }
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            when(f.rules.get(GameRules.SPAWN_MOBS)).thenReturn(false);
++            f.resume();
++            verify(f.level, never()).getFluidState(any());
++        }
++    }
++
 +    private static final class Fixture implements AutoCloseable {
 +        final ServerLevel level = mock(ServerLevel.class);
 +        final MinecraftServer server = mock(MinecraftServer.class);
@@ -253,6 +287,10 @@ index 0000000000000000000000000000000000000000..f63e4ffc04900444124555eb60d73bd7
 +            when(server.getLevel(any())).thenReturn(level);
 +            when(level.getGameRules()).thenReturn(rules);
 +            when(rules.get(GameRules.SPAWN_PHANTOMS)).thenReturn(true);
++            when(rules.get(GameRules.SPAWN_MOBS)).thenReturn(true);
++            ServerChunkCache chunks = mock(ServerChunkCache.class);
++            chunks.spawnEnemies = true;
++            when(level.getChunkSource()).thenReturn(chunks);
 +            when(level.players()).thenReturn(List.of(player));
 +            when(player.level()).thenReturn(level);
 +            when(player.getUUID()).thenReturn(UUID.randomUUID());
@@ -308,10 +346,10 @@ index 0000000000000000000000000000000000000000..ed24d3fe5d882e61eb77060ea506bdab
 +}
 diff --git a/src/test/java/net/minecraft/world/level/levelgen/WanderingTraderReadinessTest.java b/src/test/java/net/minecraft/world/level/levelgen/WanderingTraderReadinessTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..5c7451041358064f4bff9afdf301b2c86c085c6d
+index 0000000000000000000000000000000000000000..bb19714f0d2ffbd064efa8da860e17f5d4eb5557
 --- /dev/null
 +++ b/src/test/java/net/minecraft/world/level/levelgen/WanderingTraderReadinessTest.java
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,168 @@
 +package net.minecraft.world.level.levelgen;
 +
 +import ca.spottedleaf.concurrentutil.util.Priority;
@@ -403,6 +441,15 @@ index 0000000000000000000000000000000000000000..5c7451041358064f4bff9afdf301b2c8
 +        }
 +    }
 +
++    @Test void disabledMobSpawningCancelsPendingTerrainSearch() {
++        try (Fixture f = new Fixture()) {
++            f.spawner.tick(f.level, true);
++            when(f.rules.get(GameRules.SPAWN_MOBS)).thenReturn(false);
++            f.resume();
++            verify(f.level, never()).getHeight(any(), anyInt(), anyInt());
++        }
++    }
++
 +    private static final class Fixture implements AutoCloseable {
 +        final ServerLevel level = mock(ServerLevel.class);
 +        final MinecraftServer server = mock(MinecraftServer.class);
@@ -435,6 +482,7 @@ index 0000000000000000000000000000000000000000..5c7451041358064f4bff9afdf301b2c8
 +            when(server.getLevel(any())).thenReturn(level);
 +            when(level.getGameRules()).thenReturn(rules);
 +            when(rules.get(GameRules.SPAWN_WANDERING_TRADERS)).thenReturn(true);
++            when(rules.get(GameRules.SPAWN_MOBS)).thenReturn(true);
 +            when(level.getRandomPlayer()).thenReturn(player);
 +            when(level.players()).thenReturn(List.of(player));
 +            when(player.level()).thenReturn(level);

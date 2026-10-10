@@ -127,7 +127,7 @@ index 62fa7d2b4cf07b9086e863768ab0075355658a10..96e4a82a5d62a8b025c7889f710cf405
              );
          } catch (final Throwable throwable) {
 diff --git a/net/minecraft/world/entity/npc/wanderingtrader/WanderingTraderSpawner.java b/net/minecraft/world/entity/npc/wanderingtrader/WanderingTraderSpawner.java
-index 625996a7e1c6ec51312d25d7a94a08caccba32de..fec1bb9dbac46aadb1a4851e2f1ba0e541a6f54d 100644
+index 625996a7e1c6ec51312d25d7a94a08caccba32de..a41dccdad5ae4fe903123e8b9a2560f54f6eaacc 100644
 --- a/net/minecraft/world/entity/npc/wanderingtrader/WanderingTraderSpawner.java
 +++ b/net/minecraft/world/entity/npc/wanderingtrader/WanderingTraderSpawner.java
 @@ -30,6 +30,8 @@ public class WanderingTraderSpawner implements CustomSpawner {
@@ -165,7 +165,7 @@ index 625996a7e1c6ec51312d25d7a94a08caccba32de..fec1bb9dbac46aadb1a4851e2f1ba0e5
                      }
                  }
              } else { this.tickDelay--; } // Paper - Prevent tickDelay going below 0
-@@ -80,22 +92,65 @@ public class WanderingTraderSpawner implements CustomSpawner {
+@@ -80,22 +92,66 @@ public class WanderingTraderSpawner implements CustomSpawner {
          return this.traderData;
      }
  
@@ -217,7 +217,8 @@ index 625996a7e1c6ec51312d25d7a94a08caccba32de..fec1bb9dbac46aadb1a4851e2f1ba0e5
 +                if (level.getServer().isStopped() || level.getServer().getLevel(level.dimension()) != level
 +                    || !level.players().contains(player) || player.level() != level || player.isRemoved()
 +                    || !player.blockPosition().equals(playerPos)
-+                    || !level.getGameRules().get(GameRules.SPAWN_WANDERING_TRADERS)) {
++                    || !level.getGameRules().get(GameRules.SPAWN_WANDERING_TRADERS)
++                    || !level.getGameRules().get(GameRules.SPAWN_MOBS)) {
 +                    result.complete(false);
 +                    return;
 +                }
@@ -241,7 +242,7 @@ index 625996a7e1c6ec51312d25d7a94a08caccba32de..fec1bb9dbac46aadb1a4851e2f1ba0e5
              if (level.getBiome(spawnPosition).is(BiomeTags.WITHOUT_WANDERING_TRADER_SPAWNS)) {
                  return false;
 diff --git a/net/minecraft/world/level/levelgen/PhantomSpawner.java b/net/minecraft/world/level/levelgen/PhantomSpawner.java
-index 9900096652c6a3c114b31fb6813a791ba5021db4..6de14bf9fc342833c5b5e1a17b944695ff11b95d 100644
+index 9900096652c6a3c114b31fb6813a791ba5021db4..da7d0a83f345d3c925f840ab44ce252a56752377 100644
 --- a/net/minecraft/world/level/levelgen/PhantomSpawner.java
 +++ b/net/minecraft/world/level/levelgen/PhantomSpawner.java
 @@ -19,6 +19,8 @@ import net.minecraft.world.level.gamerules.GameRules;
@@ -286,7 +287,7 @@ index 9900096652c6a3c114b31fb6813a791ba5021db4..6de14bf9fc342833c5b5e1a17b944695
                                          }
                                      }
                                  }
-@@ -87,4 +65,73 @@ public class PhantomSpawner implements CustomSpawner {
+@@ -87,4 +65,78 @@ public class PhantomSpawner implements CustomSpawner {
              }
          }
      }
@@ -312,6 +313,11 @@ index 9900096652c6a3c114b31fb6813a791ba5021db4..6de14bf9fc342833c5b5e1a17b944695
 +                        || !level.players().contains(player) || player.level() != level || player.isRemoved()
 +                        || !player.blockPosition().equals(playerPos) || player.isSpectator()
 +                        || !level.getGameRules().get(GameRules.SPAWN_PHANTOMS)
++                        || !level.getGameRules().get(GameRules.SPAWN_MOBS) || !level.getChunkSource().spawnEnemies
++                        || level.paperConfig().entities.behavior.phantomsSpawnAttemptMaxSeconds <= 0
++                        || level.paperConfig().entities.behavior.playerInsomniaStartTicks < 0
++                        || (level.dimensionType().hasSkyLight() && (level.getSkyDarken() < 5
++                            || playerPos.getY() < level.getSeaLevel() || !level.canSeeSky(playerPos)))
 +                        || (level.paperConfig().entities.behavior.phantomsDoNotSpawnOnCreativePlayers && player.isCreative())
 +                        || player.getStats().getValue(Stats.CUSTOM.get(Stats.TIME_SINCE_REST))
 +                            < level.paperConfig().entities.behavior.playerInsomniaStartTicks) {
