@@ -5,7 +5,7 @@ Subject: [PATCH] Coordinate asynchronous world unloads through completion
 
 
 diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
-index 9ea2019ed25706a0f6869af6589a1345443fc25b..34ebae5e06e97f6269dadbb0af2d492a3327e073 100644
+index 9ea2019ed25706a0f6869af6589a1345443fc25b..2b37e662bbeb49392f39eda0ace77b938f88a0df 100644
 --- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
 +++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
 @@ -1172,6 +1172,10 @@ public final class CraftServer implements Server {
@@ -19,7 +19,7 @@ index 9ea2019ed25706a0f6869af6589a1345443fc25b..34ebae5e06e97f6269dadbb0af2d492a
          ChunkGenerator chunkGenerator = creator.generator();
          BiomeProvider biomeProvider = creator.biomeProvider();
  
-@@ -1317,6 +1321,88 @@ public final class CraftServer implements Server {
+@@ -1317,6 +1321,95 @@ public final class CraftServer implements Server {
          return serverLevel.getWorld();
      }
  
@@ -53,6 +53,13 @@ index 9ea2019ed25706a0f6869af6589a1345443fc25b..34ebae5e06e97f6269dadbb0af2d492a
 +    private void admitWorldUnload(final ServerLevel handle, final net.minecraft.server.level.WorldUnloadOperation operation) {
 +        final World world = handle.getWorld();
 +        try {
++            if (handle.lifecycle.hasActiveWork() && !this.console.hasStopped()) {
++                if (operation.admissionExpired()) {
++                    this.worldUnloads.remove(handle);
++                    operation.refuse();
++                }
++                return;
++            }
 +            if (this.console.hasStopped() || this.console.getLevel(handle.dimension()) != handle || !handle.players().isEmpty()
 +                || !new WorldUnloadEvent(world).callEvent() || !handle.players().isEmpty()
 +                || this.console.getLevel(handle.dimension()) != handle || !handle.lifecycle.tryBeginUnload()) {
@@ -108,7 +115,7 @@ index 9ea2019ed25706a0f6869af6589a1345443fc25b..34ebae5e06e97f6269dadbb0af2d492a
      @Override
      public boolean unloadWorld(String name, boolean save) {
          return this.unloadWorld(this.getWorld(name), save);
-@@ -1330,6 +1416,7 @@ public final class CraftServer implements Server {
+@@ -1330,6 +1423,7 @@ public final class CraftServer implements Server {
          }
  
          ServerLevel handle = ((CraftWorld) world).getHandle();
@@ -130,7 +137,7 @@ index 078083c88f336afd8bfe69c770c6d3ac486e826f..aefbaf7508b14800b9ad68c559ccdce4
          world.loadChunksForMoveAsync(this.getHandle().getBoundingBoxAt(locationClone.getX(), locationClone.getY(), locationClone.getZ()),
 diff --git a/src/test/java/net/minecraft/server/level/WorldLifecycleTest.java b/src/test/java/net/minecraft/server/level/WorldLifecycleTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..ac792ffdafd859f48031aad80984b8b21e296bb2
+index 0000000000000000000000000000000000000000..2f7d47b9ab62ea5eb413d0e7144cfa56794446af
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/level/WorldLifecycleTest.java
 @@ -0,0 +1,70 @@
@@ -144,21 +151,21 @@ index 0000000000000000000000000000000000000000..ac792ffdafd859f48031aad80984b8b2
 +class WorldLifecycleTest {
 +    @Test void unloadRefusesAnInFlightTransferAndCanStartAfterItFinishes() {
 +        final WorldLifecycle lifecycle = new WorldLifecycle();
-+        final var first = lifecycle.tryBeginTransfer();
-+        final var second = lifecycle.tryBeginTransfer();
++        final var first = lifecycle.tryAcquire();
++        final var second = lifecycle.tryAcquire();
 +        assertNotNull(first); assertNotNull(second);
 +        assertFalse(lifecycle.tryBeginUnload());
 +        first.close(); first.close();
 +        assertFalse(lifecycle.tryBeginUnload());
 +        second.close();
 +        assertTrue(lifecycle.tryBeginUnload());
-+        assertNull(lifecycle.tryBeginTransfer());
++        assertNull(lifecycle.tryAcquire());
 +        assertFalse(lifecycle.tryBeginUnload());
 +    }
 +
 +    @Test void aRedirectRetainsTheNewDestinationBeforeReleasingTheOldOne() {
 +        final WorldLifecycle original = new WorldLifecycle(), redirected = new WorldLifecycle();
-+        try (var transfer = original.tryBeginTransfer()) {
++        try (var transfer = original.tryAcquire()) {
 +            assertNotNull(transfer);
 +            assertTrue(transfer.retarget(redirected));
 +            assertTrue(original.tryBeginUnload());
@@ -170,7 +177,7 @@ index 0000000000000000000000000000000000000000..ac792ffdafd859f48031aad80984b8b2
 +    @Test void redirectToARetiringWorldFailsWithoutDroppingTheOriginalReservation() {
 +        final WorldLifecycle original = new WorldLifecycle(), retiring = new WorldLifecycle();
 +        assertTrue(retiring.tryBeginUnload());
-+        try (var transfer = original.tryBeginTransfer()) {
++        try (var transfer = original.tryAcquire()) {
 +            assertNotNull(transfer);
 +            assertFalse(transfer.retarget(retiring));
 +            assertFalse(original.tryBeginUnload());
@@ -180,7 +187,7 @@ index 0000000000000000000000000000000000000000..ac792ffdafd859f48031aad80984b8b2
 +
 +    @Test void departureStaysProtectedAfterAnEventRedirectsTheDestination() {
 +        final WorldLifecycle original = new WorldLifecycle(), destination = new WorldLifecycle();
-+        try (var departure = original.tryBeginTransfer(); var transfer = original.tryBeginTransfer()) {
++        try (var departure = original.tryAcquire(); var transfer = original.tryAcquire()) {
 +            assertNotNull(departure); assertNotNull(transfer);
 +            assertTrue(transfer.retarget(destination));
 +            assertFalse(original.tryBeginUnload());
@@ -195,7 +202,7 @@ index 0000000000000000000000000000000000000000..ac792ffdafd859f48031aad80984b8b2
 +        final CountDownLatch start = new CountDownLatch(1);
 +        final var entered = CompletableFuture.supplyAsync(() -> {
 +            try { start.await(); } catch (InterruptedException failure) { throw new RuntimeException(failure); }
-+            return lifecycle.tryBeginTransfer();
++            return lifecycle.tryAcquire();
 +        });
 +        start.countDown();
 +        final boolean retiring = lifecycle.tryBeginUnload();

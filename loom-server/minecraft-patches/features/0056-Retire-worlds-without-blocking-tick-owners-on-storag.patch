@@ -5,7 +5,7 @@ Subject: [PATCH] Retire worlds without blocking tick owners on storage
 
 
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
-index 7fe639284f81cbd11f5c7bf6839ab9cadcd79e79..08ec422a6f3a9fac5b131d13930511b13b5a0998 100644
+index 7fe639284f81cbd11f5c7bf6839ab9cadcd79e79..3220dd2ce9b7ccfa634c0eb229de5a6558f2cc32 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
 @@ -335,6 +335,10 @@ public final class ChunkTaskScheduler {
@@ -19,17 +19,42 @@ index 7fe639284f81cbd11f5c7bf6839ab9cadcd79e79..08ec422a6f3a9fac5b131d13930511b1
      public boolean executeMainThreadTask() {
          TickThread.ensureTickThread(this.world, "Cannot execute main thread task off-main");
          return this.mainThreadExecutor.executeTask();
-@@ -587,6 +591,10 @@ public final class ChunkTaskScheduler {
+@@ -587,9 +591,34 @@ public final class ChunkTaskScheduler {
  
      public void scheduleChunkLoad(final int chunkX, final int chunkZ, final ChunkStatus toStatus, final boolean addTicket,
                                    final Priority priority, final Consumer<ChunkAccess> onComplete) {
++        final var admission = this.world.lifecycle.tryAcquire();
++        if (admission == null) {
++            if (onComplete != null) onComplete.accept(null);
++            return;
++        }
++        try {
++            this.scheduleAdmittedChunkLoad(chunkX, chunkZ, toStatus, addTicket, priority, chunk -> {
++                try {
++                    if (onComplete != null) onComplete.accept(chunk);
++                } finally {
++                    admission.close();
++                }
++            });
++        } catch (final Throwable failure) {
++            admission.close();
++            throw failure;
++        }
++    }
++
++    private void scheduleAdmittedChunkLoad(final int chunkX, final int chunkZ, final ChunkStatus toStatus, final boolean addTicket,
++                                          final Priority priority, final Consumer<ChunkAccess> onComplete) {
 +        if (this.world.lifecycle.isUnloading()) {
 +            if (onComplete != null) onComplete.accept(null);
 +            return;
 +        }
          if (!TickThread.isTickThreadFor(this.world, chunkX, chunkZ)) {
              this.scheduleChunkTask(chunkX, chunkZ, () -> {
-                 ChunkTaskScheduler.this.scheduleChunkLoad(chunkX, chunkZ, toStatus, addTicket, priority, onComplete);
+-                ChunkTaskScheduler.this.scheduleChunkLoad(chunkX, chunkZ, toStatus, addTicket, priority, onComplete);
++                ChunkTaskScheduler.this.scheduleAdmittedChunkLoad(chunkX, chunkZ, toStatus, addTicket, priority, onComplete);
+             }, priority);
+             return;
+         }
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
 index f945eb604dc745307a2ab5bd168405c8b57ef128..99ac3bbf4834d6a048e529ccd6414dd008e1560f 100644
 --- a/net/minecraft/server/MinecraftServer.java
@@ -111,7 +136,7 @@ index d18b5515a3e4c907b9de7c1222f6cb48faa27937..3f936e2369f612a98b71f6e91db204bd
          final MinecraftServer server,
          final Executor executor,
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index d44706c1b7033569662e7c8cc25b85663567d3c6..3d4848c9bf6b1eb3442e7487cd36827ea99fdfdc 100644
+index d44706c1b7033569662e7c8cc25b85663567d3c6..833fc4ff17c02fdc2a0f80391285cbc00c970446 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
 @@ -1709,104 +1709,109 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
@@ -126,8 +151,8 @@ index d44706c1b7033569662e7c8cc25b85663567d3c6..3d4848c9bf6b1eb3442e7487cd36827e
 -        if (transition.missingRespawnBlock()) {
 -            this.connection.send(new ClientboundGameEventPacket(ClientboundGameEventPacket.NO_RESPAWN_BLOCK_AVAILABLE, 0.0F));
 -        }
-+        try (var departure = this.level().lifecycle.tryBeginTransfer();
-+             var transfer = transition.newLevel().lifecycle.tryBeginTransfer()) {
++        try (var departure = this.level().lifecycle.tryAcquire();
++             var transfer = transition.newLevel().lifecycle.tryAcquire()) {
 +            if (departure == null || transfer == null) return null;
 +            if (this.isSleeping()) return null; // CraftBukkit - SPIGOT-3154
 +            if (this.isRemoved()) {
@@ -318,73 +343,77 @@ index d44706c1b7033569662e7c8cc25b85663567d3c6..3d4848c9bf6b1eb3442e7487cd36827e
      private static void runWithTeleportOwnerContext(final ServerLevel level, final ChunkPos currentChunk, final Vec3 targetPosition, final Runnable action) {
 diff --git a/net/minecraft/server/level/WorldLifecycle.java b/net/minecraft/server/level/WorldLifecycle.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..b53bdd0ff382a9c1016374f96702820e2e525ad0
+index 0000000000000000000000000000000000000000..242ef9302937e2b54ef961bde69c8bb62d78f2bf
 --- /dev/null
 +++ b/net/minecraft/server/level/WorldLifecycle.java
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,61 @@
 +package net.minecraft.server.level;
 +
 +import java.util.concurrent.atomic.AtomicInteger;
 +import org.jspecify.annotations.Nullable;
 +
-+/** Serializes retirement against transfers that may temporarily release their owner. */
++/** Keeps a world available while admitted work may temporarily release its owner. */
 +public final class WorldLifecycle {
-+    private final AtomicInteger transfers = new AtomicInteger();
++    private final AtomicInteger activeUses = new AtomicInteger();
 +
 +    public boolean isUnloading() {
-+        return this.transfers.get() < 0;
++        return this.activeUses.get() < 0;
++    }
++
++    public boolean hasActiveWork() {
++        return this.activeUses.get() > 0;
 +    }
 +
 +    public boolean tryBeginUnload() {
-+        return this.transfers.compareAndSet(0, -1);
++        return this.activeUses.compareAndSet(0, -1);
 +    }
 +
-+    public @Nullable Transfer tryBeginTransfer() {
-+        return this.retain() ? new Transfer(this) : null;
++    public @Nullable Lease tryAcquire() {
++        return this.retain() ? new Lease(this) : null;
 +    }
 +
 +    private boolean retain() {
 +        for (;;) {
-+            final int current = this.transfers.get();
++            final int current = this.activeUses.get();
 +            if (current < 0) return false;
-+            if (current == Integer.MAX_VALUE) throw new IllegalStateException("Too many concurrent world transfers");
-+            if (this.transfers.compareAndSet(current, current + 1)) return true;
++            if (current == Integer.MAX_VALUE) throw new IllegalStateException("Too many concurrent world activeUses");
++            if (this.activeUses.compareAndSet(current, current + 1)) return true;
 +        }
 +    }
 +
-+    public static final class Transfer implements AutoCloseable {
++    public static final class Lease implements AutoCloseable {
 +        private @Nullable WorldLifecycle destination;
 +
-+        private Transfer(final WorldLifecycle destination) {
++        private Lease(final WorldLifecycle destination) {
 +            this.destination = destination;
 +        }
 +
-+        public boolean retarget(final WorldLifecycle next) {
++        public synchronized boolean retarget(final WorldLifecycle next) {
 +            final WorldLifecycle previous = this.destination;
-+            if (previous == null) throw new IllegalStateException("World transfer is already complete");
++            if (previous == null) throw new IllegalStateException("World operation is already complete");
 +            if (previous == next) return true;
 +            if (!next.retain()) return false;
 +            this.destination = next;
-+            previous.transfers.decrementAndGet();
++            previous.activeUses.decrementAndGet();
 +            return true;
 +        }
 +
 +        @Override
-+        public void close() {
++        public synchronized void close() {
 +            final WorldLifecycle previous = this.destination;
 +            if (previous != null) {
 +                this.destination = null;
-+                previous.transfers.decrementAndGet();
++                previous.activeUses.decrementAndGet();
 +            }
 +        }
 +    }
 +}
 diff --git a/net/minecraft/server/level/WorldUnloadOperation.java b/net/minecraft/server/level/WorldUnloadOperation.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..f35dc10b651fc790410266b050ff743fcd385461
+index 0000000000000000000000000000000000000000..9808234b135674bda26425335fae0bab620fa58d
 --- /dev/null
 +++ b/net/minecraft/server/level/WorldUnloadOperation.java
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,140 @@
 +package net.minecraft.server.level;
 +
 +import ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO;
@@ -399,6 +428,7 @@ index 0000000000000000000000000000000000000000..f35dc10b651fc790410266b050ff743f
 +
 +/** An owner-driven retirement transaction; only storage and executor waits run on I/O owners. */
 +public final class WorldUnloadOperation {
++    private final long requestedAt = System.nanoTime();
 +    private final ServerLevel world;
 +    private final boolean save;
 +    private final CompletableFuture<Boolean> result = new CompletableFuture<>();
@@ -416,6 +446,10 @@ index 0000000000000000000000000000000000000000..f35dc10b651fc790410266b050ff743f
 +
 +    public CompletableFuture<Boolean> result() {
 +        return this.result.copy();
++    }
++
++    public boolean admissionExpired() {
++        return System.nanoTime() - this.requestedAt >= TimeUnit.SECONDS.toNanos(60);
 +    }
 +
 +    public boolean isStarted() {
@@ -520,6 +554,223 @@ index 0000000000000000000000000000000000000000..f35dc10b651fc790410266b050ff743f
 +        return failure instanceof CompletionException && failure.getCause() != null ? failure.getCause() : failure;
 +    }
 +}
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 727725aca6cfedebded05814c76808047938641d..c17a85b4551720e764b8046432aea72c35448605 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -957,109 +957,113 @@ public abstract class PlayerList {
+         final ServerPlayer.@Nullable RespawnConfig respawnConfig
+     ) {
+         net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "player-respawn-transfer");
+-        TeleportTransition respawnInfo = result.transition();
+-        Level fromLevel = serverPlayer.level();
+-        // Paper end - respawn event
+-        this.players.remove(serverPlayer);
+-        this.playersByName.remove(serverPlayer.getScoreboardName().toLowerCase(java.util.Locale.ROOT)); // Paper
+-        serverPlayer.level().removePlayerImmediately(serverPlayer, removalReason);
+-        ServerLevel level = respawnInfo.newLevel();
+-        ServerPlayer player = serverPlayer; // Paper - TODO - recreate instance
+-        player.connection = serverPlayer.connection;
+-        player.restoreFrom(serverPlayer, keepAllPlayerData);
+-        player.setId(serverPlayer.getId());
+-        player.setMainArm(serverPlayer.getMainArm());
+-        if (false && !respawnInfo.missingRespawnBlock()) { // Paper - Once we not reuse the player entity, this can be flipped again but without the events being fired
+-            player.copyRespawnPosition(serverPlayer);
+-        }
+-
+-        for (String tag : serverPlayer.entityTags()) {
+-            player.addTag(tag);
+-        }
+-
+-        for (Identifier postEffect : serverPlayer.getPostEffects()) {
+-            player.addPostEffect(postEffect);
+-        }
+-
+-        // Paper start - Once we not reuse the player entity we can remove this.
+-        if (!keepAllPlayerData) serverPlayer.reset();
+-        player.setServerLevel(level);
+-        player.unsetRemoved();
+-        player.setShiftKeyDown(false);
+-        // Paper end
+-        Vec3 pos = respawnInfo.position();
+-        player.snapTo(pos.x, pos.y, pos.z, respawnInfo.yRot(), respawnInfo.xRot());
+-        player.connection.resetPosition(); // Paper - Fix SPIGOT-1903, MC-98153
+-        level.getChunkSource().addTicketWithRadius(net.minecraft.server.level.TicketType.POST_TELEPORT, new net.minecraft.world.level.ChunkPos(net.minecraft.util.Mth.floor(pos.x()) >> 4, net.minecraft.util.Mth.floor(pos.z()) >> 4), 1); // Paper - post teleport ticket type
+-        if (respawnInfo.missingRespawnBlock()) {
+-            player.connection.send(new ClientboundGameEventPacket(ClientboundGameEventPacket.NO_RESPAWN_BLOCK_AVAILABLE, 0.0F));
+-            player.setRespawnPosition(null, false, com.destroystokyo.paper.event.player.PlayerSetSpawnEvent.Cause.PLAYER_RESPAWN); // CraftBukkit - SPIGOT-5988: Clear respawn location when obstructed
+-        }
+-
+-        byte dataToKeep = keepAllPlayerData ? ClientboundRespawnPacket.KEEP_ATTRIBUTE_MODIFIERS : 0;
+-        ServerLevel playerLevel = player.level();
+-        LevelData levelData = playerLevel.getLevelData();
+-        player.connection.send(new ClientboundRespawnPacket(player.createCommonSpawnInfo(playerLevel), dataToKeep));
+-        runWithPlayerRegionContext(level, player, () -> player.connection.internalTeleport(player.getX(), player.getY(), player.getZ(), player.getYRot(), player.getXRot())); // Paper
+-        player.connection.send(new ClientboundSetDefaultSpawnPositionPacket(level.getRespawnData()));
+-        player.connection.send(new ClientboundChangeDifficultyPacket(levelData.getDifficulty(), levelData.isDifficultyLocked()));
+-        player.connection.send(new ClientboundSetExperiencePacket(player.experienceProgress, player.totalExperience, player.experienceLevel));
+-        this.sendActivePlayerEffects(player);
+-        player.sendPostEffects();
+-        this.sendLevelInfo(player, level);
+-        this.sendPlayerPermissionLevel(player);
+-        level.addRespawnedPlayer(player);
+-        this.players.add(player);
+-        this.playersByName.put(player.getScoreboardName().toLowerCase(java.util.Locale.ROOT), player); // Paper
+-        this.playersByUUID.put(player.getUUID(), player);
+-        player.initInventoryMenu();
+-        player.setHealth(player.getHealth());
+-        // Paper start - Once we not reuse the player entity we can remove this.
+-        // But we have to resend the player info as it's not marked as dirty
+-        this.sendAllPlayerInfo(serverPlayer); // Update health
+-        serverPlayer.onUpdateAbilities(); // Update inventory, etc
+-        // Paper end
+-        final BlockPos respawnBlockPosition = respawnConfig == null ? null : respawnConfig.respawnData().pos();
+-        if (!keepAllPlayerData && result.isAnchorSpawn() && respawnBlockPosition != null) {
+-            player.connection
+-                .send(
+-                    new ClientboundSoundPacket(
+-                        SoundEvents.RESPAWN_ANCHOR_DEPLETE,
+-                        SoundSource.BLOCKS,
+-                        respawnBlockPosition.getX(),
+-                        respawnBlockPosition.getY(),
+-                        respawnBlockPosition.getZ(),
+-                        1.0F,
+-                        1.0F,
+-                        level.getRandom().nextLong()
+-                    )
+-                );
+-        }
++        try (var departure = serverPlayer.level().lifecycle.tryAcquire();
++             var arrival = result.transition().newLevel().lifecycle.tryAcquire()) {
++            if (departure == null || arrival == null) throw new java.util.concurrent.RejectedExecutionException("Respawn world is unloading");
++            TeleportTransition respawnInfo = result.transition();
++            Level fromLevel = serverPlayer.level();
++            // Paper end - respawn event
++            this.players.remove(serverPlayer);
++            this.playersByName.remove(serverPlayer.getScoreboardName().toLowerCase(java.util.Locale.ROOT)); // Paper
++            serverPlayer.level().removePlayerImmediately(serverPlayer, removalReason);
++            ServerLevel level = respawnInfo.newLevel();
++            ServerPlayer player = serverPlayer; // Paper - TODO - recreate instance
++            player.connection = serverPlayer.connection;
++            player.restoreFrom(serverPlayer, keepAllPlayerData);
++            player.setId(serverPlayer.getId());
++            player.setMainArm(serverPlayer.getMainArm());
++            if (false && !respawnInfo.missingRespawnBlock()) { // Paper - Once we not reuse the player entity, this can be flipped again but without the events being fired
++                player.copyRespawnPosition(serverPlayer);
++            }
+ 
+-        // Paper start
+-        // Save player file again if they were disconnected
+-        if (player.connection.isDisconnected()) {
+-            this.save(player);
+-        }
++            for (String tag : serverPlayer.entityTags()) {
++                player.addTag(tag);
++            }
+ 
+-        // It's possible for respawn to be in a diff dimension
+-        if (fromLevel != level) {
+-            new org.bukkit.event.player.PlayerChangedWorldEvent(player.getBukkitEntity(), fromLevel.getWorld()).callEvent();
+-            player.triggerDimensionChangeTriggers(level);
+-        }
++            for (Identifier postEffect : serverPlayer.getPostEffects()) {
++                player.addPostEffect(postEffect);
++            }
+ 
+-        // Call post respawn event
+-        new com.destroystokyo.paper.event.player.PlayerPostRespawnEvent(
+-            player.getBukkitEntity(),
+-            org.bukkit.craftbukkit.util.CraftLocation.toBukkit(respawnInfo.position(), level, respawnInfo.yRot(), respawnInfo.xRot()),
+-            result.isBedSpawn(),
+-            result.isAnchorSpawn(),
+-            respawnInfo.missingRespawnBlock(),
+-            respawnReason
+-        ).callEvent();
+-        // Paper end
++            // Paper start - Once we not reuse the player entity we can remove this.
++            if (!keepAllPlayerData) serverPlayer.reset();
++            player.setServerLevel(level);
++            player.unsetRemoved();
++            player.setShiftKeyDown(false);
++            // Paper end
++            Vec3 pos = respawnInfo.position();
++            player.snapTo(pos.x, pos.y, pos.z, respawnInfo.yRot(), respawnInfo.xRot());
++            player.connection.resetPosition(); // Paper - Fix SPIGOT-1903, MC-98153
++            level.getChunkSource().addTicketWithRadius(net.minecraft.server.level.TicketType.POST_TELEPORT, new net.minecraft.world.level.ChunkPos(net.minecraft.util.Mth.floor(pos.x()) >> 4, net.minecraft.util.Mth.floor(pos.z()) >> 4), 1); // Paper - post teleport ticket type
++            if (respawnInfo.missingRespawnBlock()) {
++                player.connection.send(new ClientboundGameEventPacket(ClientboundGameEventPacket.NO_RESPAWN_BLOCK_AVAILABLE, 0.0F));
++                player.setRespawnPosition(null, false, com.destroystokyo.paper.event.player.PlayerSetSpawnEvent.Cause.PLAYER_RESPAWN); // CraftBukkit - SPIGOT-5988: Clear respawn location when obstructed
++            }
++
++            byte dataToKeep = keepAllPlayerData ? ClientboundRespawnPacket.KEEP_ATTRIBUTE_MODIFIERS : 0;
++            ServerLevel playerLevel = player.level();
++            LevelData levelData = playerLevel.getLevelData();
++            player.connection.send(new ClientboundRespawnPacket(player.createCommonSpawnInfo(playerLevel), dataToKeep));
++            runWithPlayerRegionContext(level, player, () -> player.connection.internalTeleport(player.getX(), player.getY(), player.getZ(), player.getYRot(), player.getXRot())); // Paper
++            player.connection.send(new ClientboundSetDefaultSpawnPositionPacket(level.getRespawnData()));
++            player.connection.send(new ClientboundChangeDifficultyPacket(levelData.getDifficulty(), levelData.isDifficultyLocked()));
++            player.connection.send(new ClientboundSetExperiencePacket(player.experienceProgress, player.totalExperience, player.experienceLevel));
++            this.sendActivePlayerEffects(player);
++            player.sendPostEffects();
++            this.sendLevelInfo(player, level);
++            this.sendPlayerPermissionLevel(player);
++            level.addRespawnedPlayer(player);
++            this.players.add(player);
++            this.playersByName.put(player.getScoreboardName().toLowerCase(java.util.Locale.ROOT), player); // Paper
++            this.playersByUUID.put(player.getUUID(), player);
++            player.initInventoryMenu();
++            player.setHealth(player.getHealth());
++            // Paper start - Once we not reuse the player entity we can remove this.
++            // But we have to resend the player info as it's not marked as dirty
++            this.sendAllPlayerInfo(serverPlayer); // Update health
++            serverPlayer.onUpdateAbilities(); // Update inventory, etc
++            // Paper end
++            final BlockPos respawnBlockPosition = respawnConfig == null ? null : respawnConfig.respawnData().pos();
++            if (!keepAllPlayerData && result.isAnchorSpawn() && respawnBlockPosition != null) {
++                player.connection
++                    .send(
++                        new ClientboundSoundPacket(
++                            SoundEvents.RESPAWN_ANCHOR_DEPLETE,
++                            SoundSource.BLOCKS,
++                            respawnBlockPosition.getX(),
++                            respawnBlockPosition.getY(),
++                            respawnBlockPosition.getZ(),
++                            1.0F,
++                            1.0F,
++                            level.getRandom().nextLong()
++                        )
++                    );
++            }
++
++            // Paper start
++            // Save player file again if they were disconnected
++            if (player.connection.isDisconnected()) {
++                this.save(player);
++            }
++
++            // It's possible for respawn to be in a diff dimension
++            if (fromLevel != level) {
++                new org.bukkit.event.player.PlayerChangedWorldEvent(player.getBukkitEntity(), fromLevel.getWorld()).callEvent();
++                player.triggerDimensionChangeTriggers(level);
++            }
++
++            // Call post respawn event
++            new com.destroystokyo.paper.event.player.PlayerPostRespawnEvent(
++                player.getBukkitEntity(),
++                org.bukkit.craftbukkit.util.CraftLocation.toBukkit(respawnInfo.position(), level, respawnInfo.yRot(), respawnInfo.xRot()),
++                result.isBedSpawn(),
++                result.isAnchorSpawn(),
++                respawnInfo.missingRespawnBlock(),
++                respawnReason
++            ).callEvent();
++            // Paper end
+ 
+-        return player;
++            return player;
++        }
+     }
+ 
+     public void sendActivePlayerEffects(final ServerPlayer player) {
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
 index ecfcc549ee95b301b89205786b04e296ea23db01..89cbbab8393f5cf012af4d032d7df2127ce2d6fc 100644
 --- a/net/minecraft/server/threading/TickRegions.java
@@ -653,7 +904,7 @@ index 20043882ecb2d1f5b81a1f7cf89022fa129e0df6..f31d307312d051c664f47eb0aa263e02
              recordInline(owner);
              try {
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index c8d1867229087ef1a6b3c93ffa47d86a11297439..21e7bec3e4b1afe7c1007de2e139b8412771d944 100644
+index c8d1867229087ef1a6b3c93ffa47d86a11297439..2b1c1fd5469bd4f2ea63281c26ea22515dce17df 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
 @@ -4450,74 +4450,80 @@ public abstract class Entity
@@ -682,8 +933,8 @@ index c8d1867229087ef1a6b3c93ffa47d86a11297439..21e7bec3e4b1afe7c1007de2e139b841
 -            // Paper end - gateway-specific teleport event
 -            if (teleEvent.isCancelled() || teleEvent.getTo() == null) {
 +        if (!(this.level() instanceof ServerLevel departureLevel)) return null;
-+        try (var departure = departureLevel.lifecycle.tryBeginTransfer();
-+             var transfer = transition.newLevel().lifecycle.tryBeginTransfer()) {
++        try (var departure = departureLevel.lifecycle.tryAcquire();
++             var transfer = transition.newLevel().lifecycle.tryAcquire()) {
 +            if (departure == null || transfer == null) return null;
 +            // Paper start - Fix item duplication and teleport issues
 +            if ((!this.isAlive() || !this.valid) && (transition.newLevel() != this.level)) {
