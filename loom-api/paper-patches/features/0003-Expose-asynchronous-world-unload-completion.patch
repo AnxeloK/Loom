@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Thu, 15 Oct 2026 14:07:57 +0300
+Subject: [PATCH] Expose asynchronous world unload completion
+
+
+diff --git a/src/main/java/org/bukkit/Bukkit.java b/src/main/java/org/bukkit/Bukkit.java
+index 52ca9eb5408b81126a614686939574bed5d088c0..cafed07a4b8679f3d32588a946f40768fc4d1096 100644
+--- a/src/main/java/org/bukkit/Bukkit.java
++++ b/src/main/java/org/bukkit/Bukkit.java
+@@ -856,6 +856,26 @@ public final class Bukkit {
+         return server.unloadWorld(world, save);
+     }
+ 
++    /**
++     * Unloads an empty world without waiting for storage work on a tick owner.
++     * The unload event and world-state changes run on the server owner. Once accepted,
++     * the world is unavailable for new use until storage has closed. Its name and key
++     * cannot be reused before successful completion. Callers must await completion
++     * before deleting or replacing world files.
++     *
++     * <p>Overlapping requests share the operation; a different save policy is rejected.
++     * Cancelling the returned future does not cancel an accepted unload. Failure after
++     * retirement completes exceptionally and keeps the world identity reserved.</p>
++     *
++     * @param world world to unload
++     * @param save whether to save chunks before unloading
++     * @return true after complete cleanup, false if the world cannot be unloaded or its event is cancelled
++     */
++    @NotNull
++    public static java.util.concurrent.CompletableFuture<Boolean> unloadWorldAsync(@NotNull World world, boolean save) {
++        return server.unloadWorldAsync(world, save);
++    }
++
+     /**
+      * Gets the world with the given legacy Bukkit name.
+      *
+diff --git a/src/main/java/org/bukkit/Server.java b/src/main/java/org/bukkit/Server.java
+index ef0069ed4c1d0d0c961ffdcd3159fe5508396bc9..ddf5c2a00dabafb4b1d56eafbd3f94c063d044de 100644
+--- a/src/main/java/org/bukkit/Server.java
++++ b/src/main/java/org/bukkit/Server.java
+@@ -776,6 +776,24 @@ public interface Server extends PluginMessageRecipient, net.kyori.adventure.audi
+      */
+     public boolean unloadWorld(@NotNull World world, boolean save);
+ 
++    /**
++     * Unloads an empty world without waiting for storage work on a tick owner.
++     * The unload event and world-state changes run on the server owner. Once accepted,
++     * the world is unavailable for new use until storage has closed. Its name and key
++     * cannot be reused before successful completion. Callers must await completion
++     * before deleting or replacing world files.
++     *
++     * <p>Overlapping requests share the operation; a different save policy is rejected.
++     * Cancelling the returned future does not cancel an accepted unload. Failure after
++     * retirement completes exceptionally and keeps the world identity reserved.</p>
++     *
++     * @param world world to unload
++     * @param save whether to save chunks before unloading
++     * @return true after complete cleanup, false if the world cannot be unloaded or its event is cancelled
++     */
++    @NotNull
++    java.util.concurrent.CompletableFuture<Boolean> unloadWorldAsync(@NotNull World world, boolean save);
++
+     /**
+      * Gets the world that players respawn in.
+      *

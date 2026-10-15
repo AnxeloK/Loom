@@ -1,0 +1,207 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Thu, 15 Oct 2026 14:07:58 +0300
+Subject: [PATCH] Coordinate asynchronous world unloads through completion
+
+
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index 9ea2019ed25706a0f6869af6589a1345443fc25b..4307d9439cac2ef10ef68baae0c204aff92ca148 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -1172,6 +1172,10 @@ public final class CraftServer implements Server {
+         Preconditions.checkArgument(creator != null, "WorldCreator cannot be null");
+ 
+         String name = creator.name();
++        for (final ServerLevel retiring : this.worldUnloads.keySet()) {
++            Preconditions.checkState(!retiring.getWorld().getName().equalsIgnoreCase(name)
++                && !retiring.getWorld().getKey().equals(creator.key()), "World is still unloading: %s", name);
++        }
+         ChunkGenerator chunkGenerator = creator.generator();
+         BiomeProvider biomeProvider = creator.biomeProvider();
+ 
+@@ -1317,6 +1321,81 @@ public final class CraftServer implements Server {
+         return serverLevel.getWorld();
+     }
+ 
++    private final java.util.Map<ServerLevel, net.minecraft.server.level.WorldUnloadOperation> worldUnloads = new java.util.IdentityHashMap<>();
++
++    @Override
++    public java.util.concurrent.CompletableFuture<Boolean> unloadWorldAsync(final World world, final boolean save) {
++        java.util.Objects.requireNonNull(world, "world");
++        return net.minecraft.server.threading.runtime.OwnershipRouter.supplyOnServer(this.console,
++            () -> this.beginWorldUnload(world, save)).thenCompose(future -> future);
++    }
++
++    private java.util.concurrent.CompletableFuture<Boolean> beginWorldUnload(final World world, final boolean save) {
++        final ServerLevel handle = ((CraftWorld) world).getHandle();
++        final var existing = this.worldUnloads.get(handle);
++        if (existing != null) {
++            if (existing.savesChunks() != save) return java.util.concurrent.CompletableFuture.failedFuture(
++                new IllegalStateException("World unload already has a different save policy"));
++            return existing.result();
++        }
++        if (this.console.hasStopped() || this.console.getLevel(handle.dimension()) != handle
++            || handle.dimension() == net.minecraft.world.level.Level.OVERWORLD || !handle.players().isEmpty()) {
++            return java.util.concurrent.CompletableFuture.completedFuture(false);
++        }
++        final var operation = new net.minecraft.server.level.WorldUnloadOperation(handle, save);
++        this.worldUnloads.put(handle, operation);
++        try {
++            if (!new WorldUnloadEvent(world).callEvent() || !handle.players().isEmpty()
++                || this.console.getLevel(handle.dimension()) != handle) {
++                this.worldUnloads.remove(handle);
++                operation.refuse();
++                return operation.result();
++            }
++            this.worlds.remove(world.getName().toLowerCase(Locale.ROOT));
++            this.console.detachLevel(handle);
++            operation.start();
++        } catch (final Throwable failure) {
++            if (!handle.unloading) this.worldUnloads.remove(handle);
++            operation.fail(failure);
++            return operation.result();
++        }
++        return operation.result();
++    }
++
++    public void tickWorldUnloads() {
++        for (final var entry : java.util.List.copyOf(this.worldUnloads.entrySet())) {
++            final var operation = entry.getValue();
++            operation.tick();
++            if (operation.isDone()) {
++                try {
++                    if (operation.result().getNow(false)) this.worldUnloads.remove(entry.getKey());
++                } catch (final java.util.concurrent.CompletionException failure) {
++                    // Keep a failed retirement reserved; callers must not overwrite its world files.
++                }
++            }
++        }
++    }
++
++    public java.util.concurrent.CompletableFuture<Void> pendingWorldUnloads() {
++        return java.util.concurrent.CompletableFuture.allOf(this.worldUnloads.values().stream()
++            .map(net.minecraft.server.level.WorldUnloadOperation::result).toArray(java.util.concurrent.CompletableFuture[]::new));
++    }
++
++    public void awaitWorldUnloadsOnShutdown() {
++        try (var ignored = net.minecraft.server.threading.runtime.OwnerDomainExecutor.enterGlobal(this.console, "shutdown-world-unloads")) {
++            final long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(130);
++            while (!this.pendingWorldUnloads().isDone()) {
++                this.console.executeAllRecentInternalTasks();
++                this.tickWorldUnloads();
++                if (System.nanoTime() >= deadline) {
++                    this.getLogger().severe("Timed out awaiting retiring worlds during shutdown");
++                    break;
++                }
++                java.util.concurrent.locks.LockSupport.parkNanos(1_000_000L);
++            }
++        }
++    }
++
+     @Override
+     public boolean unloadWorld(String name, boolean save) {
+         return this.unloadWorld(this.getWorld(name), save);
+@@ -1330,6 +1409,7 @@ public final class CraftServer implements Server {
+         }
+ 
+         ServerLevel handle = ((CraftWorld) world).getHandle();
++        if (this.worldUnloads.containsKey(handle)) return false;
+ 
+         if (this.console.getLevel(handle.dimension()) == null) {
+             return false;
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
+index 078083c88f336afd8bfe69c770c6d3ac486e826f..38abcb35304954ab0480574db3d44ba8c68760e7 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
+@@ -310,6 +310,7 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
+ 
+     protected boolean teleport0(Location location, TeleportCause cause, TeleportFlag... flags) {
+         Entity entity = this.getHandle();
++        if (((CraftWorld) location.getWorld()).getHandle().unloading) return false;
+         if (!entity.isAlive() || !entity.valid) {
+             return false;
+         }
+@@ -1155,6 +1156,7 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
+         Location locationClone = location.clone(); // clone so we don't need to worry about mutations after this call.
+ 
+         ServerLevel world = ((CraftWorld)locationClone.getWorld()).getHandle();
++        if (world.unloading) return CompletableFuture.completedFuture(false);
+         CompletableFuture<Boolean> ret = new CompletableFuture<>();
+ 
+         world.loadChunksForMoveAsync(this.getHandle().getBoundingBoxAt(locationClone.getX(), locationClone.getY(), locationClone.getZ()),
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index f343b3b97dd21aa78120b74a8bcbd93a21aaab2a..ba157c30e3bee43ce14d2074685e660257fd47b9 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -1310,6 +1310,7 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+ 
+     @Override
+     protected boolean teleport0(Location location, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause cause, io.papermc.paper.entity.TeleportFlag... flags) {
++        if (((CraftWorld) location.getWorld()).getHandle().unloading) return false;
+         if (this.getHandle().connection == null) {
+             return false;
+         }
+diff --git a/src/test/java/net/minecraft/world/level/storage/SavedDataCloseAsyncTest.java b/src/test/java/net/minecraft/world/level/storage/SavedDataCloseAsyncTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..afdeaf5a3ef9981ad7729003a5fb43ea5ea40af1
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/level/storage/SavedDataCloseAsyncTest.java
+@@ -0,0 +1,58 @@
++package net.minecraft.world.level.storage;
++
++import com.mojang.datafixers.DataFixer;
++import io.papermc.paper.world.saveddata.PaperWorldMetadata;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.UUID;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionException;
++import net.minecraft.core.HolderLookup;
++import net.minecraft.nbt.NbtOps;
++import net.minecraft.resources.RegistryOps;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class SavedDataCloseAsyncTest {
++    @TempDir Path temporary;
++
++    @Test
++    void closeReturnsWhileTheStorageWriteIsStillPending() {
++        final SavedDataStorage storage = spy(new SavedDataStorage(temporary, mock(DataFixer.class), mock(HolderLookup.Provider.class)));
++        final CompletableFuture<Void> write = new CompletableFuture<>();
++        doReturn(write).when(storage).scheduleSave();
++        final CompletableFuture<?> closed = storage.closeAsync();
++        assertFalse(closed.isDone());
++        verify(storage).scheduleSave();
++        write.complete(null);
++        assertDoesNotThrow(closed::join);
++        // The write was captured once, before the storage stopped accepting captures.
++        doCallRealMethod().when(storage).scheduleSave();
++        assertThrows(IllegalStateException.class, storage::scheduleSave);
++    }
++
++    @Test
++    void cancellingAnObserverDoesNotCancelTheStorageWrite() {
++        final SavedDataStorage storage = spy(new SavedDataStorage(temporary, mock(DataFixer.class), mock(HolderLookup.Provider.class)));
++        final CompletableFuture<Void> write = new CompletableFuture<>();
++        doReturn(write).when(storage).scheduleSave();
++        storage.closeAsync().cancel(false);
++        assertFalse(write.isCancelled());
++        assertFalse(write.isDone());
++    }
++
++    @Test
++    void asynchronousWriteFailureReachesTheCloseCaller() throws Exception {
++        final Path blockedDirectory = temporary.resolve("not-a-directory");
++        Files.writeString(blockedDirectory, "occupied");
++        final HolderLookup.Provider registries = mock(HolderLookup.Provider.class);
++        when(registries.createSerializationContext(NbtOps.INSTANCE)).thenReturn(RegistryOps.create(NbtOps.INSTANCE, registries));
++        final SavedDataStorage storage = new SavedDataStorage(blockedDirectory, mock(DataFixer.class), registries);
++        storage.set(PaperWorldMetadata.TYPE, new PaperWorldMetadata(UUID.randomUUID()));
++        assertThrows(CompletionException.class, () -> storage.closeAsync().join());
++    }
++}

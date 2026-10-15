@@ -1,0 +1,272 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Thu, 15 Oct 2026 14:07:57 +0300
+Subject: [PATCH] Retire worlds without blocking tick owners on storage
+
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
+index 7fe639284f81cbd11f5c7bf6839ab9cadcd79e79..f777e19d5ae2b93f358d47e81759cad9a6465ae0 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
+@@ -335,6 +335,10 @@ public final class ChunkTaskScheduler {
+         ((ChunkSystemMinecraftServer)this.world.getServer()).moonrise$setChunkSystemCrash(new RuntimeException("Chunk system crash propagated from unrecoverableChunkSystemFailure", reportedException));
+     }
+ 
++    public boolean hasPendingMainThreadTasks() {
++        return this.mainThreadExecutor.getTotalTasksExecuted() < this.mainThreadExecutor.getTotalTasksScheduled();
++    }
++
+     public boolean executeMainThreadTask() {
+         TickThread.ensureTickThread(this.world, "Cannot execute main thread task off-main");
+         return this.mainThreadExecutor.executeTask();
+@@ -587,6 +591,10 @@ public final class ChunkTaskScheduler {
+ 
+     public void scheduleChunkLoad(final int chunkX, final int chunkZ, final ChunkStatus toStatus, final boolean addTicket,
+                                   final Priority priority, final Consumer<ChunkAccess> onComplete) {
++        if (this.world.unloading) {
++            if (onComplete != null) onComplete.accept(null);
++            return;
++        }
+         if (!TickThread.isTickThreadFor(this.world, chunkX, chunkZ)) {
+             this.scheduleChunkTask(chunkX, chunkZ, () -> {
+                 ChunkTaskScheduler.this.scheduleChunkLoad(chunkX, chunkZ, toStatus, addTicket, priority, onComplete);
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index f945eb604dc745307a2ab5bd168405c8b57ef128..db02dbb17b6d3edddcfb297f954cd63c58a982c7 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1068,6 +1068,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         }
+     }
+ 
++    public CompletableFuture<?> pendingSave() {
++        return this.pendingAsyncSave.copy();
++    }
++
+     // Loom start - owner-domain save transaction
+     public CompletableFuture<Boolean> saveEverythingAsync(final boolean silent, final boolean flush, final boolean force) {
+         net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this, "save-everything-async");
+@@ -1216,6 +1220,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             this.cancelRecordingMetrics();
+         }
+ 
++        this.server.awaitWorldUnloadsOnShutdown();
+         LOGGER.info("Stopping server");
+         Commands.COMMAND_SENDING_POOL.shutdownNow(); // Paper - Perf: Async command map building; Shutdown and don't bother finishing
+         // CraftBukkit start
+@@ -1314,11 +1319,11 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     }
+     public void halt(final boolean wait, final boolean isRestarting) {
+         // Loom start - do not close region storage while a non-blocking durability barrier owns it
+-        if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this) && !this.pendingAsyncSave.isDone()) {
++        if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this) && (!this.pendingAsyncSave.isDone() || !this.server.pendingWorldUnloads().isDone())) {
+             this.isRestarting |= isRestarting;
+             if (!this.shutdownQueuedAfterSave) {
+                 this.shutdownQueuedAfterSave = true;
+-                this.pendingAsyncSave.whenComplete((ignored, failure) -> {
++                CompletableFuture.allOf(this.pendingAsyncSave, this.server.pendingWorldUnloads()).whenComplete((ignored, failure) -> {
+                     try {
+                         net.minecraft.server.threading.runtime.OwnerDomainExecutor.execute(
+                             net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this, "shutdown-after-save"),
+@@ -1960,6 +1965,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     }
+ 
+     protected void tickServerTraced(final BooleanSupplier haveTime) {
++        this.server.tickWorldUnloads();
+         org.spigotmc.WatchdogThread.tick(); // Spigot
+         long nano = Util.getNanos();
+         int emptyTickThreshold = this.pauseWhenEmptySeconds() * 20;
+@@ -2324,11 +2330,16 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     }
+ 
+     public void removeLevel(ServerLevel level) {
++        this.detachLevel(level);
++        net.minecraft.server.threading.TickRegions.clearWorldState(level);
++    }
++
++    public void detachLevel(ServerLevel level) {
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this, "detach-world");
+         Map<ResourceKey<Level>, ServerLevel> oldLevels = this.levels;
+         Map<ResourceKey<Level>, ServerLevel> newLevels = Maps.newLinkedHashMap(oldLevels);
+         newLevels.remove(level.dimension());
+         this.levels = Collections.unmodifiableMap(newLevels);
+-        net.minecraft.server.threading.TickRegions.clearWorldState(level);
+     }
+     // CraftBukkit end
+ 
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index d18b5515a3e4c907b9de7c1222f6cb48faa27937..e37cb08c26792e2d1fbffb2f5e2029083028500e 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -615,6 +615,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     }
+     // Paper end - chunk tick iteration
+ 
++    public volatile boolean unloading;
++
+     public ServerLevel(
+         final MinecraftServer server,
+         final Executor executor,
+diff --git a/net/minecraft/server/level/WorldUnloadOperation.java b/net/minecraft/server/level/WorldUnloadOperation.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e05052fd0babb8eb49c821482e26ecde1d5f95d
+--- /dev/null
++++ b/net/minecraft/server/level/WorldUnloadOperation.java
+@@ -0,0 +1,132 @@
++package net.minecraft.server.level;
++
++import ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO;
++import ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler;
++import java.io.IOException;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionException;
++import java.util.concurrent.TimeUnit;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++
++/** An owner-driven retirement transaction; only storage and executor waits run on I/O owners. */
++public final class WorldUnloadOperation {
++    private final ServerLevel world;
++    private final boolean save;
++    private final CompletableFuture<Boolean> result = new CompletableFuture<>();
++    private CompletableFuture<?> work;
++    private boolean captured;
++
++    public WorldUnloadOperation(final ServerLevel world, final boolean save) {
++        this.world = world;
++        this.save = save;
++    }
++
++    public boolean savesChunks() {
++        return this.save;
++    }
++
++    public CompletableFuture<Boolean> result() {
++        return this.result.copy();
++    }
++
++    public boolean isDone() {
++        return this.result.isDone();
++    }
++
++    public void refuse() {
++        this.result.complete(false);
++    }
++
++    public void fail(final Throwable failure) {
++        net.minecraft.server.MinecraftServer.LOGGER.error("Failed to unload world {}", this.world.dimension().identifier(), failure);
++        this.result.completeExceptionally(unwrap(failure));
++    }
++
++    public void start() {
++        OwnerDomainExecutor.assertGlobalOwner(this.world.getServer(), "begin-world-unload");
++        this.world.unloading = true;
++        this.work = OwnerDomainExecutor.supply(
++            OwnerDomainExecutor.asyncIo(this.world.getServer(), "drain-world-generation"),
++            () -> {
++                if (!this.scheduler().halt(true, TimeUnit.SECONDS.toNanos(60))) {
++                    throw new IllegalStateException("World generation did not stop for " + this.world.dimension().identifier());
++                }
++                return null;
++            }
++        );
++    }
++
++    public void tick() {
++        OwnerDomainExecutor.assertGlobalOwner(this.world.getServer(), "advance-world-unload");
++        if (this.result.isDone()) return;
++        try {
++            if (!this.captured) {
++                // Completion callbacks queued by generation still need their original level owner.
++                // The level no longer simulates, but its finite existing task set must finish.
++                try (var ignored = OwnerDomainExecutor.enter(OwnerDomainExecutor.region(
++                    this.world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, "drain-world-unload"
++                ))) {
++                    this.scheduler().executeAllRecentlyQueuedMainThreadTasks();
++                    TickRegions.runRegionContinuations(this.world);
++                    TickRegions.runFullLevelContinuations(this.world);
++                }
++            }
++            if (!this.work.isDone() || (!this.captured && this.scheduler().hasPendingMainThreadTasks())) return;
++            this.work.getNow(null);
++            if (!this.captured) {
++                this.captured = true;
++                this.captureAndClose();
++                return;
++            }
++            TickRegions.clearWorldState(this.world);
++            this.result.complete(true);
++        } catch (final Throwable failure) {
++            this.fail(failure);
++        }
++    }
++
++    private void captureAndClose() {
++        final ChunkTaskScheduler scheduler = this.scheduler();
++        // No simulation or new loads can change this world after retirement. Capture mutable
++        // data and unload events here, while storage completion stays outside the tick owner.
++        if (this.save) {
++            this.world.save(null, false, false);
++            scheduler.chunkHolderManager.saveAllChunks(false, true, false, false);
++        }
++        final CompletableFuture<?> savedData = this.world.getDataStorage().closeAsync();
++        final CompletableFuture<Void> chunks = MoonriseRegionFileIO.flushAsync(this.world.getServer(), List.of(this.world));
++        this.work = CompletableFuture.allOf(savedData, chunks, this.world.getServer().pendingSave()).handle((ignored, failure) ->
++            OwnerDomainExecutor.supply(OwnerDomainExecutor.asyncIo(this.world.getServer(), "close-world-storage"), () -> {
++                this.closeStorage(failure);
++                return null;
++            })
++        ).thenCompose(future -> future);
++    }
++
++    private void closeStorage(final Throwable priorFailure) {
++        Throwable failure = priorFailure == null ? null : unwrap(priorFailure);
++        if (!this.scheduler().haltIO(true, TimeUnit.SECONDS.toNanos(60))) {
++            throw new IllegalStateException("World I/O did not stop for " + this.world.dimension().identifier(), failure);
++        }
++        for (final MoonriseRegionFileIO.RegionFileType type : MoonriseRegionFileIO.RegionFileType.values()) {
++            try {
++                MoonriseRegionFileIO.getControllerFor(this.world, type).getCache().close();
++            } catch (final IOException closeFailure) {
++                if (failure == null) failure = closeFailure;
++                else failure.addSuppressed(closeFailure);
++            }
++        }
++        this.scheduler().setShutdown(true);
++        if (failure != null) throw new CompletionException(failure);
++    }
++
++    private ChunkTaskScheduler scheduler() {
++        return this.world.moonrise$getChunkTaskScheduler();
++    }
++
++    private static Throwable unwrap(final Throwable failure) {
++        return failure instanceof CompletionException && failure.getCause() != null ? failure.getCause() : failure;
++    }
++}
+diff --git a/net/minecraft/world/level/storage/SavedDataStorage.java b/net/minecraft/world/level/storage/SavedDataStorage.java
+index 528d7abcba6222a737fa7689ee835ad2059b18bc..69e2f50406b79071707b0615b17d646124629ec9 100644
+--- a/net/minecraft/world/level/storage/SavedDataStorage.java
++++ b/net/minecraft/world/level/storage/SavedDataStorage.java
+@@ -214,6 +214,7 @@ public class SavedDataStorage implements AutoCloseable {
+             NbtIo.writeCompressed(tag, path);
+         } catch (IOException e) {
+             LOGGER.error("Could not save data to {}", path.getFileName(), e);
++            throw new java.io.UncheckedIOException(e);
+         }
+     }
+ 
+@@ -221,6 +222,13 @@ public class SavedDataStorage implements AutoCloseable {
+         this.scheduleSave().join();
+     }
+ 
++    public CompletableFuture<?> closeAsync() {
++        ensureOwner();
++        final CompletableFuture<?> completion = this.scheduleSave();
++        this.closed = true;
++        return completion.copy();
++    }
++
+     @Override
+     public void close() {
+         ensureOwner();
