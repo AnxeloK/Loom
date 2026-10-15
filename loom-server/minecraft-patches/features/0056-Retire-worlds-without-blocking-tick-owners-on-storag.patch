@@ -5,7 +5,7 @@ Subject: [PATCH] Retire worlds without blocking tick owners on storage
 
 
 diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
-index 7fe639284f81cbd11f5c7bf6839ab9cadcd79e79..f777e19d5ae2b93f358d47e81759cad9a6465ae0 100644
+index 7fe639284f81cbd11f5c7bf6839ab9cadcd79e79..08ec422a6f3a9fac5b131d13930511b13b5a0998 100644
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
 @@ -335,6 +335,10 @@ public final class ChunkTaskScheduler {
@@ -23,7 +23,7 @@ index 7fe639284f81cbd11f5c7bf6839ab9cadcd79e79..f777e19d5ae2b93f358d47e81759cad9
  
      public void scheduleChunkLoad(final int chunkX, final int chunkZ, final ChunkStatus toStatus, final boolean addTicket,
                                    final Priority priority, final Consumer<ChunkAccess> onComplete) {
-+        if (this.world.unloading) {
++        if (this.world.lifecycle.isUnloading()) {
 +            if (onComplete != null) onComplete.accept(null);
 +            return;
 +        }
@@ -31,7 +31,7 @@ index 7fe639284f81cbd11f5c7bf6839ab9cadcd79e79..f777e19d5ae2b93f358d47e81759cad9
              this.scheduleChunkTask(chunkX, chunkZ, () -> {
                  ChunkTaskScheduler.this.scheduleChunkLoad(chunkX, chunkZ, toStatus, addTicket, priority, onComplete);
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index f945eb604dc745307a2ab5bd168405c8b57ef128..db02dbb17b6d3edddcfb297f954cd63c58a982c7 100644
+index f945eb604dc745307a2ab5bd168405c8b57ef128..99ac3bbf4834d6a048e529ccd6414dd008e1560f 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -1068,6 +1068,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
@@ -49,7 +49,7 @@ index f945eb604dc745307a2ab5bd168405c8b57ef128..db02dbb17b6d3edddcfb297f954cd63c
              this.cancelRecordingMetrics();
          }
  
-+        this.server.awaitWorldUnloadsOnShutdown();
++        if (this.server != null) this.server.awaitWorldUnloadsOnShutdown();
          LOGGER.info("Stopping server");
          Commands.COMMAND_SENDING_POOL.shutdownNow(); // Paper - Perf: Async command map building; Shutdown and don't bother finishing
          // CraftBukkit start
@@ -94,24 +94,297 @@ index f945eb604dc745307a2ab5bd168405c8b57ef128..db02dbb17b6d3edddcfb297f954cd63c
      // CraftBukkit end
  
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index d18b5515a3e4c907b9de7c1222f6cb48faa27937..e37cb08c26792e2d1fbffb2f5e2029083028500e 100644
+index d18b5515a3e4c907b9de7c1222f6cb48faa27937..3f936e2369f612a98b71f6e91db204bde3b65d25 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -615,6 +615,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -615,6 +615,12 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      }
      // Paper end - chunk tick iteration
  
-+    public volatile boolean unloading;
++    public final WorldLifecycle lifecycle = new WorldLifecycle();
++
++    public boolean isUnloading() {
++        return this.lifecycle.isUnloading();
++    }
 +
      public ServerLevel(
          final MinecraftServer server,
          final Executor executor,
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index d44706c1b7033569662e7c8cc25b85663567d3c6..3d4848c9bf6b1eb3442e7487cd36827ea99fdfdc 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -1709,104 +1709,109 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+ 
+     @Override
+     public @Nullable ServerPlayer teleport(TeleportTransition transition) { // Paper - make non-final
+-        if (this.isSleeping()) return null; // CraftBukkit - SPIGOT-3154
+-        if (this.isRemoved()) {
+-            return null;
+-        }
+-
+-        if (transition.missingRespawnBlock()) {
+-            this.connection.send(new ClientboundGameEventPacket(ClientboundGameEventPacket.NO_RESPAWN_BLOCK_AVAILABLE, 0.0F));
+-        }
++        try (var departure = this.level().lifecycle.tryBeginTransfer();
++             var transfer = transition.newLevel().lifecycle.tryBeginTransfer()) {
++            if (departure == null || transfer == null) return null;
++            if (this.isSleeping()) return null; // CraftBukkit - SPIGOT-3154
++            if (this.isRemoved()) {
++                return null;
++            }
+ 
+-        ServerLevel newLevel = transition.newLevel();
+-        ServerLevel oldLevel = this.level();
+-        ResourceKey<Level> lastDimension = oldLevel.dimension();
+-        // CraftBukkit start
+-        ResourceKey<net.minecraft.world.level.dimension.LevelStem> oldLevelTypeKey = oldLevel.getTypeKey();
+-
+-        org.bukkit.Location enter = this.getBukkitEntity().getLocation();
+-        PositionMoveRotation absolutePosition = PositionMoveRotation.calculateAbsolute(PositionMoveRotation.of(this), PositionMoveRotation.of(transition), transition.relatives());
+-        org.bukkit.Location exit = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(absolutePosition.position(), newLevel, absolutePosition.yRot(), absolutePosition.xRot());
+-        final org.bukkit.event.player.PlayerTeleportEvent tpEvent;
+-        // Paper start - gateway-specific teleport event
+-        if (this.portalProcess != null && this.portalProcess.isSamePortal(((net.minecraft.world.level.block.EndGatewayBlock) net.minecraft.world.level.block.Blocks.END_GATEWAY)) && this.level().getBlockEntity(this.portalProcess.getEntryPosition()) instanceof net.minecraft.world.level.block.entity.TheEndGatewayBlockEntity theEndGatewayBlockEntity) {
+-            tpEvent = new com.destroystokyo.paper.event.player.PlayerTeleportEndGatewayEvent(this.getBukkitEntity(), enter, exit.clone(), new org.bukkit.craftbukkit.block.CraftEndGateway(this.level().getWorld(), theEndGatewayBlockEntity));
+-        } else {
+-            tpEvent = new org.bukkit.event.player.PlayerTeleportEvent(this.getBukkitEntity(), enter, exit.clone(), transition.cause());
+-        }
+-        // Paper end - gateway-specific teleport event
+-        org.bukkit.Bukkit.getServer().getPluginManager().callEvent(tpEvent);
+-        org.bukkit.Location newExit = tpEvent.getTo();
+-        if (tpEvent.isCancelled()) {
+-            return null;
+-        }
+-        if (!newExit.equals(exit)) {
+-            newLevel = ((org.bukkit.craftbukkit.CraftWorld) newExit.getWorld()).getHandle();
+-            transition = transition.withChangedLocation(newExit).withVelocity(Vec3.ZERO).withRelatives(Set.of());
+-        }
+-        // CraftBukkit end
+-        if (!transition.asPassenger()) {
+-            this.removeVehicle();
+-        }
++            if (transition.missingRespawnBlock()) {
++                this.connection.send(new ClientboundGameEventPacket(ClientboundGameEventPacket.NO_RESPAWN_BLOCK_AVAILABLE, 0.0F));
++            }
+ 
+-        if (newLevel.dimension() == lastDimension) {
+-            final TeleportTransition sameDimensionTransition = transition;
+-            runWithTeleportOwnerContext(newLevel, this.chunkPosition(), sameDimensionTransition.position(), () -> {
+-                this.connection.internalTeleport(PositionMoveRotation.of(sameDimensionTransition), sameDimensionTransition.relatives()); // CraftBukkit
++            ServerLevel newLevel = transition.newLevel();
++            ServerLevel oldLevel = this.level();
++            ResourceKey<Level> lastDimension = oldLevel.dimension();
++            // CraftBukkit start
++            ResourceKey<net.minecraft.world.level.dimension.LevelStem> oldLevelTypeKey = oldLevel.getTypeKey();
++
++            org.bukkit.Location enter = this.getBukkitEntity().getLocation();
++            PositionMoveRotation absolutePosition = PositionMoveRotation.calculateAbsolute(PositionMoveRotation.of(this), PositionMoveRotation.of(transition), transition.relatives());
++            org.bukkit.Location exit = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(absolutePosition.position(), newLevel, absolutePosition.yRot(), absolutePosition.xRot());
++            final org.bukkit.event.player.PlayerTeleportEvent tpEvent;
++            // Paper start - gateway-specific teleport event
++            if (this.portalProcess != null && this.portalProcess.isSamePortal(((net.minecraft.world.level.block.EndGatewayBlock) net.minecraft.world.level.block.Blocks.END_GATEWAY)) && this.level().getBlockEntity(this.portalProcess.getEntryPosition()) instanceof net.minecraft.world.level.block.entity.TheEndGatewayBlockEntity theEndGatewayBlockEntity) {
++                tpEvent = new com.destroystokyo.paper.event.player.PlayerTeleportEndGatewayEvent(this.getBukkitEntity(), enter, exit.clone(), new org.bukkit.craftbukkit.block.CraftEndGateway(this.level().getWorld(), theEndGatewayBlockEntity));
++            } else {
++                tpEvent = new org.bukkit.event.player.PlayerTeleportEvent(this.getBukkitEntity(), enter, exit.clone(), transition.cause());
++            }
++            // Paper end - gateway-specific teleport event
++            org.bukkit.Bukkit.getServer().getPluginManager().callEvent(tpEvent);
++            org.bukkit.Location newExit = tpEvent.getTo();
++            if (tpEvent.isCancelled()) {
++                return null;
++            }
++            if (!newExit.equals(exit)) {
++                newLevel = ((org.bukkit.craftbukkit.CraftWorld) newExit.getWorld()).getHandle();
++                transition = transition.withChangedLocation(newExit).withVelocity(Vec3.ZERO).withRelatives(Set.of());
++            }
++            if (!transfer.retarget(newLevel.lifecycle)) return null;
++            // CraftBukkit end
++            if (!transition.asPassenger()) {
++                this.removeVehicle();
++            }
++
++            if (newLevel.dimension() == lastDimension) {
++                final TeleportTransition sameDimensionTransition = transition;
++                runWithTeleportOwnerContext(newLevel, this.chunkPosition(), sameDimensionTransition.position(), () -> {
++                    this.connection.internalTeleport(PositionMoveRotation.of(sameDimensionTransition), sameDimensionTransition.relatives()); // CraftBukkit
++                    this.connection.resetPosition();
++                    sameDimensionTransition.postTeleportTransition().onTransition(this);
++                });
++                return this;
++            }
++
++            final ServerLevel destinationLevel = newLevel;
++            final TeleportTransition dimensionTransition = transition;
++            this.isChangingDimension = true;
++            LevelData levelData = destinationLevel.getLevelData();
++            this.connection.send(new ClientboundRespawnPacket(this.createCommonSpawnInfo(destinationLevel), ClientboundRespawnPacket.KEEP_ALL_DATA));
++            this.connection.send(new ClientboundChangeDifficultyPacket(levelData.getDifficulty(), levelData.isDifficultyLocked()));
++            PlayerList playerList = this.server.getPlayerList();
++            playerList.sendPlayerPermissionLevel(this);
++            this.portalProcess = null; // SPIGOT-7785: there is no need to carry this over as it contains the old world/location and we might run into trouble if there is a portal in the same spot in both worlds
++            runWithTeleportOwnerContext(oldLevel, this.chunkPosition(), this.position(), () -> oldLevel.removePlayerImmediately(this, Entity.RemovalReason.CHANGED_DIMENSION));
++            this.unsetRemoved();
++            ProfilerFiller profiler = Profiler.get();
++            profiler.push("moving");
++            if (oldLevelTypeKey == net.minecraft.world.level.dimension.LevelStem.OVERWORLD && destinationLevel.getTypeKey() == net.minecraft.world.level.dimension.LevelStem.NETHER) { // CraftBukkit - empty to fall through to null to event
++                this.enteredNetherPosition = this.position();
++            }
++
++            profiler.pop();
++            profiler.push("placing");
++            this.setServerLevel(destinationLevel);
++            runWithTeleportOwnerContext(destinationLevel, this.chunkPosition(), dimensionTransition.position(), () -> {
++                this.connection.internalTeleport(PositionMoveRotation.of(dimensionTransition), dimensionTransition.relatives()); // CraftBukkit - use internal teleport without event
+                 this.connection.resetPosition();
+-                sameDimensionTransition.postTeleportTransition().onTransition(this);
++                destinationLevel.addDuringTeleport(this);
+             });
+-            return this;
+-        }
+-
+-        final ServerLevel destinationLevel = newLevel;
+-        final TeleportTransition dimensionTransition = transition;
+-        this.isChangingDimension = true;
+-        LevelData levelData = destinationLevel.getLevelData();
+-        this.connection.send(new ClientboundRespawnPacket(this.createCommonSpawnInfo(destinationLevel), ClientboundRespawnPacket.KEEP_ALL_DATA));
+-        this.connection.send(new ClientboundChangeDifficultyPacket(levelData.getDifficulty(), levelData.isDifficultyLocked()));
+-        PlayerList playerList = this.server.getPlayerList();
+-        playerList.sendPlayerPermissionLevel(this);
+-        this.portalProcess = null; // SPIGOT-7785: there is no need to carry this over as it contains the old world/location and we might run into trouble if there is a portal in the same spot in both worlds
+-        runWithTeleportOwnerContext(oldLevel, this.chunkPosition(), this.position(), () -> oldLevel.removePlayerImmediately(this, Entity.RemovalReason.CHANGED_DIMENSION));
+-        this.unsetRemoved();
+-        ProfilerFiller profiler = Profiler.get();
+-        profiler.push("moving");
+-        if (oldLevelTypeKey == net.minecraft.world.level.dimension.LevelStem.OVERWORLD && destinationLevel.getTypeKey() == net.minecraft.world.level.dimension.LevelStem.NETHER) { // CraftBukkit - empty to fall through to null to event
+-            this.enteredNetherPosition = this.position();
+-        }
+-
+-        profiler.pop();
+-        profiler.push("placing");
+-        this.setServerLevel(destinationLevel);
+-        runWithTeleportOwnerContext(destinationLevel, this.chunkPosition(), dimensionTransition.position(), () -> {
+-            this.connection.internalTeleport(PositionMoveRotation.of(dimensionTransition), dimensionTransition.relatives()); // CraftBukkit - use internal teleport without event
+-            this.connection.resetPosition();
+-            destinationLevel.addDuringTeleport(this);
+-        });
+-        profiler.pop();
+-        this.triggerDimensionChangeTriggers(oldLevel);
+-        this.stopUsingItem();
+-        this.connection.send(new ClientboundPlayerAbilitiesPacket(this.getAbilities()));
+-        playerList.sendLevelInfo(this, destinationLevel);
+-        playerList.sendAllPlayerInfo(this);
+-        playerList.sendActivePlayerEffects(this);
+-        this.sendPostEffects();
+-        dimensionTransition.postTeleportTransition().onTransition(this);
+-        this.lastSentExp = -1;
+-        this.lastSentHealth = -1.0F;
+-        this.lastSentFood = -1;
+-        this.teleportSpectators(dimensionTransition, oldLevel);
+-        // CraftBukkit start
+-        org.bukkit.event.player.PlayerChangedWorldEvent changeEvent = new org.bukkit.event.player.PlayerChangedWorldEvent(this.getBukkitEntity(), oldLevel.getWorld());
+-        this.level().getCraftServer().getPluginManager().callEvent(changeEvent);
+-        // CraftBukkit end
+-        // Paper start - Reset shield blocking on dimension change
+-        if (this.isBlocking()) {
++            profiler.pop();
++            this.triggerDimensionChangeTriggers(oldLevel);
+             this.stopUsingItem();
++            this.connection.send(new ClientboundPlayerAbilitiesPacket(this.getAbilities()));
++            playerList.sendLevelInfo(this, destinationLevel);
++            playerList.sendAllPlayerInfo(this);
++            playerList.sendActivePlayerEffects(this);
++            this.sendPostEffects();
++            dimensionTransition.postTeleportTransition().onTransition(this);
++            this.lastSentExp = -1;
++            this.lastSentHealth = -1.0F;
++            this.lastSentFood = -1;
++            this.teleportSpectators(dimensionTransition, oldLevel);
++            // CraftBukkit start
++            org.bukkit.event.player.PlayerChangedWorldEvent changeEvent = new org.bukkit.event.player.PlayerChangedWorldEvent(this.getBukkitEntity(), oldLevel.getWorld());
++            this.level().getCraftServer().getPluginManager().callEvent(changeEvent);
++            // CraftBukkit end
++            // Paper start - Reset shield blocking on dimension change
++            if (this.isBlocking()) {
++                this.stopUsingItem();
++            }
++            // Paper end - Reset shield blocking on dimension change
++            return this;
+         }
+-        // Paper end - Reset shield blocking on dimension change
+-        return this;
+     }
+ 
+     private static void runWithTeleportOwnerContext(final ServerLevel level, final ChunkPos currentChunk, final Vec3 targetPosition, final Runnable action) {
+diff --git a/net/minecraft/server/level/WorldLifecycle.java b/net/minecraft/server/level/WorldLifecycle.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b53bdd0ff382a9c1016374f96702820e2e525ad0
+--- /dev/null
++++ b/net/minecraft/server/level/WorldLifecycle.java
+@@ -0,0 +1,57 @@
++package net.minecraft.server.level;
++
++import java.util.concurrent.atomic.AtomicInteger;
++import org.jspecify.annotations.Nullable;
++
++/** Serializes retirement against transfers that may temporarily release their owner. */
++public final class WorldLifecycle {
++    private final AtomicInteger transfers = new AtomicInteger();
++
++    public boolean isUnloading() {
++        return this.transfers.get() < 0;
++    }
++
++    public boolean tryBeginUnload() {
++        return this.transfers.compareAndSet(0, -1);
++    }
++
++    public @Nullable Transfer tryBeginTransfer() {
++        return this.retain() ? new Transfer(this) : null;
++    }
++
++    private boolean retain() {
++        for (;;) {
++            final int current = this.transfers.get();
++            if (current < 0) return false;
++            if (current == Integer.MAX_VALUE) throw new IllegalStateException("Too many concurrent world transfers");
++            if (this.transfers.compareAndSet(current, current + 1)) return true;
++        }
++    }
++
++    public static final class Transfer implements AutoCloseable {
++        private @Nullable WorldLifecycle destination;
++
++        private Transfer(final WorldLifecycle destination) {
++            this.destination = destination;
++        }
++
++        public boolean retarget(final WorldLifecycle next) {
++            final WorldLifecycle previous = this.destination;
++            if (previous == null) throw new IllegalStateException("World transfer is already complete");
++            if (previous == next) return true;
++            if (!next.retain()) return false;
++            this.destination = next;
++            previous.transfers.decrementAndGet();
++            return true;
++        }
++
++        @Override
++        public void close() {
++            final WorldLifecycle previous = this.destination;
++            if (previous != null) {
++                this.destination = null;
++                previous.transfers.decrementAndGet();
++            }
++        }
++    }
++}
 diff --git a/net/minecraft/server/level/WorldUnloadOperation.java b/net/minecraft/server/level/WorldUnloadOperation.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..1e05052fd0babb8eb49c821482e26ecde1d5f95d
+index 0000000000000000000000000000000000000000..f35dc10b651fc790410266b050ff743fcd385461
 --- /dev/null
 +++ b/net/minecraft/server/level/WorldUnloadOperation.java
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,135 @@
 +package net.minecraft.server.level;
 +
 +import ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO;
@@ -145,6 +418,10 @@ index 0000000000000000000000000000000000000000..1e05052fd0babb8eb49c821482e26ecd
 +        return this.result.copy();
 +    }
 +
++    public boolean isStarted() {
++        return this.work != null;
++    }
++
 +    public boolean isDone() {
 +        return this.result.isDone();
 +    }
@@ -160,7 +437,7 @@ index 0000000000000000000000000000000000000000..1e05052fd0babb8eb49c821482e26ecd
 +
 +    public void start() {
 +        OwnerDomainExecutor.assertGlobalOwner(this.world.getServer(), "begin-world-unload");
-+        this.world.unloading = true;
++        if (!this.world.lifecycle.isUnloading()) throw new IllegalStateException("World retirement was not admitted");
 +        this.work = OwnerDomainExecutor.supply(
 +            OwnerDomainExecutor.asyncIo(this.world.getServer(), "drain-world-generation"),
 +            () -> {
@@ -183,11 +460,10 @@ index 0000000000000000000000000000000000000000..1e05052fd0babb8eb49c821482e26ecd
 +                    this.world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, "drain-world-unload"
 +                ))) {
 +                    this.scheduler().executeAllRecentlyQueuedMainThreadTasks();
-+                    TickRegions.runRegionContinuations(this.world);
-+                    TickRegions.runFullLevelContinuations(this.world);
++                    TickRegions.drainWorldForUnload(this.world);
 +                }
 +            }
-+            if (!this.work.isDone() || (!this.captured && this.scheduler().hasPendingMainThreadTasks())) return;
++            if (!this.work.isDone() || (!this.captured && (this.scheduler().hasPendingMainThreadTasks() || TickRegions.hasWorldUnloadWork(this.world)))) return;
 +            this.work.getNow(null);
 +            if (!this.captured) {
 +                this.captured = true;
@@ -244,6 +520,285 @@ index 0000000000000000000000000000000000000000..1e05052fd0babb8eb49c821482e26ecd
 +        return failure instanceof CompletionException && failure.getCause() != null ? failure.getCause() : failure;
 +    }
 +}
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index ecfcc549ee95b301b89205786b04e296ea23db01..89cbbab8393f5cf012af4d032d7df2127ce2d6fc 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -607,7 +607,8 @@ public class TickRegions {
+     }
+ 
+     public static void clearWorldState(final ServerLevel world) {
+-        SCHEDULER_STATES.remove(world);
++        final WorldSchedulerState state = SCHEDULER_STATES.remove(world);
++        if (state != null) state.cancelPendingTasks();
+         REGION_RUNTIME.clearWorld(world);
+     }
+ 
+@@ -1468,10 +1469,34 @@ public class TickRegions {
+         return Map.copyOf(diagnostics);
+     }
+ 
++    private static void ensureWorldAvailable(final ServerLevel world) {
++        if (world.isUnloading()) throw new java.util.concurrent.RejectedExecutionException("World is unloading");
++    }
++
+     private static WorldSchedulerState stateFor(final ServerLevel world) {
++        ensureWorldAvailable(world);
+         return SCHEDULER_STATES.computeIfAbsent(world, ignored -> new WorldSchedulerState(world));
+     }
+ 
++    public static void drainWorldForUnload(final ServerLevel world) {
++        OwnerDomainExecutor.assertOwner(OwnerDomainExecutor.region(world, Integer.MIN_VALUE, Integer.MIN_VALUE,
++            Integer.MAX_VALUE, Integer.MAX_VALUE, "drain-retiring-world"), "drain-retiring-world");
++        final WorldSchedulerState state = SCHEDULER_STATES.get(world);
++        if (state != null) {
++            state.drainRegionContinuations();
++            state.drainFullLevelContinuations();
++            state.drainMailbox();
++        }
++    }
++
++    public static boolean hasWorldUnloadWork(final ServerLevel world) {
++        final WorldSchedulerState state = SCHEDULER_STATES.get(world);
++        if (state == null) return false;
++        synchronized (state.lock) {
++            return !state.regionContinuations.isEmpty() || !state.fullLevelContinuations.isEmpty() || !state.mailbox.isEmpty();
++        }
++    }
++
+     public static void tickWorld(final ServerLevel world) {
+         stateFor(world).tickScheduler();
+     }
+@@ -1852,11 +1877,22 @@ public class TickRegions {
+             java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+ 
+         private WorldSchedulerState(final ServerLevel world) {
++            ensureWorldAvailable(world);
+             this.world = world;
+         }
+ 
++        private void cancelPendingTasks() {
++            synchronized (this.lock) {
++                for (final List<RegionScheduledTask> tasks : this.tasksByDeadline.values()) {
++                    for (final RegionScheduledTask task : tasks) task.cancel();
++                }
++                this.tasksByDeadline.clear();
++            }
++        }
++
+         private void schedule(final RegionScheduledTask task, final long delayTicks) {
+             synchronized (this.lock) {
++                ensureWorldAvailable(this.world);
+                 this.tasksByDeadline.computeIfAbsent(this.tickCount + delayTicks, ignored -> new ArrayList<>()).add(task);
+                 ++this.scheduledTaskCount;
+             }
+@@ -1977,12 +2013,14 @@ public class TickRegions {
+ 
+         private void enqueueFullLevelContinuation(final Runnable action) {
+             synchronized (this.lock) {
++                ensureWorldAvailable(this.world);
+                 this.fullLevelContinuations.addLast(action);
+             }
+         }
+ 
+         private void enqueueRegionContinuation(final RegionBoundTask continuation) {
+             synchronized (this.lock) {
++                ensureWorldAvailable(this.world);
+                 this.regionContinuations.addLast(continuation);
+             }
+         }
+@@ -2398,6 +2436,7 @@ public class TickRegions {
+ 
+         private void enqueueMailbox(final CrossRegionMessage message) {
+             synchronized (this.lock) {
++                ensureWorldAvailable(this.world);
+                 this.enqueueMailboxInternal(message, true);
+             }
+         }
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index 20043882ecb2d1f5b81a1f7cf89022fa129e0df6..f31d307312d051c664f47eb0aa263e02a835c9f6 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -366,6 +366,7 @@ public final class OwnerDomainExecutor {
+     ) {
+         Objects.requireNonNull(owner, "owner");
+         Objects.requireNonNull(task, "task");
++        ensureWorldAvailable(owner);
+         if (isOwner(owner)) {
+             recordInline(owner);
+             task.run();
+@@ -388,6 +389,12 @@ public final class OwnerDomainExecutor {
+         }
+     }
+ 
++    private static void ensureWorldAvailable(final Owner owner) {
++        if (owner.level() != null && owner.level().isUnloading()) {
++            throw new RejectedExecutionException("World is unloading: " + owner.operation());
++        }
++    }
++
+     public static CompletableFuture<Void> submit(final Owner owner, final Runnable task) {
+         return supply(owner, () -> {
+             task.run();
+@@ -398,6 +405,11 @@ public final class OwnerDomainExecutor {
+     public static <T> CompletableFuture<T> supply(final Owner owner, final Supplier<T> supplier) {
+         Objects.requireNonNull(owner, "owner");
+         Objects.requireNonNull(supplier, "supplier");
++        try {
++            ensureWorldAvailable(owner);
++        } catch (final RejectedExecutionException rejected) {
++            return CompletableFuture.failedFuture(rejected);
++        }
+         if (isOwner(owner)) {
+             recordInline(owner);
+             try {
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index c8d1867229087ef1a6b3c93ffa47d86a11297439..21e7bec3e4b1afe7c1007de2e139b8412771d944 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -4450,74 +4450,80 @@ public abstract class Entity
+     }
+ 
+     public @Nullable Entity teleport(TeleportTransition transition) { // Paper - remove param final
+-        // Paper start - Fix item duplication and teleport issues
+-        if ((!this.isAlive() || !this.valid) && (transition.newLevel() != this.level)) {
+-            LOGGER.warn("Illegal Entity Teleport {} to {}:{}", this, transition.newLevel(), transition.position(), new Throwable());
+-            return null;
+-        }
+-        // Paper end - Fix item duplication and teleport issues
+-        if (this.level() instanceof ServerLevel serverLevel && !this.isRemoved()) {
+-            // CraftBukkit start
+-            PositionMoveRotation absolutePosition = PositionMoveRotation.calculateAbsolute(PositionMoveRotation.of(this), PositionMoveRotation.of(transition), transition.relatives());
+-            Vec3 velocity = absolutePosition.deltaMovement(); // Paper
+-            org.bukkit.Location to = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(absolutePosition.position(), transition.newLevel(), absolutePosition.yRot(), absolutePosition.xRot());
+-            // Paper start - gateway-specific teleport event
+-            final org.bukkit.event.entity.EntityTeleportEvent teleEvent;
+-            if (this.portalProcess != null && this.portalProcess.isSamePortal(((net.minecraft.world.level.block.EndGatewayBlock) Blocks.END_GATEWAY)) && this.level.getBlockEntity(this.portalProcess.getEntryPosition()) instanceof net.minecraft.world.level.block.entity.TheEndGatewayBlockEntity theEndGatewayBlockEntity) {
+-                teleEvent = new com.destroystokyo.paper.event.entity.EntityTeleportEndGatewayEvent(this.getBukkitEntity(), this.getBukkitEntity().getLocation(), to, new org.bukkit.craftbukkit.block.CraftEndGateway(to.getWorld(), theEndGatewayBlockEntity));
+-                teleEvent.callEvent();
+-            } else {
+-                teleEvent = org.bukkit.craftbukkit.event.CraftEventFactory.callEntityTeleportEvent(this, to);
+-            }
+-            // Paper end - gateway-specific teleport event
+-            if (teleEvent.isCancelled() || teleEvent.getTo() == null) {
++        if (!(this.level() instanceof ServerLevel departureLevel)) return null;
++        try (var departure = departureLevel.lifecycle.tryBeginTransfer();
++             var transfer = transition.newLevel().lifecycle.tryBeginTransfer()) {
++            if (departure == null || transfer == null) return null;
++            // Paper start - Fix item duplication and teleport issues
++            if ((!this.isAlive() || !this.valid) && (transition.newLevel() != this.level)) {
++                LOGGER.warn("Illegal Entity Teleport {} to {}:{}", this, transition.newLevel(), transition.position(), new Throwable());
+                 return null;
+             }
+-            if (!to.equals(teleEvent.getTo())) {
+-                to = teleEvent.getTo();
+-                transition = transition.withChangedLocation(to).withVelocity(Vec3.ZERO).withRelatives(Set.of());
+-                // Paper start - Call EntityPortalExitEvent
+-                velocity = Vec3.ZERO;
+-            }
+-            if (this.portalProcess != null) { // if in a portal
+-                org.bukkit.entity.Entity bukkitEntity = this.getBukkitEntity();
+-                org.bukkit.util.Vector before = bukkitEntity.getVelocity();
+-                org.bukkit.util.Vector after = org.bukkit.craftbukkit.util.CraftVector.toBukkit(velocity);
+-                org.bukkit.event.entity.EntityPortalExitEvent event = new org.bukkit.event.entity.EntityPortalExitEvent(
+-                    bukkitEntity,
+-                    bukkitEntity.getLocation(), to.clone(),
+-                    before, after
+-                );
+-                event.callEvent();
+-
+-                // Only change the target if actually needed, since we reset relative flags
+-                if (event.isCancelled() || !to.equals(event.getTo()) || !after.equals(event.getAfter())) {
+-                    if (event.isCancelled() || event.getTo() == null) {
+-                        org.bukkit.World toWorld = to.getWorld();
+-                        to = event.getFrom().clone();
+-                        to.setWorld(toWorld); // cancelling doesn't cancel the teleport just the position/velocity (old quirk)
+-                        velocity = org.bukkit.craftbukkit.util.CraftVector.toVec3(event.getBefore());
+-                    } else {
+-                        to = event.getTo().clone();
+-                        velocity = org.bukkit.craftbukkit.util.CraftVector.toVec3(event.getAfter());
++            // Paper end - Fix item duplication and teleport issues
++            if (this.level() instanceof ServerLevel serverLevel && !this.isRemoved()) {
++                // CraftBukkit start
++                PositionMoveRotation absolutePosition = PositionMoveRotation.calculateAbsolute(PositionMoveRotation.of(this), PositionMoveRotation.of(transition), transition.relatives());
++                Vec3 velocity = absolutePosition.deltaMovement(); // Paper
++                org.bukkit.Location to = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(absolutePosition.position(), transition.newLevel(), absolutePosition.yRot(), absolutePosition.xRot());
++                // Paper start - gateway-specific teleport event
++                final org.bukkit.event.entity.EntityTeleportEvent teleEvent;
++                if (this.portalProcess != null && this.portalProcess.isSamePortal(((net.minecraft.world.level.block.EndGatewayBlock) Blocks.END_GATEWAY)) && this.level.getBlockEntity(this.portalProcess.getEntryPosition()) instanceof net.minecraft.world.level.block.entity.TheEndGatewayBlockEntity theEndGatewayBlockEntity) {
++                    teleEvent = new com.destroystokyo.paper.event.entity.EntityTeleportEndGatewayEvent(this.getBukkitEntity(), this.getBukkitEntity().getLocation(), to, new org.bukkit.craftbukkit.block.CraftEndGateway(to.getWorld(), theEndGatewayBlockEntity));
++                    teleEvent.callEvent();
++                } else {
++                    teleEvent = org.bukkit.craftbukkit.event.CraftEventFactory.callEntityTeleportEvent(this, to);
++                }
++                // Paper end - gateway-specific teleport event
++                if (teleEvent.isCancelled() || teleEvent.getTo() == null) {
++                    return null;
++                }
++                if (!to.equals(teleEvent.getTo())) {
++                    to = teleEvent.getTo();
++                    transition = transition.withChangedLocation(to).withVelocity(Vec3.ZERO).withRelatives(Set.of());
++                    // Paper start - Call EntityPortalExitEvent
++                    velocity = Vec3.ZERO;
++                }
++                if (this.portalProcess != null) { // if in a portal
++                    org.bukkit.entity.Entity bukkitEntity = this.getBukkitEntity();
++                    org.bukkit.util.Vector before = bukkitEntity.getVelocity();
++                    org.bukkit.util.Vector after = org.bukkit.craftbukkit.util.CraftVector.toBukkit(velocity);
++                    org.bukkit.event.entity.EntityPortalExitEvent event = new org.bukkit.event.entity.EntityPortalExitEvent(
++                        bukkitEntity,
++                        bukkitEntity.getLocation(), to.clone(),
++                        before, after
++                    );
++                    event.callEvent();
++
++                    // Only change the target if actually needed, since we reset relative flags
++                    if (event.isCancelled() || !to.equals(event.getTo()) || !after.equals(event.getAfter())) {
++                        if (event.isCancelled() || event.getTo() == null) {
++                            org.bukkit.World toWorld = to.getWorld();
++                            to = event.getFrom().clone();
++                            to.setWorld(toWorld); // cancelling doesn't cancel the teleport just the position/velocity (old quirk)
++                            velocity = org.bukkit.craftbukkit.util.CraftVector.toVec3(event.getBefore());
++                        } else {
++                            to = event.getTo().clone();
++                            velocity = org.bukkit.craftbukkit.util.CraftVector.toVec3(event.getAfter());
++                        }
++                        transition = transition.withChangedLocation(to).withRelatives(Set.of()).withVelocity(velocity);
+                     }
+-                    transition = transition.withChangedLocation(to).withRelatives(Set.of()).withVelocity(velocity);
+                 }
+-            }
+-            if (this.isRemoved()) {
++                if (this.isRemoved()) {
++                    return null;
++                }
++                // Paper end - Call EntityPortalExitEvent
++                // CraftBukkit end
++                ServerLevel newLevel = transition.newLevel();
++                if (!transfer.retarget(newLevel.lifecycle)) return null;
++                boolean otherDimension = newLevel.dimension() != serverLevel.dimension();
++                if (!transition.asPassenger()) {
++                    this.stopRiding();
++                }
++
++                return otherDimension ? this.teleportCrossDimension(serverLevel, newLevel, transition) : this.teleportSameDimension(serverLevel, transition);
++            } else {
+                 return null;
+             }
+-            // Paper end - Call EntityPortalExitEvent
+-            // CraftBukkit end
+-            ServerLevel newLevel = transition.newLevel();
+-            boolean otherDimension = newLevel.dimension() != serverLevel.dimension();
+-            if (!transition.asPassenger()) {
+-                this.stopRiding();
+-            }
+-
+-            return otherDimension ? this.teleportCrossDimension(serverLevel, newLevel, transition) : this.teleportSameDimension(serverLevel, transition);
+-        } else {
+-            return null;
+         }
+     }
+ 
 diff --git a/net/minecraft/world/level/storage/SavedDataStorage.java b/net/minecraft/world/level/storage/SavedDataStorage.java
 index 528d7abcba6222a737fa7689ee835ad2059b18bc..69e2f50406b79071707b0615b17d646124629ec9 100644
 --- a/net/minecraft/world/level/storage/SavedDataStorage.java

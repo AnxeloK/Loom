@@ -5,7 +5,7 @@ Subject: [PATCH] Coordinate asynchronous world unloads through completion
 
 
 diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
-index 9ea2019ed25706a0f6869af6589a1345443fc25b..4307d9439cac2ef10ef68baae0c204aff92ca148 100644
+index 9ea2019ed25706a0f6869af6589a1345443fc25b..34ebae5e06e97f6269dadbb0af2d492a3327e073 100644
 --- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
 +++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
 @@ -1172,6 +1172,10 @@ public final class CraftServer implements Server {
@@ -19,7 +19,7 @@ index 9ea2019ed25706a0f6869af6589a1345443fc25b..4307d9439cac2ef10ef68baae0c204af
          ChunkGenerator chunkGenerator = creator.generator();
          BiomeProvider biomeProvider = creator.biomeProvider();
  
-@@ -1317,6 +1321,81 @@ public final class CraftServer implements Server {
+@@ -1317,6 +1321,88 @@ public final class CraftServer implements Server {
          return serverLevel.getWorld();
      }
  
@@ -46,31 +46,38 @@ index 9ea2019ed25706a0f6869af6589a1345443fc25b..4307d9439cac2ef10ef68baae0c204af
 +        }
 +        final var operation = new net.minecraft.server.level.WorldUnloadOperation(handle, save);
 +        this.worldUnloads.put(handle, operation);
++        if (!this.console.isIteratingOverLevels) this.admitWorldUnload(handle, operation);
++        return operation.result();
++    }
++
++    private void admitWorldUnload(final ServerLevel handle, final net.minecraft.server.level.WorldUnloadOperation operation) {
++        final World world = handle.getWorld();
 +        try {
-+            if (!new WorldUnloadEvent(world).callEvent() || !handle.players().isEmpty()
-+                || this.console.getLevel(handle.dimension()) != handle) {
++            if (this.console.hasStopped() || this.console.getLevel(handle.dimension()) != handle || !handle.players().isEmpty()
++                || !new WorldUnloadEvent(world).callEvent() || !handle.players().isEmpty()
++                || this.console.getLevel(handle.dimension()) != handle || !handle.lifecycle.tryBeginUnload()) {
 +                this.worldUnloads.remove(handle);
 +                operation.refuse();
-+                return operation.result();
++                return;
 +            }
 +            this.worlds.remove(world.getName().toLowerCase(Locale.ROOT));
 +            this.console.detachLevel(handle);
 +            operation.start();
 +        } catch (final Throwable failure) {
-+            if (!handle.unloading) this.worldUnloads.remove(handle);
++            if (!handle.lifecycle.isUnloading()) this.worldUnloads.remove(handle);
 +            operation.fail(failure);
-+            return operation.result();
 +        }
-+        return operation.result();
 +    }
 +
 +    public void tickWorldUnloads() {
 +        for (final var entry : java.util.List.copyOf(this.worldUnloads.entrySet())) {
 +            final var operation = entry.getValue();
-+            operation.tick();
++            if (!operation.isStarted() && !operation.isDone()) this.admitWorldUnload(entry.getKey(), operation);
++            if (operation.isStarted()) operation.tick();
 +            if (operation.isDone()) {
 +                try {
-+                    if (operation.result().getNow(false)) this.worldUnloads.remove(entry.getKey());
++                    operation.result().getNow(false);
++                    this.worldUnloads.remove(entry.getKey());
 +                } catch (final java.util.concurrent.CompletionException failure) {
 +                    // Keep a failed retirement reserved; callers must not overwrite its world files.
 +                }
@@ -101,7 +108,7 @@ index 9ea2019ed25706a0f6869af6589a1345443fc25b..4307d9439cac2ef10ef68baae0c204af
      @Override
      public boolean unloadWorld(String name, boolean save) {
          return this.unloadWorld(this.getWorld(name), save);
-@@ -1330,6 +1409,7 @@ public final class CraftServer implements Server {
+@@ -1330,6 +1416,7 @@ public final class CraftServer implements Server {
          }
  
          ServerLevel handle = ((CraftWorld) world).getHandle();
@@ -110,37 +117,154 @@ index 9ea2019ed25706a0f6869af6589a1345443fc25b..4307d9439cac2ef10ef68baae0c204af
          if (this.console.getLevel(handle.dimension()) == null) {
              return false;
 diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
-index 078083c88f336afd8bfe69c770c6d3ac486e826f..38abcb35304954ab0480574db3d44ba8c68760e7 100644
+index 078083c88f336afd8bfe69c770c6d3ac486e826f..aefbaf7508b14800b9ad68c559ccdce47ba23541 100644
 --- a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
 +++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
-@@ -310,6 +310,7 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
- 
-     protected boolean teleport0(Location location, TeleportCause cause, TeleportFlag... flags) {
-         Entity entity = this.getHandle();
-+        if (((CraftWorld) location.getWorld()).getHandle().unloading) return false;
-         if (!entity.isAlive() || !entity.valid) {
-             return false;
-         }
-@@ -1155,6 +1156,7 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
+@@ -1155,6 +1155,7 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
          Location locationClone = location.clone(); // clone so we don't need to worry about mutations after this call.
  
          ServerLevel world = ((CraftWorld)locationClone.getWorld()).getHandle();
-+        if (world.unloading) return CompletableFuture.completedFuture(false);
++        if (world.lifecycle.isUnloading()) return CompletableFuture.completedFuture(false);
          CompletableFuture<Boolean> ret = new CompletableFuture<>();
  
          world.loadChunksForMoveAsync(this.getHandle().getBoundingBoxAt(locationClone.getX(), locationClone.getY(), locationClone.getZ()),
-diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
-index f343b3b97dd21aa78120b74a8bcbd93a21aaab2a..ba157c30e3bee43ce14d2074685e660257fd47b9 100644
---- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
-+++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
-@@ -1310,6 +1310,7 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
- 
-     @Override
-     protected boolean teleport0(Location location, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause cause, io.papermc.paper.entity.TeleportFlag... flags) {
-+        if (((CraftWorld) location.getWorld()).getHandle().unloading) return false;
-         if (this.getHandle().connection == null) {
-             return false;
-         }
+diff --git a/src/test/java/net/minecraft/server/level/WorldLifecycleTest.java b/src/test/java/net/minecraft/server/level/WorldLifecycleTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac792ffdafd859f48031aad80984b8b21e296bb2
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/level/WorldLifecycleTest.java
+@@ -0,0 +1,70 @@
++package net.minecraft.server.level;
++
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CountDownLatch;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++class WorldLifecycleTest {
++    @Test void unloadRefusesAnInFlightTransferAndCanStartAfterItFinishes() {
++        final WorldLifecycle lifecycle = new WorldLifecycle();
++        final var first = lifecycle.tryBeginTransfer();
++        final var second = lifecycle.tryBeginTransfer();
++        assertNotNull(first); assertNotNull(second);
++        assertFalse(lifecycle.tryBeginUnload());
++        first.close(); first.close();
++        assertFalse(lifecycle.tryBeginUnload());
++        second.close();
++        assertTrue(lifecycle.tryBeginUnload());
++        assertNull(lifecycle.tryBeginTransfer());
++        assertFalse(lifecycle.tryBeginUnload());
++    }
++
++    @Test void aRedirectRetainsTheNewDestinationBeforeReleasingTheOldOne() {
++        final WorldLifecycle original = new WorldLifecycle(), redirected = new WorldLifecycle();
++        try (var transfer = original.tryBeginTransfer()) {
++            assertNotNull(transfer);
++            assertTrue(transfer.retarget(redirected));
++            assertTrue(original.tryBeginUnload());
++            assertFalse(redirected.tryBeginUnload());
++        }
++        assertTrue(redirected.tryBeginUnload());
++    }
++
++    @Test void redirectToARetiringWorldFailsWithoutDroppingTheOriginalReservation() {
++        final WorldLifecycle original = new WorldLifecycle(), retiring = new WorldLifecycle();
++        assertTrue(retiring.tryBeginUnload());
++        try (var transfer = original.tryBeginTransfer()) {
++            assertNotNull(transfer);
++            assertFalse(transfer.retarget(retiring));
++            assertFalse(original.tryBeginUnload());
++        }
++        assertTrue(original.tryBeginUnload());
++    }
++
++    @Test void departureStaysProtectedAfterAnEventRedirectsTheDestination() {
++        final WorldLifecycle original = new WorldLifecycle(), destination = new WorldLifecycle();
++        try (var departure = original.tryBeginTransfer(); var transfer = original.tryBeginTransfer()) {
++            assertNotNull(departure); assertNotNull(transfer);
++            assertTrue(transfer.retarget(destination));
++            assertFalse(original.tryBeginUnload());
++            assertFalse(destination.tryBeginUnload());
++        }
++        assertTrue(original.tryBeginUnload());
++        assertTrue(destination.tryBeginUnload());
++    }
++
++    @Test void racingTransferAndUnloadCannotBothAcquireTheWorld() throws Exception {
++        final WorldLifecycle lifecycle = new WorldLifecycle();
++        final CountDownLatch start = new CountDownLatch(1);
++        final var entered = CompletableFuture.supplyAsync(() -> {
++            try { start.await(); } catch (InterruptedException failure) { throw new RuntimeException(failure); }
++            return lifecycle.tryBeginTransfer();
++        });
++        start.countDown();
++        final boolean retiring = lifecycle.tryBeginUnload();
++        final var transfer = entered.get(5, java.util.concurrent.TimeUnit.SECONDS);
++        assertNotEquals(retiring, transfer != null);
++        if (transfer != null) transfer.close();
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/level/WorldUnloadRoutingTest.java b/src/test/java/net/minecraft/server/level/WorldUnloadRoutingTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a8da959d941c5ab7c742d8f2a97c666e24ae48c9
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/level/WorldUnloadRoutingTest.java
+@@ -0,0 +1,55 @@
++package net.minecraft.server.level;
++
++import java.util.concurrent.CompletionException;
++import java.util.concurrent.RejectedExecutionException;
++import java.util.concurrent.atomic.AtomicBoolean;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.threading.TickRegions;
++import org.bukkit.plugin.Plugin;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class WorldUnloadRoutingTest {
++    @Test void newRegionWorkFailsInsteadOfWaitingOnARetiredWorldQueue() {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel world = mock(ServerLevel.class);
++        when(world.getServer()).thenReturn(server);
++        when(world.isUnloading()).thenReturn(true);
++        final var owner = OwnerDomainExecutor.region(world, 0, 0, "retired-world-test");
++        final AtomicBoolean mutated = new AtomicBoolean();
++        final var result = OwnerDomainExecutor.supply(owner, () -> { mutated.set(true); return true; });
++        assertTrue(result.isDone());
++        assertInstanceOf(RejectedExecutionException.class, assertThrows(CompletionException.class, result::join).getCause());
++        assertThrows(RejectedExecutionException.class, () -> OwnerDomainExecutor.execute(owner, () -> mutated.set(true)));
++        assertFalse(mutated.get());
++    }
++
++    @Test void possessingAnOldOwnerDoesNotAdmitNewWorkAfterRetirement() {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel world = mock(ServerLevel.class);
++        when(world.getServer()).thenReturn(server);
++        when(world.isUnloading()).thenReturn(true);
++        final var owner = OwnerDomainExecutor.region(world, 0, 0, "retired-inline-test");
++        try (var ignored = OwnerDomainExecutor.enter(owner)) {
++            final var result = OwnerDomainExecutor.supply(owner, () -> fail("Mutated a retiring world"));
++            assertInstanceOf(RejectedExecutionException.class, assertThrows(CompletionException.class, result::join).getCause());
++        }
++    }
++    @Test void retiringAWorldCancelsItsDelayedTasksAndRejectsNewOnes() {
++        final ServerLevel world = mock(ServerLevel.class);
++        final Plugin plugin = mock(Plugin.class);
++        when(plugin.isEnabled()).thenReturn(true);
++        final var delayed = TickRegions.runDelayed(plugin, world, 0, 0, task -> fail("Retired task ran"), 100);
++        assertFalse(delayed.isCancelled());
++        when(world.isUnloading()).thenReturn(true);
++        TickRegions.clearWorldState(world);
++        assertTrue(delayed.isCancelled());
++        assertThrows(RejectedExecutionException.class, () -> TickRegions.run(plugin, world, 0, 0, task -> {}));
++        assertFalse(TickRegions.hasWorldUnloadWork(world));
++    }
++
++}
 diff --git a/src/test/java/net/minecraft/world/level/storage/SavedDataCloseAsyncTest.java b/src/test/java/net/minecraft/world/level/storage/SavedDataCloseAsyncTest.java
 new file mode 100644
 index 0000000000000000000000000000000000000000..afdeaf5a3ef9981ad7729003a5fb43ea5ea40af1
