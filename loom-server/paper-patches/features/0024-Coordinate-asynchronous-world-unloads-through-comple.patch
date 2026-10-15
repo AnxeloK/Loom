@@ -213,10 +213,10 @@ index 0000000000000000000000000000000000000000..2f7d47b9ab62ea5eb413d0e7144cfa56
 +}
 diff --git a/src/test/java/net/minecraft/server/level/WorldUnloadRoutingTest.java b/src/test/java/net/minecraft/server/level/WorldUnloadRoutingTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..a8da959d941c5ab7c742d8f2a97c666e24ae48c9
+index 0000000000000000000000000000000000000000..b551fd8344cc0c6aa31ef0f6bb61454708379edf
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/level/WorldUnloadRoutingTest.java
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,93 @@
 +package net.minecraft.server.level;
 +
 +import java.util.concurrent.CompletionException;
@@ -269,6 +269,44 @@ index 0000000000000000000000000000000000000000..a8da959d941c5ab7c742d8f2a97c666e
 +        assertTrue(delayed.isCancelled());
 +        assertThrows(RejectedExecutionException.class, () -> TickRegions.run(plugin, world, 0, 0, task -> {}));
 +        assertFalse(TickRegions.hasWorldUnloadWork(world));
++    }
++
++    @Test void retirementDrainsMultipleMailboxRegionsUnderTheFullLevelLease() throws InterruptedException {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel world = mock(ServerLevel.class);
++        when(world.getServer()).thenReturn(server);
++        when(world.dimension()).thenReturn(net.minecraft.world.level.Level.OVERWORLD);
++        final var executions = new java.util.concurrent.atomic.AtomicInteger();
++        for (int i = 0; i < 16; i++) {
++            final int chunkX = i * 128;
++            TickRegions.sendCrossRegionMessage(world, chunkX, 0, "retirement-test", () -> {
++                if (TickRegions.isCurrentThreadOwnerQuiet(world, chunkX, 0)
++                    && OwnerDomainExecutor.isRegionOwner(world, chunkX, 0)) executions.incrementAndGet();
++            });
++        }
++        when(world.isUnloading()).thenReturn(true);
++        final var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
++        final Thread thread = new ca.spottedleaf.moonrise.common.util.TickThread(() -> {
++            try (var global = OwnerDomainExecutor.enterGlobal(server, "retirement-test")) {
++                final var context = TickRegions.pushLevelContext(world);
++                try {
++                    TickRegions.drainWorldForUnload(world);
++                    assertTrue(TickRegions.isCurrentThreadOwnerQuiet(world, Integer.MIN_VALUE, Integer.MIN_VALUE,
++                        Integer.MAX_VALUE, Integer.MAX_VALUE));
++                } finally {
++                    TickRegions.popContext(context);
++                    TickRegions.clearWorldState(world);
++                }
++            } catch (final Throwable thrown) {
++                failure.set(thrown);
++            }
++        }, "world-unload-routing-test");
++        thread.setDaemon(true);
++        thread.start();
++        thread.join(15_000);
++        assertFalse(thread.isAlive(), "World retirement did not finish");
++        if (failure.get() != null) fail(failure.get());
++        assertEquals(16, executions.get());
 +    }
 +
 +}

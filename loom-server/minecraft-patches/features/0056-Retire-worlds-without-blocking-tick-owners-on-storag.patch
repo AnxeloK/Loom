@@ -410,10 +410,10 @@ index 0000000000000000000000000000000000000000..242ef9302937e2b54ef961bde69c8bb6
 +}
 diff --git a/net/minecraft/server/level/WorldUnloadOperation.java b/net/minecraft/server/level/WorldUnloadOperation.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..9808234b135674bda26425335fae0bab620fa58d
+index 0000000000000000000000000000000000000000..45ecc01bc2b6d623faef30d922e41044038308e3
 --- /dev/null
 +++ b/net/minecraft/server/level/WorldUnloadOperation.java
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,143 @@
 +package net.minecraft.server.level;
 +
 +import ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO;
@@ -490,11 +490,14 @@ index 0000000000000000000000000000000000000000..9808234b135674bda26425335fae0bab
 +            if (!this.captured) {
 +                // Completion callbacks queued by generation still need their original level owner.
 +                // The level no longer simulates, but its finite existing task set must finish.
-+                try (var ignored = OwnerDomainExecutor.enter(OwnerDomainExecutor.region(
-+                    this.world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, "drain-world-unload"
-+                ))) {
++                final var context = TickRegions.tryPushRegionContext(this.world,
++                    Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE);
++                if (context == null) return;
++                try {
 +                    this.scheduler().executeAllRecentlyQueuedMainThreadTasks();
 +                    TickRegions.drainWorldForUnload(this.world);
++                } finally {
++                    TickRegions.popContext(context);
 +                }
 +            }
 +            if (!this.work.isDone() || (!this.captured && (this.scheduler().hasPendingMainThreadTasks() || TickRegions.hasWorldUnloadWork(this.world)))) return;
@@ -772,7 +775,7 @@ index 727725aca6cfedebded05814c76808047938641d..c17a85b4551720e764b8046432aea72c
  
      public void sendActivePlayerEffects(final ServerPlayer player) {
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
-index ecfcc549ee95b301b89205786b04e296ea23db01..89cbbab8393f5cf012af4d032d7df2127ce2d6fc 100644
+index ecfcc549ee95b301b89205786b04e296ea23db01..c625db3480a40169d06cacce8b5cf20e2a5fa06a 100644
 --- a/net/minecraft/server/threading/TickRegions.java
 +++ b/net/minecraft/server/threading/TickRegions.java
 @@ -607,7 +607,8 @@ public class TickRegions {
@@ -785,7 +788,7 @@ index ecfcc549ee95b301b89205786b04e296ea23db01..89cbbab8393f5cf012af4d032d7df212
          REGION_RUNTIME.clearWorld(world);
      }
  
-@@ -1468,10 +1469,34 @@ public class TickRegions {
+@@ -1468,10 +1469,35 @@ public class TickRegions {
          return Map.copyOf(diagnostics);
      }
  
@@ -805,7 +808,8 @@ index ecfcc549ee95b301b89205786b04e296ea23db01..89cbbab8393f5cf012af4d032d7df212
 +        if (state != null) {
 +            state.drainRegionContinuations();
 +            state.drainFullLevelContinuations();
-+            state.drainMailbox();
++            // Retirement already owns the whole level; queued messages need no parallel dispatch.
++            state.drainMailbox(false);
 +        }
 +    }
 +
@@ -820,7 +824,7 @@ index ecfcc549ee95b301b89205786b04e296ea23db01..89cbbab8393f5cf012af4d032d7df212
      public static void tickWorld(final ServerLevel world) {
          stateFor(world).tickScheduler();
      }
-@@ -1852,11 +1877,22 @@ public class TickRegions {
+@@ -1852,11 +1878,22 @@ public class TickRegions {
              java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
  
          private WorldSchedulerState(final ServerLevel world) {
@@ -843,7 +847,29 @@ index ecfcc549ee95b301b89205786b04e296ea23db01..89cbbab8393f5cf012af4d032d7df212
                  this.tasksByDeadline.computeIfAbsent(this.tickCount + delayTicks, ignored -> new ArrayList<>()).add(task);
                  ++this.scheduledTaskCount;
              }
-@@ -1977,12 +2013,14 @@ public class TickRegions {
+@@ -1951,6 +1988,10 @@ public class TickRegions {
+         }
+ 
+         private void drainMailbox() {
++            this.drainMailbox(true);
++        }
++
++        private void drainMailbox(final boolean parallel) {
+             final List<CrossRegionMessage> toDeliver = this.collectMailboxBudgeted();
+             if (toDeliver.isEmpty()) {
+                 return;
+@@ -1958,6 +1999,10 @@ public class TickRegions {
+ 
+             final long drainStart = Util.getNanos();
+             try {
++                if (!parallel) {
++                    for (final CrossRegionMessage message : toDeliver) this.runMailboxMessage(message);
++                    return;
++                }
+                 if (STRICT_RUNTIME_MODE) {
+                     this.drainMailboxStrict(toDeliver);
+                     return;
+@@ -1977,12 +2022,14 @@ public class TickRegions {
  
          private void enqueueFullLevelContinuation(final Runnable action) {
              synchronized (this.lock) {
@@ -858,7 +884,7 @@ index ecfcc549ee95b301b89205786b04e296ea23db01..89cbbab8393f5cf012af4d032d7df212
                  this.regionContinuations.addLast(continuation);
              }
          }
-@@ -2398,6 +2436,7 @@ public class TickRegions {
+@@ -2398,6 +2445,7 @@ public class TickRegions {
  
          private void enqueueMailbox(final CrossRegionMessage message) {
              synchronized (this.lock) {
