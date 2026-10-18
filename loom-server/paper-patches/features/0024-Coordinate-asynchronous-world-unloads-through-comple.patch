@@ -213,10 +213,10 @@ index 0000000000000000000000000000000000000000..2f7d47b9ab62ea5eb413d0e7144cfa56
 +}
 diff --git a/src/test/java/net/minecraft/server/level/WorldUnloadRoutingTest.java b/src/test/java/net/minecraft/server/level/WorldUnloadRoutingTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..b551fd8344cc0c6aa31ef0f6bb61454708379edf
+index 0000000000000000000000000000000000000000..9e66bdc6748dfbbc64ad7ae6ecc224fd6fb4aaf8
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/level/WorldUnloadRoutingTest.java
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,133 @@
 +package net.minecraft.server.level;
 +
 +import java.util.concurrent.CompletionException;
@@ -233,6 +233,46 @@ index 0000000000000000000000000000000000000000..b551fd8344cc0c6aa31ef0f6bb614547
 +
 +@Normal
 +class WorldUnloadRoutingTest {
++    @Test void storageCloseCannotRunInlineOnTheWorkerCompletingItsWrites() throws Exception {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final var writes = new java.util.concurrent.CompletableFuture<Void>();
++        final Thread completingWorker = Thread.currentThread();
++        final var closed = new AtomicBoolean();
++        final var close = WorldUnloadOperation.closeAfterWrites(server, writes, failure -> {
++            assertNull(failure);
++            assertNotSame(completingWorker, Thread.currentThread(), "Storage shutdown must release the completing I/O worker");
++            assertEquals(OwnerDomainExecutor.Domain.ASYNC_IO, OwnerDomainExecutor.currentDomain());
++            closed.set(true);
++        });
++        assertFalse(close.isDone());
++        assertFalse(closed.get());
++        try (var owner = OwnerDomainExecutor.enter(OwnerDomainExecutor.asyncIo(server, "complete-world-writes"))) {
++            writes.complete(null);
++        }
++        close.get(10, java.util.concurrent.TimeUnit.SECONDS);
++        assertTrue(closed.get());
++    }
++
++    @Test void failedWritesStillCloseStorageOnItsOwnerAndRetainTheFailure() throws Exception {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final var writes = new java.util.concurrent.CompletableFuture<Void>();
++        final var original = new java.io.IOException("write failed");
++        final var closed = new AtomicBoolean();
++        final var close = WorldUnloadOperation.closeAfterWrites(server, writes, failure -> {
++            assertSame(original, failure);
++            assertEquals(OwnerDomainExecutor.Domain.ASYNC_IO, OwnerDomainExecutor.currentDomain());
++            closed.set(true);
++            throw new CompletionException(failure);
++        });
++        try (var owner = OwnerDomainExecutor.enter(OwnerDomainExecutor.asyncIo(server, "complete-failed-world-writes"))) {
++            writes.completeExceptionally(original);
++        }
++        final var failure = assertThrows(java.util.concurrent.ExecutionException.class,
++            () -> close.get(10, java.util.concurrent.TimeUnit.SECONDS));
++        assertSame(original, failure.getCause());
++        assertTrue(closed.get());
++    }
++
 +    @Test void newRegionWorkFailsInsteadOfWaitingOnARetiredWorldQueue() {
 +        final MinecraftServer server = mock(MinecraftServer.class);
 +        final ServerLevel world = mock(ServerLevel.class);

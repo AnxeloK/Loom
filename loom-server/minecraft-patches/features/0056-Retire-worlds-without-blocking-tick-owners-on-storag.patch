@@ -410,10 +410,10 @@ index 0000000000000000000000000000000000000000..242ef9302937e2b54ef961bde69c8bb6
 +}
 diff --git a/net/minecraft/server/level/WorldUnloadOperation.java b/net/minecraft/server/level/WorldUnloadOperation.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..45ecc01bc2b6d623faef30d922e41044038308e3
+index 0000000000000000000000000000000000000000..307a84f889a3d7e2db187e80bce99229261d5365
 --- /dev/null
 +++ b/net/minecraft/server/level/WorldUnloadOperation.java
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,154 @@
 +package net.minecraft.server.level;
 +
 +import ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO;
@@ -423,6 +423,9 @@ index 0000000000000000000000000000000000000000..45ecc01bc2b6d623faef30d922e41044
 +import java.util.concurrent.CompletableFuture;
 +import java.util.concurrent.CompletionException;
 +import java.util.concurrent.TimeUnit;
++import java.util.function.Consumer;
++import net.minecraft.util.Util;
++import net.minecraft.server.MinecraftServer;
 +import net.minecraft.server.threading.TickRegions;
 +import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
 +
@@ -524,11 +527,19 @@ index 0000000000000000000000000000000000000000..45ecc01bc2b6d623faef30d922e41044
 +        }
 +        final CompletableFuture<?> savedData = this.world.getDataStorage().closeAsync();
 +        final CompletableFuture<Void> chunks = MoonriseRegionFileIO.flushAsync(this.world.getServer(), List.of(this.world));
-+        this.work = CompletableFuture.allOf(savedData, chunks, this.world.getServer().pendingSave()).handle((ignored, failure) ->
-+            OwnerDomainExecutor.supply(OwnerDomainExecutor.asyncIo(this.world.getServer(), "close-world-storage"), () -> {
-+                this.closeStorage(failure);
-+                return null;
-+            })
++        this.work = closeAfterWrites(this.world.getServer(),
++            CompletableFuture.allOf(savedData, chunks, this.world.getServer().pendingSave()), this::closeStorage);
++    }
++
++    static CompletableFuture<Void> closeAfterWrites(final MinecraftServer server, final CompletableFuture<?> writes,
++                                                     final Consumer<Throwable> close) {
++        // A write completion can still own the I/O task that haltIO must wait for.
++        // Always hand off first, even when that completion already has an I/O owner token.
++        return writes.handleAsync((ignored, failure) ->
++            OwnerDomainExecutor.supply(OwnerDomainExecutor.asyncIo(server, "close-world-storage"), () -> {
++                close.accept(failure);
++                return (Void)null;
++            }), Util.nonCriticalIoPool()
 +        ).thenCompose(future -> future);
 +    }
 +
