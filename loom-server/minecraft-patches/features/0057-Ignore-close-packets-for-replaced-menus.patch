@@ -1,0 +1,19 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Thu, 22 Oct 2026 16:02:56 +0300
+Subject: [PATCH] Ignore close packets for replaced menus
+
+
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index 86cc8a9249b5b9f1df8237e31169765a7b701b57..6af717544c04982d1befe28caed7bd51d91e7a5e 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -3235,6 +3235,8 @@ public class ServerGamePacketListenerImpl
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
+ 
+         if (this.player.isImmobile()) return; // CraftBukkit
++        // A queued close can arrive after a plugin has opened another menu.
++        if (packet.getContainerId() != this.player.containerMenu.containerId) return;
+         CraftEventFactory.handleInventoryCloseEvent(this.player, reason); // CraftBukkit // Paper
+         this.player.doCloseContainer();
+     }

@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Thu, 22 Oct 2026 15:54:39 +0300
+Subject: [PATCH] Test inventory close packet ownership
+
+
+diff --git a/src/test/java/net/minecraft/server/network/ContainerCloseTest.java b/src/test/java/net/minecraft/server/network/ContainerCloseTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..49887df3fa687ea5e6ebd0825dc8fdcf9559d05c
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/network/ContainerCloseTest.java
+@@ -0,0 +1,84 @@
++package net.minecraft.server.network;
++
++import net.minecraft.network.protocol.PacketUtils;
++import net.minecraft.network.protocol.game.ServerboundContainerClosePacket;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.world.entity.player.Player;
++import net.minecraft.world.inventory.AbstractContainerMenu;
++import net.minecraft.world.item.ItemStack;
++import org.bukkit.craftbukkit.event.CraftEventFactory;
++import org.bukkit.event.inventory.InventoryCloseEvent.Reason;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import org.mockito.MockedStatic;
++import static org.mockito.Mockito.*;
++
++@Normal
++class ContainerCloseTest {
++    @Test void lateCloseDoesNotCloseTheReplacementMenuOrPublishItsCloseEvent() {
++        try (Fixture f = new Fixture(8)) {
++            f.connection.handleContainerClose(new ServerboundContainerClosePacket(7));
++            f.events.verifyNoInteractions();
++            verify(f.player, never()).doCloseContainer();
++        }
++    }
++
++    @Test void closeForThePlayerInventoryCannotCloseAnOpenMenu() {
++        try (Fixture f = new Fixture(8)) {
++            f.connection.handleContainerClose(new ServerboundContainerClosePacket(0));
++            f.events.verifyNoInteractions();
++            verify(f.player, never()).doCloseContainer();
++        }
++    }
++
++    @Test void matchingClientClosePublishesThePlayerReasonAndClosesTheMenu() {
++        try (Fixture f = new Fixture(8)) {
++            f.connection.handleContainerClose(new ServerboundContainerClosePacket(8));
++            f.events.verify(() -> CraftEventFactory.handleInventoryCloseEvent(f.player, Reason.PLAYER));
++            verify(f.player).doCloseContainer();
++        }
++    }
++
++    @Test void matchingPluginClosePreservesItsReason() {
++        try (Fixture f = new Fixture(8)) {
++            f.connection.handleContainerClose(new ServerboundContainerClosePacket(8), Reason.OPEN_NEW);
++            f.events.verify(() -> CraftEventFactory.handleInventoryCloseEvent(f.player, Reason.OPEN_NEW));
++            verify(f.player).doCloseContainer();
++        }
++    }
++
++    @Test void matchingPlayerInventoryCloseStillWorks() {
++        try (Fixture f = new Fixture(0)) {
++            f.connection.handleContainerClose(new ServerboundContainerClosePacket(0));
++            f.events.verify(() -> CraftEventFactory.handleInventoryCloseEvent(f.player, Reason.PLAYER));
++            verify(f.player).doCloseContainer();
++        }
++    }
++
++    @Test void immobilePlayersKeepTheirExistingCloseProtection() {
++        try (Fixture f = new Fixture(8)) {
++            when(f.player.isImmobile()).thenReturn(true);
++            f.connection.handleContainerClose(new ServerboundContainerClosePacket(8));
++            f.events.verifyNoInteractions();
++            verify(f.player, never()).doCloseContainer();
++        }
++    }
++
++    private static final class Fixture implements AutoCloseable {
++        final ServerPlayer player = mock(ServerPlayer.class);
++        final ServerGamePacketListenerImpl connection = mock(ServerGamePacketListenerImpl.class);
++        final MockedStatic<PacketUtils> thread = mockStatic(PacketUtils.class);
++        final MockedStatic<CraftEventFactory> events = mockStatic(CraftEventFactory.class);
++        Fixture(int id) {
++            connection.player = player;
++            player.containerMenu = new AbstractContainerMenu(null, id) {
++                @Override public org.bukkit.inventory.InventoryView getBukkitView() { return null; }
++                @Override public ItemStack quickMoveStack(Player player, int slot) { return ItemStack.EMPTY; }
++                @Override public boolean stillValid(Player player) { return true; }
++            };
++            doCallRealMethod().when(connection).handleContainerClose(any(ServerboundContainerClosePacket.class));
++            doCallRealMethod().when(connection).handleContainerClose(any(ServerboundContainerClosePacket.class), any(Reason.class));
++        }
++        @Override public void close() { events.close(); thread.close(); }
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/network/ContainerCloseTestSuite.java b/src/test/java/net/minecraft/server/network/ContainerCloseTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..7af6d2d268abd6fd226d0d8f6e227aa8cb96eabb
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/network/ContainerCloseTestSuite.java
+@@ -0,0 +1,13 @@
++package net.minecraft.server.network;
++
++import org.junit.platform.suite.api.ConfigurationParameter;
++import org.junit.platform.suite.api.IncludeTags;
++import org.junit.platform.suite.api.SelectClasses;
++import org.junit.platform.suite.api.Suite;
++
++@Suite
++@IncludeTags("Normal")
++@SelectClasses(ContainerCloseTest.class)
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class ContainerCloseTestSuite {
++}
