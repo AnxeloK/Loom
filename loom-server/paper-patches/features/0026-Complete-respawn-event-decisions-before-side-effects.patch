@@ -1,0 +1,439 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 23 Oct 2026 11:38:54 +0300
+Subject: [PATCH] Complete respawn event decisions before side effects
+
+
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+index c892e32d3af92a15672fb2b795c24960b5e23dd1..f7ba75d4a58fac71ec3b3a05baf6617441141183 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+@@ -50,22 +50,23 @@ class PaperEventManager {
+         // Loom start - defer synchronous events fired on a region worker thread during parallel ticking to
+         // the owning (main) thread's serial replay, so plugin handlers run single-threaded as under serial
+         // ticking. This keeps legacy main-thread-only plugins safe with the parallel flags enabled.
+-        // Explosion callers consume cancellation, radius, yield and the mutable block list before
+-        // returning. Use the owner/compatibility dispatch below so listeners decide before side effects.
+-        final boolean explosionDecision = event instanceof org.bukkit.event.entity.ExplosionPrimeEvent
++        // Explosion and respawn callers consume mutable results before returning. Keep these decisions
++        // synchronous on their firing owner so listeners finish before the caller applies side effects.
++        final boolean inlineDecision = event instanceof org.bukkit.event.player.PlayerRespawnEvent
++            || event instanceof org.bukkit.event.entity.ExplosionPrimeEvent
+             || event instanceof org.bukkit.event.entity.EntityExplodeEvent
+             || event instanceof org.bukkit.event.block.BlockExplodeEvent
+             || event instanceof org.bukkit.event.block.TNTPrimeEvent
+             || event instanceof org.bukkit.event.block.BlockIgniteEvent;
+-        if (explosionDecision) {
++        if (inlineDecision) {
+             net.minecraft.server.threading.RegionTickStaging.stageDecisionBoundary();
+         }
+-        if (!event.isAsynchronous() && !explosionDecision && net.minecraft.server.threading.RegionTickStaging.stageEvent(event)) {
++        if (!event.isAsynchronous() && !inlineDecision && net.minecraft.server.threading.RegionTickStaging.stageEvent(event)) {
+             return;
+         }
+         // Events fired on a region worker outside a staging window are routed back to their owner here.
+         // Staged-veto events, whose cancellation gates a synchronous side effect, fall through unchanged.
+-        if (!event.isAsynchronous() && !explosionDecision && net.minecraft.server.threading.RegionTickStaging.deferEventToOwner(event)) {
++        if (!event.isAsynchronous() && !inlineDecision && net.minecraft.server.threading.RegionTickStaging.deferEventToOwner(event)) {
+             return;
+         }
+         // Loom end
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/EventSemanticIndex.java b/src/main/java/io/papermc/paper/plugin/manager/compat/EventSemanticIndex.java
+index 021625f2d6af9ca62fedbb97cd1695b6f353634e..feee5d71b1fb1bac6ab5f9a933107a3cad3fd01d 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/compat/EventSemanticIndex.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/compat/EventSemanticIndex.java
+@@ -63,9 +63,10 @@ public final class EventSemanticIndex {
+             hasMonitor |= lane(listener.getPriority()) == Lane.MONITOR;
+         }
+ 
+-        // All Bukkit dispatches are ordered, but cancellable events are decision-critical.
+-        final boolean orderedDecision = cancellable || listeners.length > 1;
+-        final boolean observerOnly = !cancellable && !hasMonitor;
++        // A respawn listener chooses a destination even though the event is not cancellable.
++        final boolean mutableResult = event instanceof org.bukkit.event.player.PlayerRespawnEvent;
++        final boolean orderedDecision = cancellable || mutableResult || listeners.length > 1;
++        final boolean observerOnly = !cancellable && !mutableResult && !hasMonitor;
+         return new EventSemantics(event.getEventName(), cancellable, orderedDecision, hasMonitor, observerOnly);
+     }
+ 
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/RespawnDecisionTest.java b/src/test/java/io/papermc/paper/plugin/manager/RespawnDecisionTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..2ea15f5ae4e3b579cbac7a565c151d1a23eb5c43
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/RespawnDecisionTest.java
+@@ -0,0 +1,98 @@
++package io.papermc.paper.plugin.manager;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import io.papermc.paper.plugin.manager.compat.EventSemanticIndex;
++import java.util.List;
++import java.util.UUID;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.logging.Logger;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.threading.RegionTickStaging;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.level.ChunkPos;
++import org.bukkit.Location;
++import org.bukkit.Server;
++import org.bukkit.World;
++import org.bukkit.event.EventPriority;
++import org.bukkit.event.Listener;
++import org.bukkit.event.player.PlayerChangedWorldEvent;
++import org.bukkit.event.player.PlayerRespawnEvent;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.RegisteredListener;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class RespawnDecisionTest {
++    @Test void respawnLocationIsFinalBeforeReturningEvenInsideAStagingWindow() {
++        for (boolean staging : List.of(false, true)) {
++            Server server = mock(Server.class);
++            when(server.isPrimaryThread()).thenReturn(true);
++            when(server.getLogger()).thenReturn(Logger.getLogger("RespawnDecisionTest"));
++            PaperEventManager manager = new PaperEventManager(server);
++            org.bukkit.entity.Player player = mock(org.bukkit.entity.Player.class);
++            World world = mock(World.class);
++            Location landing = new Location(world, 120.5, 75, -250.5);
++            PlayerRespawnEvent event = new PlayerRespawnEvent(player, new Location(world, 8.5, 70, 8.5), false);
++            AtomicInteger calls = new AtomicInteger();
++            PluginMeta meta = mock(PluginMeta.class);
++            when(meta.getName()).thenReturn("RespawnDestination");
++            when(meta.getMainClass()).thenReturn("example.RespawnDestination");
++            when(meta.getVersion()).thenReturn("1.0");
++            when(meta.getPluginDependencies()).thenReturn(List.of());
++            when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++            Plugin plugin = mock(Plugin.class);
++            when(plugin.getPluginMeta()).thenReturn(meta);
++            when(plugin.getName()).thenReturn("RespawnDestination");
++            when(plugin.getLogger()).thenReturn(Logger.getLogger("RespawnDecisionTest"));
++            when(plugin.isEnabled()).thenReturn(true);
++            RegisteredListener listener = new RegisteredListener(new Listener() {}, (ignored, delivered) -> {
++                event.setRespawnLocation(landing);
++                calls.incrementAndGet();
++            }, EventPriority.NORMAL, plugin, false);
++            event.getHandlers().register(listener);
++            ServerLevel level = mock(ServerLevel.class);
++            MinecraftServer runtime = mock(MinecraftServer.class);
++            when(level.getServer()).thenReturn(runtime);
++            ServerPlayer handle = mock(ServerPlayer.class);
++            when(handle.level()).thenReturn(level);
++            when(handle.chunkPosition()).thenReturn(new ChunkPos(0, 0));
++            when(handle.getUUID()).thenReturn(UUID.randomUUID());
++            RegionTickStaging.Session session = RegionTickStaging.newSession();
++            try (var owner = OwnerDomainExecutor.enterRegion(level, 0, 0, 0, 0, "test-respawn")) {
++                if (staging) RegionTickStaging.begin(session);
++                OwnerDomainExecutor.runPlayerNow(handle, "test-respawn-decision", () -> manager.callEvent(event));
++                assertEquals(landing, event.getRespawnLocation());
++                assertEquals(1, calls.get());
++            } finally {
++                RegionTickStaging.end();
++                event.getHandlers().unregister(listener);
++            }
++            org.bukkit.plugin.PluginManager replay = mock(org.bukkit.plugin.PluginManager.class);
++            try (var bukkit = mockStatic(org.bukkit.Bukkit.class)) {
++                bukkit.when(org.bukkit.Bukkit::getPluginManager).thenReturn(replay);
++                RegionTickStaging.applyAndClear(session, null);
++            }
++            verifyNoInteractions(replay);
++        }
++    }
++
++    @Test void aSingleRespawnListenerIsADecisionWhileWorldChangeRemainsAnObserver() {
++        EventSemanticIndex index = new EventSemanticIndex();
++        RegisteredListener listener = mock(RegisteredListener.class);
++        when(listener.getPriority()).thenReturn(EventPriority.NORMAL);
++        RegisteredListener[] listeners = {listener};
++        org.bukkit.entity.Player player = mock(org.bukkit.entity.Player.class);
++        World world = mock(World.class);
++        EventSemanticIndex.EventSemantics respawn = index.resolve(new PlayerRespawnEvent(player, new Location(world, 0, 64, 0), false), listeners);
++        assertTrue(respawn.orderedDecision());
++        assertFalse(respawn.observerOnly());
++        EventSemanticIndex.EventSemantics changed = index.resolve(new PlayerChangedWorldEvent(player, world), listeners);
++        assertFalse(changed.orderedDecision());
++        assertTrue(changed.observerOnly());
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/level/ServerPlayerRespawnDecisionTest.java b/src/test/java/net/minecraft/server/level/ServerPlayerRespawnDecisionTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c8f49074bed322ed8d55bf00a0e4396fa0f181a
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/level/ServerPlayerRespawnDecisionTest.java
+@@ -0,0 +1,271 @@
++package net.minecraft.server.level;
++
++import java.lang.reflect.Field;
++import java.util.ArrayDeque;
++import java.util.List;
++import java.util.Optional;
++import java.util.UUID;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionException;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.function.Consumer;
++import java.util.function.Supplier;
++import net.minecraft.core.BlockPos;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.network.ServerGamePacketListenerImpl;
++import net.minecraft.server.players.PlayerList;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.server.threading.runtime.OwnershipRouter;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.level.chunk.ChunkAccess;
++import net.minecraft.world.level.portal.TeleportTransition;
++import net.minecraft.world.level.storage.LevelData;
++import net.minecraft.world.phys.Vec3;
++import org.bukkit.Location;
++import org.bukkit.craftbukkit.CraftServer;
++import org.bukkit.craftbukkit.CraftWorld;
++import org.bukkit.craftbukkit.entity.CraftPlayer;
++import org.bukkit.event.player.PlayerRespawnEvent;
++import org.bukkit.plugin.PluginManager;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import org.mockito.MockedStatic;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class ServerPlayerRespawnDecisionTest {
++    @Test void fallbackWaitsForThePlayerDecisionBeforePublishingItsDestination() throws Exception {
++        try (Fixture f = new Fixture()) {
++            f.listener = event -> event.setRespawnLocation(f.personalLanding);
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startDefault();
++            assertFalse(result.isDone());
++            verifyNoInteractions(f.plugins);
++            f.drain();
++            assertEquals(new Vec3(120.5, 75, -250.5), result.join().transition().position());
++            assertEquals(1, f.events.get());
++        }
++    }
++
++    @Test void unchangedAnchorConsumesOneChargeAfterTheListenerFinishes() throws Exception {
++        try (Fixture f = new Fixture()) {
++            f.listener = event -> assertEquals(0, f.charges.get());
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startAnchor();
++            assertEquals(0, f.charges.get());
++            f.drain();
++            assertTrue(result.join().isAnchorSpawn());
++            assertEquals(1, f.charges.get());
++            assertEquals(1, f.events.get());
++        }
++    }
++
++    @Test void redirectedAnchorLeavesItsChargeUntouched() throws Exception {
++        try (Fixture f = new Fixture()) {
++            f.listener = event -> event.setRespawnLocation(f.personalLanding);
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startAnchor();
++            f.drain();
++            assertEquals(new Vec3(120.5, 75, -250.5), result.join().transition().position());
++            assertEquals(0, f.charges.get());
++        }
++    }
++
++    @Test void disconnectBeforeTheDecisionCannotPublishAnEventOrUseTheAnchor() throws Exception {
++        try (Fixture f = new Fixture()) {
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startAnchor();
++            when(f.connection.isDisconnected()).thenReturn(true);
++            f.drain();
++            assertNull(result.join());
++            verifyNoInteractions(f.plugins);
++            assertEquals(0, f.charges.get());
++        }
++    }
++
++    @Test void aReplacementConnectionCannotReceiveTheOldRespawn() throws Exception {
++        try (Fixture f = new Fixture()) {
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startDefault();
++            f.connection.player = mock(ServerPlayer.class);
++            f.drain();
++            assertNull(result.join());
++            verifyNoInteractions(f.plugins);
++        }
++    }
++
++    @Test void disconnectDuringTheListenerDoesNotConsumeAnAnchorCharge() throws Exception {
++        try (Fixture f = new Fixture()) {
++            f.listener = event -> when(f.connection.isDisconnected()).thenReturn(true);
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startAnchor();
++            f.drain();
++            assertNull(result.join());
++            assertEquals(0, f.charges.get());
++        }
++    }
++
++    @Test void aRetiredPlayerCannotStartAnotherSearchThroughTheMissingBlockFallback() throws Exception {
++        try (Fixture f = new Fixture()) {
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startAnchor();
++            when(f.players.getPlayer(f.id)).thenReturn(mock(ServerPlayer.class));
++            f.drain();
++            assertTrue(result.isDone());
++            assertNull(result.join());
++            f.finder.verifyNoInteractions();
++            verifyNoInteractions(f.plugins);
++        }
++    }
++
++    @Test void worldRetirementAfterPreparationCannotPublishAnEventOrUseTheAnchor() throws Exception {
++        try (Fixture f = new Fixture()) {
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startAnchor();
++            when(f.destination.isUnloading()).thenReturn(true);
++            f.drain();
++            assertInstanceOf(java.util.concurrent.RejectedExecutionException.class,
++                assertThrows(CompletionException.class, result::join).getCause());
++            verifyNoInteractions(f.plugins);
++            assertEquals(0, f.charges.get());
++        }
++    }
++
++    @Test void readinessIsRecheckedAfterTheGlobalHandoffBeforeUsingTheAnchor() throws Exception {
++        try (Fixture f = new Fixture()) {
++            f.router.when(() -> OwnershipRouter.areChunksReady(eq(f.destination), anyInt(), anyInt(), anyInt(), anyInt(), any()))
++                .thenReturn(false, true);
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startAnchor();
++            f.drain();
++            assertTrue(result.join().isAnchorSpawn());
++            assertEquals(1, f.events.get());
++            assertEquals(1, f.charges.get());
++            f.positions.verify(() -> ServerPlayer.findRespawnAndUseSpawnBlock(eq(f.destination), any(), eq(true)), times(1));
++        }
++    }
++
++    @Test void chunkPreparationFailureReachesTheCallerWithoutAnEvent() throws Exception {
++        try (Fixture f = new Fixture()) {
++            IllegalStateException failure = new IllegalStateException("World retired during respawn");
++            f.readinessFailure = failure;
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startAnchor();
++            f.drain();
++            assertSame(failure, assertThrows(CompletionException.class, result::join).getCause());
++            verifyNoInteractions(f.plugins);
++            assertEquals(0, f.charges.get());
++        }
++    }
++
++    private static final class Fixture implements AutoCloseable {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel source = mock(ServerLevel.class);
++        final ServerLevel destination = mock(ServerLevel.class);
++        final ServerPlayer player = mock(ServerPlayer.class);
++        final ServerGamePacketListenerImpl connection = mock(ServerGamePacketListenerImpl.class);
++        final CraftWorld world = mock(CraftWorld.class);
++        final CraftServer craftServer = mock(CraftServer.class);
++        final PluginManager plugins = mock(PluginManager.class);
++        final PlayerList players = mock(PlayerList.class);
++        final UUID id = UUID.randomUUID();
++        final Location personalLanding = new Location(world, 120.5, 75, -250.5);
++        final Vec3 vanillaSpawn = new Vec3(8.5, 70, 8.5);
++        final AtomicInteger charges = new AtomicInteger();
++        final AtomicInteger events = new AtomicInteger();
++        final ArrayDeque<Runnable> globalTasks = new ArrayDeque<>();
++        final CompletableFuture<Vec3> spawn = new CompletableFuture<>();
++        final MockedStatic<OwnershipRouter> router = mockStatic(OwnershipRouter.class);
++        final MockedStatic<PlayerSpawnFinder> finder = mockStatic(PlayerSpawnFinder.class);
++        final MockedStatic<ServerPlayer> positions = mockStatic(ServerPlayer.class);
++        final MockedStatic<PlayerList> contexts = mockStatic(PlayerList.class, invocation -> {
++            if (!invocation.getMethod().getName().equals("runWithRespawnOwnerContexts")) return null;
++            // World lease acquisition is the boundary here; player ownership and event publication are real.
++            try (var sourceOwner = OwnerDomainExecutor.enterRegion(source, -100, -100, 100, 100, "test-source");
++                 var targetOwner = OwnerDomainExecutor.enterRegion(destination, -100, -100, 100, 100, "test-target")) {
++                OwnerDomainExecutor.runPlayerNow(player, "test-respawn", invocation.getArgument(3));
++            }
++            return null;
++        });
++        Consumer<PlayerRespawnEvent> listener = event -> {};
++        Throwable readinessFailure;
++
++        Fixture() throws Exception {
++            // Supply the constructor dependency without creating a live connection or player data stores.
++            Field dependency = ServerPlayer.class.getDeclaredField("server");
++            dependency.setAccessible(true);
++            dependency.set(player, server);
++            player.connection = connection;
++            connection.player = player;
++            when(player.getUUID()).thenReturn(id);
++            when(player.level()).thenReturn(source);
++            when(player.chunkPosition()).thenReturn(new ChunkPos(0, 0));
++            when(player.getBukkitEntity()).thenReturn(mock(CraftPlayer.class));
++            when(server.getPlayerList()).thenReturn(players);
++            when(players.getPlayer(id)).thenReturn(player);
++            when(server.findRespawnDimension()).thenReturn(destination);
++            when(server.getLevel(Level.NETHER)).thenReturn(destination);
++            when(destination.getRespawnData()).thenReturn(LevelData.RespawnData.DEFAULT);
++            when(destination.getWorld()).thenReturn(world);
++            when(world.getHandle()).thenReturn(destination);
++            when(source.getCraftServer()).thenReturn(craftServer);
++            when(craftServer.getPluginManager()).thenReturn(plugins);
++            when(player.findRespawnPositionAndUseSpawnBlockAsync(anyBoolean(), any(), any())).thenCallRealMethod();
++            router.when(() -> OwnershipRouter.supplyOnServer(eq(server), any())).thenAnswer(invocation -> {
++                CompletableFuture<Object> result = new CompletableFuture<>();
++                Supplier<?> action = invocation.getArgument(1);
++                globalTasks.add(() -> {
++                    try (var owner = OwnerDomainExecutor.enterGlobal(server, "test-global")) {
++                        result.complete(action.get());
++                    } catch (Throwable failure) { result.completeExceptionally(failure); }
++                });
++                return result;
++            });
++            router.when(() -> OwnershipRouter.runWhenChunksReady(eq(destination), anyInt(), anyInt(), anyInt(), anyInt(), any(), anyString(), any()))
++                .thenAnswer(invocation -> {
++                    if (readinessFailure != null) return CompletableFuture.failedFuture(readinessFailure);
++                    Consumer<List<ChunkAccess>> action = invocation.getArgument(7);
++                    try (var detached = OwnerDomainExecutor.suspendCurrentOwner();
++                         var owner = OwnerDomainExecutor.enterRegion(destination, -1, -1, 1, 1, "test-ready")) {
++                        action.accept(List.of());
++                    }
++                    return CompletableFuture.completedFuture(null);
++                });
++            router.when(() -> OwnershipRouter.areChunksReady(eq(destination), anyInt(), anyInt(), anyInt(), anyInt(), any())).thenReturn(true);
++            finder.when(() -> PlayerSpawnFinder.findSpawn(destination, BlockPos.ZERO)).thenReturn(spawn);
++            doAnswer(invocation -> {
++                assertTrue(OwnerDomainExecutor.isPlayerOwner(player), "Respawn listeners must own the player");
++                assertTrue(OwnerDomainExecutor.isRegionOwner(destination, 0, 0));
++                events.incrementAndGet();
++                listener.accept(invocation.getArgument(0));
++                return null;
++            }).when(plugins).callEvent(any(PlayerRespawnEvent.class));
++        }
++
++        CompletableFuture<ServerPlayer.RespawnResult> startDefault() {
++            CompletableFuture<ServerPlayer.RespawnResult> result = start();
++            globalTasks.remove().run();
++            try (var owner = OwnerDomainExecutor.enterRegion(destination, -1, -1, 1, 1, "test-spawn-found")) {
++                spawn.complete(vanillaSpawn);
++            }
++            return result;
++        }
++
++        CompletableFuture<ServerPlayer.RespawnResult> startAnchor() {
++            ServerPlayer.RespawnConfig config = new ServerPlayer.RespawnConfig(
++                LevelData.RespawnData.of(Level.NETHER, BlockPos.ZERO, 0, 0), false);
++            when(player.getRespawnConfig()).thenReturn(config);
++            positions.when(() -> ServerPlayer.findRespawnAndUseSpawnBlock(destination, config, true)).thenAnswer(invocation -> {
++                assertTrue(OwnerDomainExecutor.isGlobalOwner(server), "Anchor lookup and consumption must share the decision operation");
++                assertTrue(OwnerDomainExecutor.isRegionOwner(destination, 0, 0));
++                return Optional.of(new ServerPlayer.RespawnPosAngle(vanillaSpawn, 0, 0, false, true, () -> {
++                    assertEquals(1, events.get());
++                    assertTrue(OwnerDomainExecutor.isRegionOwner(destination, 0, 0));
++                    charges.incrementAndGet();
++                }));
++            });
++            CompletableFuture<ServerPlayer.RespawnResult> result = start();
++            globalTasks.remove().run();
++            return result;
++        }
++
++        CompletableFuture<ServerPlayer.RespawnResult> start() {
++            return player.findRespawnPositionAndUseSpawnBlockAsync(true, TeleportTransition.DO_NOTHING, PlayerRespawnEvent.RespawnReason.DEATH);
++        }
++        void drain() { while (!globalTasks.isEmpty()) globalTasks.remove().run(); }
++        @Override public void close() { contexts.close(); positions.close(); finder.close(); router.close(); }
++    }
++}

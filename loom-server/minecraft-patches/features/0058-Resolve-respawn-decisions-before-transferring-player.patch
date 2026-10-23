@@ -1,0 +1,197 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 23 Oct 2026 11:49:12 +0300
+Subject: [PATCH] Resolve respawn decisions before transferring players
+
+
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index 833fc4ff17c02fdc2a0f80391285cbc00c970446..db30cf66daae65007f8d47d499270cffc20e9279 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -1470,27 +1470,10 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+         final org.bukkit.event.player.PlayerRespawnEvent.RespawnReason respawnReason
+     ) {
+         final BlockPos respawnBlockPosition = respawnConfig.respawnData().pos();
+-        final int chunkX = respawnBlockPosition.getX() >> 4;
+-        final int chunkZ = respawnBlockPosition.getZ() >> 4;
+-        final CompletableFuture<@Nullable RespawnPosAngle> positionFuture = new CompletableFuture<>();
+-        net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
+-            respawnLevel,
+-            chunkX - 1,
+-            chunkZ - 1,
+-            chunkX + 1,
+-            chunkZ + 1,
+-            ca.spottedleaf.concurrentutil.util.Priority.HIGHER,
+-            "player-respawn-block",
+-            ignored -> positionFuture.complete(
+-                findRespawnAndUseSpawnBlock(respawnLevel, respawnConfig, consumeSpawnBlock).orElse(null)
+-            )
+-        ).whenComplete((ignored, throwable) -> {
+-            if (throwable != null) {
+-                positionFuture.completeExceptionally(throwable);
+-            }
+-        });
+-
+-        return positionFuture.thenCompose(respawnPosAngle -> {
++        return this.resolveRespawnDecisionAsync(respawnLevel, Vec3.atBottomCenterOf(respawnBlockPosition), 1, () -> {
++            // Resolve the block and consume its charge in the same owned decision. An async gap between
++            // those steps would let two respawns reuse a captured anchor charge.
++            final RespawnPosAngle respawnPosAngle = findRespawnAndUseSpawnBlock(respawnLevel, respawnConfig, consumeSpawnBlock).orElse(null);
+             if (respawnPosAngle == null) {
+                 return this.findDefaultRespawnAsync(true, postTeleportTransition, respawnReason);
+             }
+@@ -1503,15 +1486,13 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+                 respawnPosAngle.pitch(),
+                 postTeleportTransition
+             );
+-            return CompletableFuture.completedFuture(
+-                this.completeRespawnResult(
+-                    transition,
+-                    respawnPosAngle.isBedSpawn(),
+-                    respawnPosAngle.isAnchorSpawn(),
+-                    respawnPosAngle.consumeAnchorCharge(),
+-                    respawnReason
+-                )
+-            );
++            return CompletableFuture.completedFuture(this.completeRespawnResult(
++                transition,
++                respawnPosAngle.isBedSpawn(),
++                respawnPosAngle.isAnchorSpawn(),
++                respawnPosAngle.consumeAnchorCharge(),
++                respawnReason
++            ));
+         });
+     }
+ 
+@@ -1525,7 +1506,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+             this.server::findRespawnDimension
+         ).thenCompose(respawnLevel -> {
+             final LevelData.RespawnData respawnData = respawnLevel.getRespawnData();
+-            return PlayerSpawnFinder.findSpawn(respawnLevel, respawnData.pos()).thenApply(spawnPosition -> {
++            return PlayerSpawnFinder.findSpawn(respawnLevel, respawnData.pos()).thenCompose(spawnPosition -> {
+                 final TeleportTransition transition = new TeleportTransition(
+                     respawnLevel,
+                     spawnPosition,
+@@ -1537,13 +1518,61 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+                     Set.of(),
+                     postTeleportTransition
+                 );
+-                return this.completeRespawnResult(
+-                    transition, false, false, null, respawnReason
++                return this.resolveRespawnDecisionAsync(
++                    respawnLevel, spawnPosition, 0,
++                    () -> CompletableFuture.completedFuture(this.completeRespawnResult(transition, false, false, null, respawnReason))
+                 );
+             });
+         });
+     }
+ 
++    private CompletableFuture<@Nullable RespawnResult> resolveRespawnDecisionAsync(
++        final ServerLevel respawnLevel,
++        final Vec3 position,
++        final int chunkRadius,
++        final java.util.function.Supplier<CompletableFuture<@Nullable RespawnResult>> resolver
++    ) {
++        final int chunkX = net.minecraft.util.Mth.floor(position.x()) >> 4;
++        final int chunkZ = net.minecraft.util.Mth.floor(position.z()) >> 4;
++        return net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
++            respawnLevel, chunkX - chunkRadius, chunkZ - chunkRadius, chunkX + chunkRadius, chunkZ + chunkRadius,
++            ca.spottedleaf.concurrentutil.util.Priority.HIGHER, "player-respawn-decision",
++            chunks -> {
++                for (final net.minecraft.world.level.chunk.ChunkAccess chunk : chunks) {
++                    respawnLevel.getChunkSource().addTicketAtLevel(
++                        net.minecraft.server.level.TicketType.POST_TELEPORT, chunk.getPos(),
++                        net.minecraft.server.level.ChunkLevel.FULL_CHUNK_LEVEL
++                    );
++                }
++            }
++        ).thenCompose(ignored -> net.minecraft.server.threading.runtime.OwnershipRouter.supplyOnServer(this.server, () -> {
++            if (this.connection.isDisconnected() || this.connection.player != this
++                || this.server.getPlayerList().getPlayer(this.getUUID()) != this) {
++                return CompletableFuture.<@Nullable RespawnResult>completedFuture(null);
++            }
++            if (respawnLevel.isUnloading()) {
++                return CompletableFuture.<@Nullable RespawnResult>failedFuture(
++                    new java.util.concurrent.RejectedExecutionException("Respawn world is unloading")
++                );
++            }
++            if (!net.minecraft.server.threading.runtime.OwnershipRouter.areChunksReady(
++                respawnLevel, chunkX - chunkRadius, chunkZ - chunkRadius, chunkX + chunkRadius, chunkZ + chunkRadius,
++                net.minecraft.world.level.chunk.status.ChunkStatus.FULL
++            )) {
++                return this.resolveRespawnDecisionAsync(respawnLevel, position, chunkRadius, resolver);
++            }
++            final CompletableFuture<@Nullable RespawnResult> result = new CompletableFuture<>();
++            PlayerList.runWithRespawnOwnerContexts(this, respawnLevel, position, () -> resolver.get().whenComplete((resolved, failure) -> {
++                if (failure != null) {
++                    result.completeExceptionally(failure);
++                } else {
++                    result.complete(resolved);
++                }
++            }));
++            return result;
++        })).thenCompose(result -> result);
++    }
++
+     private @Nullable RespawnResult completeRespawnResult(
+         final TeleportTransition teleportTransition,
+         final boolean isBedSpawn,
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index c17a85b4551720e764b8046432aea72c35448605..f189cfa92c2d67a193820ec0928c34c630af9417 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -246,18 +246,22 @@ public abstract class PlayerList {
+         );
+     }
+ 
+-    private static void runWithRespawnOwnerContexts(
++    public static void runWithRespawnOwnerContexts(
+         final ServerPlayer player,
+-        final TeleportTransition transition,
++        final ServerLevel destinationLevel,
++        final Vec3 destinationPosition,
+         final Runnable action
+     ) {
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(player.level().getServer(), "player-respawn-contexts");
+         final ServerLevel sourceLevel = player.level();
+         final net.minecraft.world.level.ChunkPos sourceChunk = player.chunkPosition();
+-        final ServerLevel destinationLevel = transition.newLevel();
+-        final int destinationChunkX = net.minecraft.util.Mth.floor(transition.position().x()) >> 4;
+-        final int destinationChunkZ = net.minecraft.util.Mth.floor(transition.position().z()) >> 4;
++        final int destinationChunkX = net.minecraft.util.Mth.floor(destinationPosition.x()) >> 4;
++        final int destinationChunkZ = net.minecraft.util.Mth.floor(destinationPosition.z()) >> 4;
+         final int sourceRadius = getRespawnOwnerRadius(sourceLevel);
+         final int destinationRadius = getRespawnOwnerRadius(destinationLevel);
++        final Runnable playerAction = () -> net.minecraft.server.threading.runtime.OwnerDomainExecutor.runPlayerNow(
++            player, "player-respawn", action
++        );
+ 
+         if (sourceLevel == destinationLevel) {
+             runWithRespawnRegionContext(
+@@ -266,7 +270,7 @@ public abstract class PlayerList {
+                 Math.min(sourceChunk.z() - sourceRadius, destinationChunkZ - destinationRadius),
+                 Math.max(sourceChunk.x() + sourceRadius, destinationChunkX + destinationRadius),
+                 Math.max(sourceChunk.z() + sourceRadius, destinationChunkZ + destinationRadius),
+-                action
++                playerAction
+             );
+             return;
+         }
+@@ -283,7 +287,7 @@ public abstract class PlayerList {
+                 destinationChunkZ - destinationRadius,
+                 destinationChunkX + destinationRadius,
+                 destinationChunkZ + destinationRadius,
+-                action
++                playerAction
+             )
+         );
+     }
+@@ -917,7 +921,7 @@ public abstract class PlayerList {
+                                 return;
+                             }
+ 
+-                            runWithRespawnOwnerContexts(serverPlayer, transition, () -> {
++                            runWithRespawnOwnerContexts(serverPlayer, transition.newLevel(), transition.position(), () -> {
+                                 final ServerPlayer respawned = this.respawnWithResult(
+                                     serverPlayer, keepAllPlayerData, removalReason, respawnReason, result, respawnConfig
+                                 );
