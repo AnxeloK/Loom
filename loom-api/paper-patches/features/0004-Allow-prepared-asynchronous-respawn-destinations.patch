@@ -1,0 +1,172 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 24 Oct 2026 12:59:30 +0300
+Subject: [PATCH] Allow prepared asynchronous respawn destinations
+
+
+diff --git a/src/main/java/org/bukkit/event/player/PlayerRespawnEvent.java b/src/main/java/org/bukkit/event/player/PlayerRespawnEvent.java
+index aecee13574ae025850b3a9bf51e6fc3a3420a2a9..d752c390a45eb178304fad1194fb177c38a1d122 100644
+--- a/src/main/java/org/bukkit/event/player/PlayerRespawnEvent.java
++++ b/src/main/java/org/bukkit/event/player/PlayerRespawnEvent.java
+@@ -19,6 +19,7 @@ import java.util.Set;
+ public class PlayerRespawnEvent extends AbstractRespawnEvent {
+ 
+     private static final HandlerList HANDLER_LIST = new HandlerList();
++    private @org.jetbrains.annotations.Nullable java.util.concurrent.CompletableFuture<Location> pendingLocation;
+ 
+     @ApiStatus.Internal
+     @Deprecated(since = "1.16.1", forRemoval = true)
+@@ -47,6 +48,48 @@ public class PlayerRespawnEvent extends AbstractRespawnEvent {
+         Preconditions.checkArgument(respawnLocation.getWorld() != null, "Respawn world can not be null");
+ 
+         this.respawnLocation = respawnLocation.clone();
++        this.pendingLocation = null;
++    }
++
++    /**
++     * Selects a destination after asynchronous preparation, without blocking a tick owner.
++     * The last location setter called during this event wins. A later synchronous setter
++     * replaces this choice, even if the supplied future has not completed.
++     *
++     * <p>Respawn waits for preparation and destination loading to finish. The
++     * plugin must ensure that preparation terminates, including on disable or failure.
++     * An exceptional, cancelled or invalid result fails the respawn rather than using
++     * an unchecked fallback. Complete the future with a location; do not mutate this
++     * event from a completion callback.</p>
++     *
++     * <p>{@link #getRespawnLocation()} still returns the last synchronous choice and
++     * never waits for this preparation.</p>
++     *
++     * @param respawnLocation future providing a finite location in an existing world
++     */
++    public void setRespawnLocationAsync(@NotNull java.util.concurrent.CompletableFuture<Location> respawnLocation) {
++        Preconditions.checkArgument(respawnLocation != null, "Respawn location future can not be null");
++        this.pendingLocation = respawnLocation.thenApply(location -> {
++            Preconditions.checkArgument(location != null, "Respawn location can not be null");
++            Preconditions.checkArgument(location.getWorld() != null, "Respawn world can not be null");
++            Location selected = location.clone();
++            selected.checkFinite();
++            return selected;
++        });
++    }
++
++    /**
++     * Gets the choice selected so far, including asynchronous preparation. The returned
++     * future and location are independent copies; cancelling it does not cancel the
++     * plugin's preparation or change a later listener's choice.
++     *
++     * @return a future for the selected destination
++     */
++    @NotNull
++    public java.util.concurrent.CompletableFuture<Location> getRespawnLocationAsync() {
++        return this.pendingLocation == null
++                ? java.util.concurrent.CompletableFuture.completedFuture(this.getRespawnLocation())
++                : this.pendingLocation.thenApply(Location::clone);
+     }
+ 
+     @NotNull
+diff --git a/src/test/java/org/bukkit/event/PlayerRespawnLocationTest.java b/src/test/java/org/bukkit/event/PlayerRespawnLocationTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4e45b37cab54363197dd2b88d0269b3954e73a8c
+--- /dev/null
++++ b/src/test/java/org/bukkit/event/PlayerRespawnLocationTest.java
+@@ -0,0 +1,99 @@
++package org.bukkit.event;
++
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionException;
++import org.bukkit.Location;
++import org.bukkit.World;
++import org.bukkit.entity.Player;
++import org.bukkit.event.player.PlayerRespawnEvent;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class PlayerRespawnLocationTest {
++    private final World world = mock(World.class);
++    private final Location original = new Location(world, 8.5, 70, 8.5);
++    private final Location safe = new Location(world, 120.5, 75, -250.5);
++    private final PlayerRespawnEvent event = new PlayerRespawnEvent(mock(Player.class), original, false);
++
++    @Test void preparationDoesNotBlockOrReplaceTheSynchronousView() {
++        CompletableFuture<Location> preparation = new CompletableFuture<>();
++        event.setRespawnLocationAsync(preparation);
++        assertEquals(original, event.getRespawnLocation());
++        CompletableFuture<Location> selected = event.getRespawnLocationAsync();
++        assertFalse(selected.isDone());
++        preparation.complete(safe);
++        assertEquals(safe, selected.join());
++    }
++
++    @Test void aLaterSynchronousListenerWinsBeforeTheEarlierFutureCompletes() {
++        CompletableFuture<Location> preparation = new CompletableFuture<>();
++        event.setRespawnLocationAsync(preparation);
++        event.setRespawnLocation(safe);
++        CompletableFuture<Location> selected = event.getRespawnLocationAsync();
++        assertTrue(selected.isDone());
++        preparation.complete(original);
++        assertEquals(safe, selected.join());
++        assertEquals(safe, event.getRespawnLocationAsync().join());
++    }
++
++    @Test void theLastAsynchronousSetterWinsRegardlessOfCompletionOrder() {
++        CompletableFuture<Location> earlier = new CompletableFuture<>();
++        CompletableFuture<Location> later = new CompletableFuture<>();
++        event.setRespawnLocationAsync(earlier);
++        event.setRespawnLocationAsync(later);
++        later.complete(safe);
++        earlier.complete(original);
++        assertEquals(safe, event.getRespawnLocationAsync().join());
++    }
++
++    @Test void cancellingAReadDoesNotCancelThePreparationOrAnotherRead() {
++        CompletableFuture<Location> preparation = new CompletableFuture<>();
++        event.setRespawnLocationAsync(preparation);
++        event.getRespawnLocationAsync().cancel(false);
++        assertFalse(preparation.isCancelled());
++        preparation.complete(safe);
++        assertEquals(safe, event.getRespawnLocationAsync().join());
++    }
++
++    @Test void locationsAreCopiedAtCompletionAndForEachRead() {
++        CompletableFuture<Location> preparation = new CompletableFuture<>();
++        event.setRespawnLocationAsync(preparation);
++        Location supplied = safe.clone();
++        preparation.complete(supplied);
++        supplied.setY(1);
++        Location read = event.getRespawnLocationAsync().join();
++        assertEquals(safe, read);
++        read.setY(2);
++        assertEquals(safe, event.getRespawnLocationAsync().join());
++        event.getRespawnLocationAsync().complete(original);
++        assertEquals(safe, event.getRespawnLocationAsync().join());
++    }
++
++    @Test void invalidDestinationsFailInsteadOfSelectingTheOriginal() {
++        for (Location invalid : new Location[] {null, new Location(null, 1, 2, 3),
++                new Location(world, Double.NaN, 2, 3), new Location(world, 1, 2, 3, Float.POSITIVE_INFINITY, 0)}) {
++            event.setRespawnLocationAsync(CompletableFuture.completedFuture(invalid));
++            assertThrows(CompletionException.class, () -> event.getRespawnLocationAsync().join());
++        }
++        assertThrows(IllegalArgumentException.class, () -> event.setRespawnLocationAsync(null));
++    }
++
++    @Test void preparationFailureAndCancellationReachTheCaller() {
++        IllegalStateException failure = new IllegalStateException("World unavailable");
++        event.setRespawnLocationAsync(CompletableFuture.failedFuture(failure));
++        assertSame(failure, assertThrows(CompletionException.class, () -> event.getRespawnLocationAsync().join()).getCause());
++        CompletableFuture<Location> cancelled = new CompletableFuture<>();
++        event.setRespawnLocationAsync(cancelled);
++        cancelled.cancel(false);
++        assertThrows(CompletionException.class, () -> event.getRespawnLocationAsync().join());
++    }
++
++    @Test void ordinaryListenersStillPublishAnImmediateIndependentChoice() {
++        event.setRespawnLocation(safe);
++        CompletableFuture<Location> selected = event.getRespawnLocationAsync();
++        assertTrue(selected.isDone());
++        selected.join().setY(1);
++        assertEquals(safe, event.getRespawnLocationAsync().join());
++    }
++}

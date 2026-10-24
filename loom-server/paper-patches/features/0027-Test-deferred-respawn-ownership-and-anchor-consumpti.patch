@@ -1,0 +1,220 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Sat, 24 Oct 2026 12:59:30 +0300
+Subject: [PATCH] Test deferred respawn ownership and anchor consumption
+
+
+diff --git a/src/test/java/net/minecraft/server/level/RespawnAnchorConsumptionTest.java b/src/test/java/net/minecraft/server/level/RespawnAnchorConsumptionTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae6339cf3a861a76e0d4cf5d936f796d5be4b85c
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/level/RespawnAnchorConsumptionTest.java
+@@ -0,0 +1,69 @@
++package net.minecraft.server.level;
++
++import java.util.Optional;
++import java.util.concurrent.RejectedExecutionException;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.core.BlockPos;
++import net.minecraft.world.entity.EntityTypes;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.level.block.Blocks;
++import net.minecraft.world.level.block.RespawnAnchorBlock;
++import net.minecraft.world.level.block.state.BlockState;
++import net.minecraft.world.level.storage.LevelData;
++import net.minecraft.world.phys.Vec3;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class RespawnAnchorConsumptionTest {
++    @Test void overlappingPreparedDecisionsCannotReuseTheLastCharge() {
++        ServerLevel level = mock(ServerLevel.class);
++        AtomicReference<BlockState> state = new AtomicReference<>(Blocks.RESPAWN_ANCHOR.defaultBlockState().setValue(RespawnAnchorBlock.CHARGE, 1));
++        when(level.getBlockState(BlockPos.ZERO)).thenAnswer(ignored -> state.get());
++        when(level.setBlockAndUpdate(eq(BlockPos.ZERO), any())).thenAnswer(invocation -> {
++            state.set(invocation.getArgument(1));
++            return true;
++        });
++        try (var anchor = mockStatic(RespawnAnchorBlock.class)) {
++            anchor.when(() -> RespawnAnchorBlock.canSetSpawn(level, BlockPos.ZERO)).thenReturn(true);
++            anchor.when(() -> RespawnAnchorBlock.findStandUpPosition(EntityTypes.PLAYER, level, BlockPos.ZERO))
++                .thenReturn(Optional.of(new Vec3(1.5, 1, 1.5)));
++            ServerPlayer.RespawnConfig config = new ServerPlayer.RespawnConfig(LevelData.RespawnData.of(Level.NETHER, BlockPos.ZERO, 0, 0), false);
++            Runnable first = ServerPlayer.findRespawnAndUseSpawnBlock(level, config, true).orElseThrow().consumeAnchorCharge();
++            Runnable second = ServerPlayer.findRespawnAndUseSpawnBlock(level, config, true).orElseThrow().consumeAnchorCharge();
++            first.run();
++            assertEquals(0, state.get().getValue(RespawnAnchorBlock.CHARGE));
++            assertThrows(RejectedExecutionException.class, second::run);
++            assertEquals(0, state.get().getValue(RespawnAnchorBlock.CHARGE));
++            verify(level, times(1)).setBlockAndUpdate(eq(BlockPos.ZERO), any());
++        }
++    }
++
++    @Test void consumptionUsesCurrentChargesAndCannotRecreateAReplacedAnchor() {
++        ServerLevel level = mock(ServerLevel.class);
++        BlockState initial = Blocks.RESPAWN_ANCHOR.defaultBlockState().setValue(RespawnAnchorBlock.CHARGE, 1);
++        AtomicReference<BlockState> state = new AtomicReference<>(initial);
++        when(level.getBlockState(BlockPos.ZERO)).thenAnswer(ignored -> state.get());
++        when(level.setBlockAndUpdate(eq(BlockPos.ZERO), any())).thenAnswer(invocation -> {
++            state.set(invocation.getArgument(1));
++            return true;
++        });
++        try (var anchor = mockStatic(RespawnAnchorBlock.class)) {
++            anchor.when(() -> RespawnAnchorBlock.canSetSpawn(level, BlockPos.ZERO)).thenReturn(true);
++            anchor.when(() -> RespawnAnchorBlock.findStandUpPosition(EntityTypes.PLAYER, level, BlockPos.ZERO))
++                .thenReturn(Optional.of(new Vec3(1.5, 1, 1.5)));
++            ServerPlayer.RespawnConfig config = new ServerPlayer.RespawnConfig(LevelData.RespawnData.of(Level.NETHER, BlockPos.ZERO, 0, 0), false);
++            Runnable prepared = ServerPlayer.findRespawnAndUseSpawnBlock(level, config, true).orElseThrow().consumeAnchorCharge();
++            state.set(initial.setValue(RespawnAnchorBlock.CHARGE, 4));
++            prepared.run();
++            assertEquals(3, state.get().getValue(RespawnAnchorBlock.CHARGE));
++            state.set(Blocks.STONE.defaultBlockState());
++            assertThrows(RejectedExecutionException.class, prepared::run);
++            assertTrue(state.get().is(Blocks.STONE));
++            verify(level, times(1)).setBlockAndUpdate(eq(BlockPos.ZERO), any());
++        }
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/level/ServerPlayerRespawnDecisionTest.java b/src/test/java/net/minecraft/server/level/ServerPlayerRespawnDecisionTest.java
+index 4c8f49074bed322ed8d55bf00a0e4396fa0f181a..997afabd1f2d9003df0a25e35e86b53a8d9d3b00 100644
+--- a/src/test/java/net/minecraft/server/level/ServerPlayerRespawnDecisionTest.java
++++ b/src/test/java/net/minecraft/server/level/ServerPlayerRespawnDecisionTest.java
+@@ -151,6 +151,134 @@ class ServerPlayerRespawnDecisionTest {
+         }
+     }
+ 
++    @Test void deferredDestinationResumesOnTheOwnerBeforePublishingTheResult() throws Exception {
++        try (Fixture f = new Fixture()) {
++            CompletableFuture<Location> preparation = new CompletableFuture<>();
++            f.listener = event -> event.setRespawnLocationAsync(preparation);
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startDefault();
++            f.drain();
++            assertFalse(result.isDone());
++            assertEquals(1, f.events.get());
++            preparation.complete(f.personalLanding);
++            assertFalse(result.isDone());
++            f.drain();
++            assertEquals(new Vec3(120.5, 75, -250.5), result.join().transition().position());
++            assertEquals(1, f.events.get());
++        }
++    }
++
++    @Test void deferredAnchorSelectionConsumesItsChargeOnlyAfterOwnedCompletion() throws Exception {
++        try (Fixture f = new Fixture()) {
++            CompletableFuture<Location> preparation = new CompletableFuture<>();
++            f.listener = event -> event.setRespawnLocationAsync(preparation);
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startAnchor();
++            f.drain();
++            assertFalse(result.isDone());
++            assertEquals(0, f.charges.get());
++            preparation.complete(new Location(f.world, 8.5, 70, 8.5));
++            assertEquals(0, f.charges.get());
++            f.drain();
++            assertTrue(result.join().isAnchorSpawn());
++            assertEquals(1, f.charges.get());
++        }
++    }
++
++    @Test void aDeferredAnchorRedirectKeepsItsCharge() throws Exception {
++        try (Fixture f = new Fixture()) {
++            CompletableFuture<Location> preparation = new CompletableFuture<>();
++            f.listener = event -> event.setRespawnLocationAsync(preparation);
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startAnchor();
++            f.drain();
++            preparation.complete(f.personalLanding);
++            f.drain();
++            assertEquals(new Vec3(120.5, 75, -250.5), result.join().transition().position());
++            assertEquals(0, f.charges.get());
++        }
++    }
++
++    @Test void disconnectDuringPreparationCannotPublishALocationOrUseAnAnchor() throws Exception {
++        try (Fixture f = new Fixture()) {
++            CompletableFuture<Location> preparation = new CompletableFuture<>();
++            f.listener = event -> event.setRespawnLocationAsync(preparation);
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startAnchor();
++            f.drain();
++            when(f.connection.isDisconnected()).thenReturn(true);
++            preparation.complete(f.personalLanding);
++            f.drain();
++            assertNull(result.join());
++            assertEquals(0, f.charges.get());
++        }
++    }
++
++    @Test void preparationFailureReachesTheCallerWithoutUsingAnAnchor() throws Exception {
++        try (Fixture f = new Fixture()) {
++            IllegalStateException failure = new IllegalStateException("No safe destination");
++            CompletableFuture<Location> preparation = new CompletableFuture<>();
++            f.listener = event -> event.setRespawnLocationAsync(preparation);
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startAnchor();
++            f.drain();
++            preparation.completeExceptionally(failure);
++            f.drain();
++            assertSame(failure, assertThrows(CompletionException.class, result::join).getCause());
++            assertEquals(0, f.charges.get());
++        }
++    }
++
++    @Test void worldRetirementWhilePreparingCannotUseAnAnchor() throws Exception {
++        try (Fixture f = new Fixture()) {
++            CompletableFuture<Location> preparation = new CompletableFuture<>();
++            f.listener = event -> event.setRespawnLocationAsync(preparation);
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startAnchor();
++            f.drain();
++            when(f.destination.isUnloading()).thenReturn(true);
++            preparation.complete(new Location(f.world, 8.5, 70, 8.5));
++            f.drain();
++            assertInstanceOf(java.util.concurrent.RejectedExecutionException.class,
++                assertThrows(CompletionException.class, result::join).getCause());
++            assertEquals(0, f.charges.get());
++        }
++    }
++
++    @Test void replacementDuringPreparationCannotReceiveTheOldRespawn() throws Exception {
++        try (Fixture f = new Fixture()) {
++            CompletableFuture<Location> preparation = new CompletableFuture<>();
++            f.listener = event -> event.setRespawnLocationAsync(preparation);
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startDefault();
++            f.drain();
++            f.connection.player = mock(ServerPlayer.class);
++            preparation.complete(f.personalLanding);
++            f.drain();
++            assertNull(result.join());
++        }
++    }
++
++    @Test void movingToAnotherWorldRetiresThePreparedRespawn() throws Exception {
++        try (Fixture f = new Fixture()) {
++            CompletableFuture<Location> preparation = new CompletableFuture<>();
++            f.listener = event -> event.setRespawnLocationAsync(preparation);
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startDefault();
++            f.drain();
++            when(f.player.level()).thenReturn(f.destination);
++            preparation.complete(f.personalLanding);
++            f.drain();
++            assertNull(result.join());
++        }
++    }
++
++    @Test void failedPreparationAfterDisconnectHasANormalRetiredOutcome() throws Exception {
++        try (Fixture f = new Fixture()) {
++            CompletableFuture<Location> preparation = new CompletableFuture<>();
++            f.listener = event -> event.setRespawnLocationAsync(preparation);
++            CompletableFuture<ServerPlayer.RespawnResult> result = f.startAnchor();
++            f.drain();
++            when(f.connection.isDisconnected()).thenReturn(true);
++            preparation.completeExceptionally(new IllegalStateException("Service retired"));
++            f.drain();
++            assertNull(result.join());
++            assertEquals(0, f.charges.get());
++        }
++    }
++
+     private static final class Fixture implements AutoCloseable {
+         final MinecraftServer server = mock(MinecraftServer.class);
+         final ServerLevel source = mock(ServerLevel.class);
