@@ -86,6 +86,23 @@ index e25eebd203ed32c8708b16524cdcaa3a411e9cc8..435b625e67ffa02947b8f094820ccc90
      public boolean mayInteract(final ServerLevel level, final BlockPos pos) {
          return true;
      }
+diff --git a/net/minecraft/world/entity/monster/Enderman.java b/net/minecraft/world/entity/monster/Enderman.java
+index 24085db3c0ab92a67e1857c9c03be6c6507d78c9..f2e77d1f08ca5799d4875de7f886f35e1df2d375 100644
+--- a/net/minecraft/world/entity/monster/Enderman.java
++++ b/net/minecraft/world/entity/monster/Enderman.java
+@@ -265,6 +265,12 @@ public class Enderman extends Monster implements NeutralMob {
+         return true;
+     }
+ 
++    @Override
++    public boolean requiresFullLevelTickOwnership() {
++        // AI can teleport beyond its region before ordinary movement resumes in the same tick.
++        return true;
++    }
++
+     @Override
+     protected void customServerAiStep(final ServerLevel level) {
+         if (level.isBrightOutside() && this.tickCount >= this.targetChangeTime + 600) {
 diff --git a/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java b/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java
 index 1628f7b43da9b5e936a5eedc3bd9c3aa55ae9a94..6b12a17adba665df63a26db9fa9042f1a6b859e6 100644
 --- a/net/minecraft/world/entity/vehicle/minecart/MinecartHopper.java
