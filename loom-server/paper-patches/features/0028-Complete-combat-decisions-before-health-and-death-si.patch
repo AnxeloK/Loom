@@ -1,0 +1,161 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 26 Oct 2026 19:35:31 +0200
+Subject: [PATCH] Complete combat decisions before health and death side
+ effects
+
+
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+index f7ba75d4a58fac71ec3b3a05baf6617441141183..5d805809438124b5b3308fd1d84e868fed021ae7 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+@@ -50,9 +50,16 @@ class PaperEventManager {
+         // Loom start - defer synchronous events fired on a region worker thread during parallel ticking to
+         // the owning (main) thread's serial replay, so plugin handlers run single-threaded as under serial
+         // ticking. This keeps legacy main-thread-only plugins safe with the parallel flags enabled.
+-        // Explosion and respawn callers consume mutable results before returning. Keep these decisions
++        // These callers consume mutable results before returning. Keep their decisions
+         // synchronous on their firing owner so listeners finish before the caller applies side effects.
+-        final boolean inlineDecision = event instanceof org.bukkit.event.player.PlayerRespawnEvent
++        final boolean inlineDecision = event instanceof org.bukkit.event.entity.EntityDamageEvent
++            || event instanceof org.bukkit.event.entity.EntityDeathEvent
++            || event instanceof org.bukkit.event.entity.EntityCombustEvent
++            || event instanceof org.bukkit.event.entity.EntityKnockbackEvent
++            || event instanceof io.papermc.paper.event.entity.EntityKnockbackEvent
++            || event instanceof org.bukkit.event.entity.ProjectileLaunchEvent
++            || event instanceof org.bukkit.event.entity.EntityShootBowEvent
++            || event instanceof org.bukkit.event.player.PlayerRespawnEvent
+             || event instanceof org.bukkit.event.entity.ExplosionPrimeEvent
+             || event instanceof org.bukkit.event.entity.EntityExplodeEvent
+             || event instanceof org.bukkit.event.block.BlockExplodeEvent
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/CombatDecisionTest.java b/src/test/java/io/papermc/paper/plugin/manager/CombatDecisionTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c2f2d1399045e14dc460416450f14546d869d1b
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/CombatDecisionTest.java
+@@ -0,0 +1,125 @@
++package io.papermc.paper.plugin.manager;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.logging.Logger;
++import net.kyori.adventure.text.Component;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.RegionTickStaging;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import org.bukkit.Server;
++import org.bukkit.damage.DamageSource;
++import org.bukkit.entity.*;
++import org.bukkit.event.*;
++import org.bukkit.event.entity.*;
++import org.bukkit.inventory.EquipmentSlot;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.RegisteredListener;
++import org.bukkit.support.environment.Normal;
++import org.bukkit.util.Vector;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class CombatDecisionTest {
++    @Test void cancellationFinishesBeforeTheCallerDuringStaging() {
++        for (Event event : decisions()) {
++            dispatch(event, true, value -> ((Cancellable)value).setCancelled(true));
++            assertTrue(((Cancellable)event).isCancelled(), event.getEventName());
++        }
++    }
++
++    @Test void cancellationFinishesOnBoundedOwnerWithoutStaging() {
++        for (Event event : decisions()) {
++            dispatch(event, false, value -> ((Cancellable)value).setCancelled(true));
++            assertTrue(((Cancellable)event).isCancelled(), event.getEventName());
++        }
++    }
++
++    @Test void damageAndKnockbackUseFinalListenerValues() {
++        for (boolean staging : List.of(false,true)) {
++            EntityDamageEvent damage = new EntityDamageByEntityEvent(mock(Arrow.class), mock(Player.class),
++                EntityDamageEvent.DamageCause.PROJECTILE, mock(DamageSource.class), 8);
++            dispatch(damage, staging, value -> damage.setDamage(2));
++            assertEquals(2, damage.getFinalDamage());
++            var knockback = new io.papermc.paper.event.entity.EntityKnockbackEvent(mock(Player.class),
++                io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.DAMAGE, new Vector(1,0,0));
++            dispatch(knockback, staging, value -> knockback.setKnockback(new Vector(0,0,0)));
++            assertEquals(new Vector(0,0,0), knockback.getKnockback());
++        }
++    }
++
++    @Test void deathMessageAndInventoryDecisionFinishBeforeBroadcastAndDrops() {
++        for (boolean staging : List.of(false,true)) {
++            PlayerDeathEvent death = death();
++            dispatch(death, staging, value -> {
++                death.deathMessage(Component.text("Custom bending death"));
++                death.setKeepInventory(true);
++                death.setDroppedExp(0);
++            });
++            assertEquals(Component.text("Custom bending death"), death.deathMessage());
++            assertTrue(death.getKeepInventory());
++            assertEquals(0, death.getDroppedExp());
++        }
++    }
++
++    private static PlayerDeathEvent death() {
++        return new PlayerDeathEvent(mock(Player.class), mock(DamageSource.class), new ArrayList<>(),
++            8, Component.text("Vanilla death"), true);
++    }
++
++    private static List<Event> decisions() {
++        Player player=mock(Player.class);Arrow arrow=mock(Arrow.class);DamageSource source=mock(DamageSource.class);
++        return List.of(
++            new EntityDamageEvent(player,EntityDamageEvent.DamageCause.FALL,source,8),
++            new EntityDamageByEntityEvent(arrow,player,EntityDamageEvent.DamageCause.PROJECTILE,source,8),
++            new EntityDamageByBlockEvent(null,null,player,EntityDamageEvent.DamageCause.LAVA,source,8),
++            new EntityCombustEvent(player,4f),
++            new EntityKnockbackEvent(player,EntityKnockbackEvent.KnockbackCause.ENTITY_ATTACK,1,new Vector(1,0,0),new Vector(1,0,0)),
++            new io.papermc.paper.event.entity.EntityKnockbackEvent(player,io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.DAMAGE,new Vector(1,0,0)),
++            new ProjectileLaunchEvent(arrow),
++            new EntityShootBowEvent(player,null,null,arrow,EquipmentSlot.HAND,1,true),
++            new EntityDeathEvent(player,source,new ArrayList<>(),8),
++            death()
++        );
++    }
++
++    private static void dispatch(Event event,boolean staging,java.util.function.Consumer<Event> callback) {
++        Server server=mock(Server.class);when(server.isPrimaryThread()).thenReturn(true);
++        when(server.getLogger()).thenReturn(Logger.getLogger("CombatDecisionTest"));
++        PaperEventManager manager=new PaperEventManager(server);
++        PluginMeta meta=mock(PluginMeta.class);when(meta.getName()).thenReturn("CombatProtection");
++        when(meta.getMainClass()).thenReturn("example.CombatProtection");when(meta.getVersion()).thenReturn("1.0");
++        when(meta.getPluginDependencies()).thenReturn(List.of());when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Plugin plugin=mock(Plugin.class);when(plugin.getPluginMeta()).thenReturn(meta);
++        when(plugin.getName()).thenReturn("CombatProtection");when(plugin.getLogger()).thenReturn(Logger.getLogger("CombatDecisionTest"));
++        when(plugin.isEnabled()).thenReturn(true);
++        AtomicInteger calls=new AtomicInteger();
++        RegisteredListener listener=new RegisteredListener(new Listener(){},(ignored,value)->{
++            calls.incrementAndGet();callback.accept(value);
++        },EventPriority.NORMAL,plugin,false);
++        event.getHandlers().register(listener);
++        ServerLevel level=mock(ServerLevel.class);MinecraftServer runtime=mock(MinecraftServer.class);
++        when(runtime.enqueueGlobalOwnerTask(any(Runnable.class))).thenReturn(true);
++        doReturn(runtime).when(level).getServer();
++        RegionTickStaging.Session session=RegionTickStaging.newSession();
++        try(var owner=OwnerDomainExecutor.enterRegion(level,0,0,0,0,"combat-decision")) {
++            if(staging)RegionTickStaging.begin(session);
++            manager.callEvent(event);
++            assertEquals(1,calls.get(),event.getEventName()+" must finish before callEvent returns");
++        } finally {
++            RegionTickStaging.end();event.getHandlers().unregister(listener);
++        }
++        var replay=mock(org.bukkit.plugin.PluginManager.class);
++        try(var bukkit=mockStatic(org.bukkit.Bukkit.class)) {
++            bukkit.when(org.bukkit.Bukkit::getPluginManager).thenReturn(replay);
++            RegionTickStaging.applyAndClear(session,null);
++        }
++        verifyNoInteractions(replay);
++        assertEquals(1,calls.get(),"Decision must not replay");
++    }
++}
