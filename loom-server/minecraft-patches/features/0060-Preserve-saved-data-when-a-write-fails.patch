@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 27 Oct 2026 10:03:52 +0200
+Subject: [PATCH] Preserve saved data when a write fails
+
+
+diff --git a/net/minecraft/world/level/storage/SavedDataStorage.java b/net/minecraft/world/level/storage/SavedDataStorage.java
+index 69e2f50406b79071707b0615b17d646124629ec9..7f0b2d20fd8b0dfbed559ce235522528099bc9b2 100644
+--- a/net/minecraft/world/level/storage/SavedDataStorage.java
++++ b/net/minecraft/world/level/storage/SavedDataStorage.java
+@@ -211,7 +211,21 @@ public class SavedDataStorage implements AutoCloseable {
+ 
+         try {
+             FileUtil.createDirectoriesSafe(path.getParent());
+-            NbtIo.writeCompressed(tag, path);
++            // Finish compression before replacing the last successful save.
++            Path temporary = Files.createTempFile(path.getParent(), path.getFileName() + "-", ".tmp");
++            try {
++                NbtIo.writeCompressed(tag, temporary);
++                if (!Util.safeReplaceOrMoveFile(path, temporary, path.resolveSibling(path.getFileName() + "_old"), false)) {
++                    throw new IOException("Could not replace saved data file " + path);
++                }
++            } catch (IOException | RuntimeException | Error failure) {
++                try {
++                    Files.deleteIfExists(temporary);
++                } catch (IOException cleanupFailure) {
++                    failure.addSuppressed(cleanupFailure);
++                }
++                throw failure;
++            }
+         } catch (IOException e) {
+             LOGGER.error("Could not save data to {}", path.getFileName(), e);
+             throw new java.io.UncheckedIOException(e);

@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 27 Oct 2026 09:56:02 +0200
+Subject: [PATCH] Test saved data replacement and failure reporting
+
+
+diff --git a/src/test/java/net/minecraft/world/level/storage/SavedDataWriteFailureTest.java b/src/test/java/net/minecraft/world/level/storage/SavedDataWriteFailureTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..686281dbac59ecc7facd1c96f5d37909616e1806
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/level/storage/SavedDataWriteFailureTest.java
+@@ -0,0 +1,93 @@
++package net.minecraft.world.level.storage;
++
++import com.mojang.datafixers.DataFixer;
++import com.mojang.serialization.Codec;
++import com.mojang.serialization.DataResult;
++import java.io.DataOutput;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.concurrent.CompletionException;
++import net.minecraft.core.HolderLookup;
++import net.minecraft.nbt.CompoundTag;
++import net.minecraft.nbt.NbtAccounter;
++import net.minecraft.nbt.NbtIo;
++import net.minecraft.nbt.NbtOps;
++import net.minecraft.resources.Identifier;
++import net.minecraft.resources.RegistryOps;
++import net.minecraft.util.datafix.DataFixTypes;
++import net.minecraft.world.level.saveddata.SavedData;
++import net.minecraft.world.level.saveddata.SavedDataType;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class SavedDataWriteFailureTest {
++    @TempDir Path temporary;
++    private static final class State extends SavedData {}
++
++    @Test void aFailedWritePreservesTheLastSuccessfulFile() throws Exception {
++        Fixture fixture=new Fixture();
++        fixture.write(tag(1));
++        byte[] original=Files.readAllBytes(fixture.file);
++        CompoundTag failing=mock(CompoundTag.class);
++        when(failing.getId()).thenReturn((byte)10);
++        doAnswer(call->{
++            // Produce bytes before the failure, as an interrupted or failed compressed write can.
++            ((DataOutput)call.getArgument(0)).write(new byte[4096]);
++            throw new IOException("simulated failure during saved data output");
++        }).when(failing).write(any(DataOutput.class));
++        assertThrows(CompletionException.class,()->fixture.write(failing));
++        assertArrayEquals(original,Files.readAllBytes(fixture.file));
++        assertEquals(1,NbtIo.readCompressed(fixture.file,NbtAccounter.unlimitedHeap()).getCompoundOrEmpty("data").getIntOr("value",-1));
++        try(var files=Files.list(fixture.file.getParent())) {
++            assertTrue(files.allMatch(path->path.getFileName().toString().endsWith(".dat")||path.getFileName().toString().endsWith(".dat_old")),"Failed temporary output must be removed");
++        }
++    }
++
++    @Test void aSuccessfulReplacementKeepsThePreviousFileAsBackup() throws Exception {
++        Fixture fixture=new Fixture();
++        fixture.write(tag(1));byte[] original=Files.readAllBytes(fixture.file);
++        fixture.write(tag(2));
++        assertEquals(2,NbtIo.readCompressed(fixture.file,NbtAccounter.unlimitedHeap()).getCompoundOrEmpty("data").getIntOr("value",-1));
++        assertArrayEquals(original,Files.readAllBytes(fixture.file.resolveSibling("write-test.dat_old")));
++    }
++
++    @Test void replacementFailureReachesTheCallerAndPreservesTheCurrentFile() throws Exception {
++        Fixture fixture=new Fixture();
++        fixture.write(tag(1));byte[] original=Files.readAllBytes(fixture.file);
++        Path blockedBackup=fixture.file.resolveSibling("write-test.dat_old");
++        Files.createDirectory(blockedBackup);Files.writeString(blockedBackup.resolve("occupied"),"keep");
++        assertThrows(CompletionException.class,()->fixture.write(tag(2)));
++        assertArrayEquals(original,Files.readAllBytes(fixture.file));
++        assertEquals("keep",Files.readString(blockedBackup.resolve("occupied")));
++        try(var files=Files.list(fixture.file.getParent())) {
++            assertFalse(files.anyMatch(path->path.getFileName().toString().endsWith(".tmp")));
++        }
++    }
++
++    private static CompoundTag tag(int value) {
++        CompoundTag tag=new CompoundTag();tag.putInt("value",value);return tag;
++    }
++
++    private final class Fixture {
++        private final State data=new State();
++        private final Codec<State> codec=mock(Codec.class);
++        private final SavedDataType<State> type=new SavedDataType<>(Identifier.withDefaultNamespace("write-test"),State::new,codec,DataFixTypes.SAVED_DATA_SCOREBOARD);
++        private final SavedDataStorage storage;
++        private final Path file=temporary.resolve("minecraft/write-test.dat");
++        private Fixture() {
++            HolderLookup.Provider registries=mock(HolderLookup.Provider.class);
++            when(registries.createSerializationContext(NbtOps.INSTANCE)).thenReturn(RegistryOps.create(NbtOps.INSTANCE,registries));
++            storage=new SavedDataStorage(temporary,mock(DataFixer.class),registries);
++            storage.set(type,data);
++        }
++        private void write(CompoundTag next) {
++            doReturn(DataResult.success(next)).when(codec).encodeStart(any(),same(data));
++            data.setDirty();storage.scheduleSave().join();
++        }
++    }
++}
