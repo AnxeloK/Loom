@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 28 Oct 2026 14:40:15 +0200
+Subject: [PATCH] Finish pathfinding event decisions before path creation
+
+
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+index 5d805809438124b5b3308fd1d84e868fed021ae7..439af3c09fabe16c578dd052f80a39f1a38a2677 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+@@ -59,6 +59,7 @@ class PaperEventManager {
+             || event instanceof io.papermc.paper.event.entity.EntityKnockbackEvent
+             || event instanceof org.bukkit.event.entity.ProjectileLaunchEvent
+             || event instanceof org.bukkit.event.entity.EntityShootBowEvent
++            || event instanceof com.destroystokyo.paper.event.entity.EntityPathfindEvent
+             || event instanceof org.bukkit.event.player.PlayerRespawnEvent
+             || event instanceof org.bukkit.event.entity.ExplosionPrimeEvent
+             || event instanceof org.bukkit.event.entity.EntityExplodeEvent
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/PathfindingDecisionTest.java b/src/test/java/io/papermc/paper/plugin/manager/PathfindingDecisionTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..87d595aa4826c1cc8419866a212a91fe17a015cc
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/PathfindingDecisionTest.java
+@@ -0,0 +1,70 @@
++package io.papermc.paper.plugin.manager;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.logging.Logger;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.RegionTickStaging;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import org.bukkit.Server;
++import org.bukkit.entity.*;
++import org.bukkit.event.*;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.RegisteredListener;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import com.destroystokyo.paper.event.entity.EntityPathfindEvent;
++import org.bukkit.Location;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class PathfindingDecisionTest {
++    @Test void cancellationFinishesBeforePathfindingDuringStaging() {
++        verifyCancellation(true);
++    }
++    @Test void cancellationFinishesOnABoundedOwnerWithoutStaging() {
++        verifyCancellation(false);
++    }
++    private static void verifyCancellation(boolean staging) {
++        EntityPathfindEvent event=new EntityPathfindEvent(mock(Zombie.class),new Location(null,4,64,4),null);
++        dispatch(event,staging,value->((EntityPathfindEvent)value).setCancelled(true));
++        assertTrue(event.isCancelled());
++    }
++    private static void dispatch(Event event,boolean staging,java.util.function.Consumer<Event> callback) {
++        Server server=mock(Server.class);when(server.isPrimaryThread()).thenReturn(true);
++        when(server.getLogger()).thenReturn(Logger.getLogger("PathfindingDecisionTest"));
++        PaperEventManager manager=new PaperEventManager(server);
++        PluginMeta meta=mock(PluginMeta.class);when(meta.getName()).thenReturn("PathProtection");
++        when(meta.getMainClass()).thenReturn("example.PathProtection");when(meta.getVersion()).thenReturn("1.0");
++        when(meta.getPluginDependencies()).thenReturn(List.of());when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        Plugin plugin=mock(Plugin.class);when(plugin.getPluginMeta()).thenReturn(meta);
++        when(plugin.getName()).thenReturn("PathProtection");when(plugin.getLogger()).thenReturn(Logger.getLogger("PathfindingDecisionTest"));
++        when(plugin.isEnabled()).thenReturn(true);
++        AtomicInteger calls=new AtomicInteger();
++        RegisteredListener listener=new RegisteredListener(new Listener(){},(ignored,value)->{
++            calls.incrementAndGet();callback.accept(value);
++        },EventPriority.NORMAL,plugin,false);
++        event.getHandlers().register(listener);
++        ServerLevel level=mock(ServerLevel.class);MinecraftServer runtime=mock(MinecraftServer.class);
++        when(runtime.enqueueGlobalOwnerTask(any(Runnable.class))).thenReturn(true);
++        doReturn(runtime).when(level).getServer();
++        RegionTickStaging.Session session=RegionTickStaging.newSession();
++        try(var owner=OwnerDomainExecutor.enterRegion(level,0,0,0,0,"pathfinding-decision")) {
++            if(staging)RegionTickStaging.begin(session);
++            manager.callEvent(event);
++            assertEquals(1,calls.get(),event.getEventName()+" must finish before callEvent returns");
++        } finally {
++            RegionTickStaging.end();event.getHandlers().unregister(listener);
++        }
++        var replay=mock(org.bukkit.plugin.PluginManager.class);
++        try(var bukkit=mockStatic(org.bukkit.Bukkit.class)) {
++            bukkit.when(org.bukkit.Bukkit::getPluginManager).thenReturn(replay);
++            RegionTickStaging.applyAndClear(session,null);
++        }
++        verifyNoInteractions(replay);
++        assertEquals(1,calls.get(),"Decision must not replay");
++    }
++}
+diff --git a/src/test/java/io/papermc/paper/plugin/manager/PathfindingDecisionTestSuite.java b/src/test/java/io/papermc/paper/plugin/manager/PathfindingDecisionTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..6853a5a049220ef0325ad4a9964bdf5e3d163a3b
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/plugin/manager/PathfindingDecisionTestSuite.java
+@@ -0,0 +1,7 @@
++package io.papermc.paper.plugin.manager;
++import org.junit.platform.suite.api.*;
++@Suite
++@IncludeTags("Normal")
++@SelectClasses(PathfindingDecisionTest.class)
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class PathfindingDecisionTestSuite {}
