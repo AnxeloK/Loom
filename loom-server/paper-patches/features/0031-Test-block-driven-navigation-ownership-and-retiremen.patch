@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 28 Oct 2026 14:08:52 +0200
+Subject: [PATCH] Test block-driven navigation ownership and retirement
+
+
+diff --git a/src/test/java/net/minecraft/server/level/NavigationUpdatesTest.java b/src/test/java/net/minecraft/server/level/NavigationUpdatesTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..8184cc18dae4df234b15eba067a7c7ecb6c28219
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/level/NavigationUpdatesTest.java
+@@ -0,0 +1,84 @@
++package net.minecraft.server.level;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicBoolean;
++import net.minecraft.core.BlockPos;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.entity.Mob;
++import net.minecraft.world.entity.ai.navigation.PathNavigation;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class NavigationUpdatesTest {
++    @Test void boundedUpdatesWaitForTheWorldOwnerAndRepeatedPositionsShareAContinuation() {
++        try (Fixture f = new Fixture()) {
++            f.updates.blockChanged(f.pos);f.updates.blockChanged(f.pos);
++            f.updates.blockChanged(f.pos.east());
++            verifyNoInteractions(f.mob, f.navigation);
++            assertEquals(1, f.queued.size());
++            f.full.set(true);f.queued.removeFirst().run();
++            verify(f.navigation).shouldRecomputePath(f.pos);
++            verify(f.navigation).shouldRecomputePath(f.pos.east());
++            verify(f.navigation, times(2)).recomputePath();
++        }
++    }
++
++    @Test void directWorldOwnerUpdatesRetainImmediateRecomputation() {
++        try (Fixture f = new Fixture()) {
++            f.full.set(true);f.updates.blockChanged(f.pos);
++            verify(f.navigation).recomputePath();assertTrue(f.queued.isEmpty());
++        }
++    }
++
++    @Test void removedMobsAreNotTouchedByAQueuedUpdate() {
++        try (Fixture f = new Fixture()) {
++            f.updates.blockChanged(f.pos);f.updates.remove(f.mob);
++            f.full.set(true);f.queued.removeFirst().run();
++            verifyNoInteractions(f.mob, f.navigation);
++        }
++    }
++
++    @Test void aDifferentWorldCannotDrainNavigationState() {
++        try (Fixture f = new Fixture()) {
++            f.updates.blockChanged(f.pos);
++            assertThrows(IllegalStateException.class, () -> f.queued.getFirst().run());
++            verifyNoInteractions(f.mob, f.navigation);
++        }
++    }
++
++    @Test void reentrantBlockWritesAreDeferredWithoutRecursiveNavigation() {
++        try (Fixture f = new Fixture()) {
++            f.full.set(true);
++            doAnswer(call -> { f.updates.blockChanged(f.pos.east()); return null; }).doNothing().when(f.navigation).recomputePath();
++            f.updates.blockChanged(f.pos);
++            verify(f.navigation).recomputePath();assertEquals(1, f.queued.size());
++            f.queued.removeFirst().run();verify(f.navigation, times(2)).recomputePath();
++        }
++    }
++
++    private static class Fixture implements AutoCloseable {
++        final ServerLevel level = mock(ServerLevel.class);
++        final Mob mob = mock(Mob.class);
++        final PathNavigation navigation = mock(PathNavigation.class);
++        final BlockPos pos = new BlockPos(4, 64, 4);
++        final NavigationUpdates updates = new NavigationUpdates(level);
++        final AtomicBoolean full = new AtomicBoolean();
++        final List<Runnable> queued = new ArrayList<>();
++        final org.mockito.MockedStatic<OwnerDomainExecutor> owners = mockStatic(OwnerDomainExecutor.class);
++        final org.mockito.MockedStatic<TickRegions> regions = mockStatic(TickRegions.class);
++        Fixture() {
++            when(mob.getNavigation()).thenReturn(navigation);
++            when(navigation.shouldRecomputePath(any())).thenReturn(true);
++            owners.when(() -> OwnerDomainExecutor.isCurrentFullLevelOwnerOrGlobal(level)).thenAnswer(call -> full.get());
++            regions.when(() -> TickRegions.sendFullLevelContinuation(eq(level), any())).thenAnswer(call -> { queued.add(call.getArgument(1));return null; });
++            updates.add(mob);clearInvocations(mob, navigation);
++        }
++        public void close() { regions.close();owners.close(); }
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/level/NavigationUpdatesTestSuite.java b/src/test/java/net/minecraft/server/level/NavigationUpdatesTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d61db1461b6123682a6e1344dad9335ec31b5e7d
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/level/NavigationUpdatesTestSuite.java
+@@ -0,0 +1,9 @@
++package net.minecraft.server.level;
++
++import org.junit.platform.suite.api.*;
++
++@Suite
++@IncludeTags("Normal")
++@SelectClasses(NavigationUpdatesTest.class)
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class NavigationUpdatesTestSuite {}

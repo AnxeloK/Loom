@@ -1,0 +1,238 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 28 Oct 2026 14:08:52 +0200
+Subject: [PATCH] Keep block-driven navigation work within world ownership
+
+
+diff --git a/net/minecraft/server/level/NavigationUpdates.java b/net/minecraft/server/level/NavigationUpdates.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb6aedc1cf7e45f75a39dc3b0ad19ef26ec438bc
+--- /dev/null
++++ b/net/minecraft/server/level/NavigationUpdates.java
+@@ -0,0 +1,65 @@
++package net.minecraft.server.level;
++
++import java.util.ArrayList;
++import java.util.LinkedHashSet;
++import java.util.List;
++import java.util.Set;
++import java.util.concurrent.ConcurrentHashMap;
++import net.minecraft.core.BlockPos;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.entity.Mob;
++import net.minecraft.world.entity.ai.navigation.PathNavigation;
++
++/** Navigation state is read only while the caller owns every tracked mob in the world. */
++final class NavigationUpdates {
++    private final ServerLevel level;
++    private final Set<Mob> mobs = ConcurrentHashMap.newKeySet();
++    private final Set<BlockPos> pending = new LinkedHashSet<>();
++    private boolean queued;
++    private boolean updating;
++
++    NavigationUpdates(ServerLevel level) { this.level = level; }
++
++    void add(Mob mob) { this.mobs.add(mob); }
++    void remove(Mob mob) { this.mobs.remove(mob); }
++
++    void blockChanged(BlockPos pos) {
++        if (this.mobs.isEmpty()) return;
++        if (OwnerDomainExecutor.isCurrentFullLevelOwnerOrGlobal(this.level) && !this.updating) {
++            this.update(pos);
++            return;
++        }
++        synchronized (this.pending) {
++            // Retain one position per phase and one continuation per world, including reentrant writes.
++            this.pending.add(pos.immutable());
++            if (this.queued) return;
++            this.queued = true;
++        }
++        TickRegions.sendFullLevelContinuation(this.level, this::drain);
++    }
++
++    private void drain() {
++        if (!OwnerDomainExecutor.isCurrentFullLevelOwnerOrGlobal(this.level))
++            throw new IllegalStateException("Navigation updates require the full world owner");
++        final List<BlockPos> changed;
++        synchronized (this.pending) {
++            changed = new ArrayList<>(this.pending);
++            this.pending.clear();
++            this.queued = false;
++        }
++        for (BlockPos pos : changed) this.update(pos);
++    }
++
++    private void update(BlockPos pos) {
++        List<PathNavigation> affected = new ArrayList<>();
++        for (Mob mob : this.mobs) {
++            PathNavigation navigation = mob.getNavigation();
++            if (navigation.shouldRecomputePath(pos)) affected.add(navigation);
++        }
++        this.updating = true;
++        try {
++            for (PathNavigation navigation : affected) navigation.recomputePath();
++        } finally { this.updating = false; }
++    }
++}
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 3f936e2369f612a98b71f6e91db204bde3b65d25..ad77b3e4019a7050cc7c014a1d9c8eccdd6fb121 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -212,8 +212,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     private final LevelTicks<Block> blockTicks = new LevelTicks<>(this::isPositionTickingWithEntitiesLoaded);
+     private final LevelTicks<Fluid> fluidTicks = new LevelTicks<>(this::isPositionTickingWithEntitiesLoaded);
+     private final PathTypeCache pathTypesByPosCache = new PathTypeCache();
+-    private final Set<Mob> navigatingMobs = new ObjectOpenHashSet<>();
+-    private volatile boolean isUpdatingNavigations;
++    private final NavigationUpdates navigationUpdates = new NavigationUpdates(this);
+     protected final Raids raids;
+     private final ObjectLinkedOpenHashSet<BlockEventData> blockEvents = new ObjectLinkedOpenHashSet<>();
+     private final List<BlockEventData> blockEventsToReschedule = new ArrayList<>(64);
+@@ -2154,47 +2153,15 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+ 
+     @Override
+     public void sendBlockUpdated(final BlockPos pos, final BlockState old, final BlockState current, final @Block.UpdateFlags int updateFlags) {
+-        if (this.isUpdatingNavigations) {
+-            String message = "recursive call to sendBlockUpdated";
+-            Util.logAndPauseIfInIde("recursive call to sendBlockUpdated", new IllegalStateException("recursive call to sendBlockUpdated"));
+-        }
+-
+         this.getChunkSource().blockChanged(pos);
+         this.pathTypesByPosCache.invalidate(pos);
+-        if (this.paperConfig().misc.updatePathfindingOnBlockUpdate) { // Paper - option to disable pathfinding updates
+-        VoxelShape oldShape = old.getCollisionShape(this, pos);
+-        VoxelShape newShape = current.getCollisionShape(this, pos);
+-        if (Shapes.joinIsNotEmpty(oldShape, newShape, BooleanOp.NOT_SAME)) {
+-            List<PathNavigation> navigationsToUpdate = new ObjectArrayList<>();
+-
+-            try { // Paper - catch CME see below why
+-            for (Mob navigatingMob : this.navigatingMobs) {
+-                PathNavigation pathNavigation = navigatingMob.getNavigation();
+-                if (pathNavigation.shouldRecomputePath(pos)) {
+-                    navigationsToUpdate.add(pathNavigation);
+-                }
+-            }
+-            // Paper start - catch CME see below why
+-            } catch (final java.util.ConcurrentModificationException concurrentModificationException) {
+-                // This can happen because the pathfinder update below may trigger a chunk load, which in turn may cause more navigators to register
+-                // In this case we just run the update again across all the iterators as the chunk will then be loaded
+-                // As this is a relative edge case it is much faster than copying navigators (on either read or write)
+-                this.sendBlockUpdated(pos, old, current, updateFlags);
+-                return;
+-            }
+-            // Paper end - catch CME see below why
+-
+-            try {
+-                this.isUpdatingNavigations = true;
+-
+-                for (PathNavigation navigation : navigationsToUpdate) {
+-                    navigation.recomputePath();
+-                }
+-            } finally {
+-                this.isUpdatingNavigations = false;
++        if (this.paperConfig().misc.updatePathfindingOnBlockUpdate) {
++            VoxelShape oldShape = old.getCollisionShape(this, pos);
++            VoxelShape newShape = current.getCollisionShape(this, pos);
++            if (Shapes.joinIsNotEmpty(oldShape, newShape, BooleanOp.NOT_SAME)) {
++                this.navigationUpdates.blockChanged(pos);
+             }
+         }
+-        } // Paper - option to disable pathfinding updates
+     }
+ 
+     @Override
+@@ -3441,14 +3408,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             }
+ 
+             if (entity instanceof Mob mob) {
+-                if (false && ServerLevel.this.isUpdatingNavigations) { // Paper - Remove unnecessary onTrackingStart during navigation warning
+-                    String message = "onTrackingStart called during navigation iteration";
+-                    Util.logAndPauseIfInIde(
+-                        "onTrackingStart called during navigation iteration", new IllegalStateException("onTrackingStart called during navigation iteration")
+-                    );
+-                }
+-
+-                ServerLevel.this.navigatingMobs.add(mob);
++                ServerLevel.this.navigationUpdates.add(mob);
+             }
+ 
+             if (entity instanceof EnderDragon dragon) {
+@@ -3512,14 +3472,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             }
+ 
+             if (entity instanceof Mob mob) {
+-                if (false && ServerLevel.this.isUpdatingNavigations) { // Paper - Remove unnecessary onTrackingStart during navigation warning
+-                    String message = "onTrackingStart called during navigation iteration";
+-                    Util.logAndPauseIfInIde(
+-                        "onTrackingStart called during navigation iteration", new IllegalStateException("onTrackingStart called during navigation iteration")
+-                    );
+-                }
+-
+-                ServerLevel.this.navigatingMobs.remove(mob);
++                ServerLevel.this.navigationUpdates.remove(mob);
+             }
+ 
+             if (entity instanceof EnderDragon dragon) {
+diff --git a/net/minecraft/world/level/pathfinder/PathTypeCache.java b/net/minecraft/world/level/pathfinder/PathTypeCache.java
+index 1a50ec0d56bb4b9c3b0958a0281028c8eff1000c..54ee67ae9c05be3af8d428e3068e1347bbad217c 100644
+--- a/net/minecraft/world/level/pathfinder/PathTypeCache.java
++++ b/net/minecraft/world/level/pathfinder/PathTypeCache.java
+@@ -1,43 +1,37 @@
+ package net.minecraft.world.level.pathfinder;
+ 
+ import it.unimi.dsi.fastutil.HashCommon;
++import java.util.concurrent.atomic.AtomicReferenceArray;
+ import net.minecraft.core.BlockPos;
+ import net.minecraft.world.level.BlockGetter;
+ import org.jspecify.annotations.Nullable;
+ 
+ public class PathTypeCache {
+     private static final int SIZE = 4096;
+-    private static final int MASK = 4095;
+-    private final long[] positions = new long[4096];
+-    private final PathType[] pathTypes = new PathType[4096];
++    private static final int MASK = SIZE - 1;
++    private final AtomicReferenceArray<Entry> entries = new AtomicReferenceArray<>(SIZE);
++
++    private record Entry(long position, @Nullable PathType type) {}
+ 
+     public PathType getOrCompute(final BlockGetter level, final BlockPos pos) {
+         long key = pos.asLong();
+         int index = index(key);
+-        PathType cachedPathType = this.get(index, key);
+-        return cachedPathType != null ? cachedPathType : this.compute(level, pos, index, key);
+-    }
+-
+-    private @Nullable PathType get(final int index, final long key) {
+-        return this.positions[index] == key ? this.pathTypes[index] : null;
+-    }
+-
+-    private PathType compute(final BlockGetter level, final BlockPos pos, final int index, final long key) {
+-        PathType pathType = WalkNodeEvaluator.getPathTypeFromState(level, pos);
+-        this.positions[index] = key;
+-        this.pathTypes[index] = pathType;
+-        return pathType;
++        Entry previous = this.entries.get(index);
++        if (previous != null && previous.position() == key && previous.type() != null) return previous.type();
++        PathType type = WalkNodeEvaluator.getPathTypeFromState(level, pos);
++        // Invalidation or a colliding entry may have replaced this slot while the block was read.
++        this.entries.compareAndSet(index, previous, new Entry(key, type));
++        return type;
+     }
+ 
+     public void invalidate(final BlockPos pos) {
+         long key = pos.asLong();
+         int index = index(key);
+-        if (this.positions[index] == key) {
+-            this.pathTypes[index] = null;
+-        }
++        // A fresh tombstone also prevents an in-flight miss from repopulating an invalidated slot.
++        this.entries.set(index, new Entry(key, null));
+     }
+ 
+     private static int index(final long pos) {
+-        return (int)HashCommon.mix(pos) & 4095;
++        return (int)HashCommon.mix(pos) & MASK;
+     }
+ }

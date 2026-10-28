@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 28 Oct 2026 14:04:16 +0200
+Subject: [PATCH] Test path cache invalidation during overlapping reads
+
+
+diff --git a/src/test/java/net/minecraft/world/level/pathfinder/PathTypeCacheConcurrencyTest.java b/src/test/java/net/minecraft/world/level/pathfinder/PathTypeCacheConcurrencyTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..be9cc10d8e82e0641fed20c0188ba5d5b2f47cad
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/level/pathfinder/PathTypeCacheConcurrencyTest.java
+@@ -0,0 +1,55 @@
++package net.minecraft.world.level.pathfinder;
++
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.core.BlockPos;
++import net.minecraft.world.level.BlockGetter;
++import net.minecraft.world.level.block.Blocks;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class PathTypeCacheConcurrencyTest {
++    @Test void invalidationPreventsAnOlderComputationFromRefillingTheCache() throws Exception {
++        PathTypeCache cache = new PathTypeCache();
++        BlockPos pos = new BlockPos(4, 64, 4);
++        BlockGetter level = mock(BlockGetter.class);
++        CountDownLatch reading = new CountDownLatch(1), release = new CountDownLatch(1);
++        when(level.getBlockStateIfLoaded(pos)).thenAnswer(call -> {
++            if (Thread.currentThread().getName().equals("old-path-read")) {
++                reading.countDown();
++                assertTrue(release.await(5, TimeUnit.SECONDS));
++                return Blocks.AIR.defaultBlockState();
++            }
++            return Blocks.LAVA.defaultBlockState();
++        });
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        Thread old = new Thread(() -> {
++            try { cache.getOrCompute(level, pos); } catch (Throwable error) { failure.set(error); }
++        }, "old-path-read");
++        old.start();
++        try {
++            assertTrue(reading.await(5, TimeUnit.SECONDS));
++            cache.invalidate(pos);
++        } finally { release.countDown(); }
++        old.join(5000);
++        assertFalse(old.isAlive());
++        if (failure.get() != null) throw new AssertionError(failure.get());
++        assertEquals(PathType.LAVA, cache.getOrCompute(level, pos));
++    }
++
++    @Test void repeatedReadsRetainTheCachedValueUntilInvalidation() {
++        PathTypeCache cache = new PathTypeCache();
++        BlockPos pos = new BlockPos(1, 64, 1);
++        BlockGetter level = mock(BlockGetter.class);
++        when(level.getBlockStateIfLoaded(pos)).thenReturn(Blocks.AIR.defaultBlockState());
++        assertEquals(PathType.OPEN, cache.getOrCompute(level, pos));
++        when(level.getBlockStateIfLoaded(pos)).thenReturn(Blocks.LAVA.defaultBlockState());
++        assertEquals(PathType.OPEN, cache.getOrCompute(level, pos));
++        cache.invalidate(pos);
++        assertEquals(PathType.LAVA, cache.getOrCompute(level, pos));
++    }
++}
+diff --git a/src/test/java/net/minecraft/world/level/pathfinder/PathTypeCacheConcurrencyTestSuite.java b/src/test/java/net/minecraft/world/level/pathfinder/PathTypeCacheConcurrencyTestSuite.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c0b0cee6fc9c4246cc6caef1a4506d1bd10919dc
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/level/pathfinder/PathTypeCacheConcurrencyTestSuite.java
+@@ -0,0 +1,9 @@
++package net.minecraft.world.level.pathfinder;
++
++import org.junit.platform.suite.api.*;
++
++@Suite
++@IncludeTags("Normal")
++@SelectClasses(PathTypeCacheConcurrencyTest.class)
++@ConfigurationParameter(key = "TestSuite", value = "Normal")
++public class PathTypeCacheConcurrencyTestSuite {}
