@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Thu, 29 Oct 2026 15:58:28 +0200
+Subject: [PATCH] Expose asynchronous player data checkpoints
+
+
+diff --git a/src/main/java/org/bukkit/entity/Player.java b/src/main/java/org/bukkit/entity/Player.java
+index 58bf2db14adc8966449b5cb96c731242e2e2e091..dab57c9b8938b0fe88e8af77d30ee184de78b1c8 100644
+--- a/src/main/java/org/bukkit/entity/Player.java
++++ b/src/main/java/org/bukkit/entity/Player.java
+@@ -547,6 +547,20 @@ public interface Player extends HumanEntity, Conversable, OfflinePlayer, PluginM
+      */
+     public void saveData();
+ 
++    /**
++     * Saves a snapshot of this session's current player data without blocking its tick owner on IO.
++     * Capture runs on the player owner. The write is ordered with autosaves, logout and subsequent
++     * login reads; completion means the player file has been atomically replaced and flushed.
++     * Changes made after capture are not included. This does not save the world's blocks or entities.
++     *
++     * @return completion of this accepted save; stale sessions, disabled player saving, overload,
++     *         capture failures and storage failures complete exceptionally. Cancelling this future
++     *         does not cancel an accepted write.
++     */
++    default CompletableFuture<Void> saveDataAsync() {
++        return CompletableFuture.failedFuture(new UnsupportedOperationException("Asynchronous player saves are not supported"));
++    }
++
+     /**
+      * Loads the players current location, health, inventory, motion, and
+      * other information from the &lt;uuid&gt;.dat file, in the

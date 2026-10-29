@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Thu, 29 Oct 2026 15:58:28 +0200
+Subject: [PATCH] Order explicit player checkpoints with lifecycle saves
+
+
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index f189cfa92c2d67a193820ec0928c34c630af9417..421020e3f35323d385b88098272921ef959cda94 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -118,6 +118,7 @@ public abstract class PlayerList {
+     private final List<ServerPlayer> players = new java.util.concurrent.CopyOnWriteArrayList(); // CraftBukkit - ArrayList -> CopyOnWriteArrayList: Iterator safety
+     private final Map<UUID, ServerPlayer> playersByUUID = Maps.newHashMap();
+     private final PlayerSaveQueue playerSaveQueue = new PlayerSaveQueue(); // Loom - keep async autosaves ordered with logout and shutdown
++    private final java.util.concurrent.Semaphore pluginPlayerSaves = new java.util.concurrent.Semaphore(64);
+     private final Map<NameAndId, PermissionLevel> playerPermissions = Maps.newHashMap();
+     private final UserBanList bans;
+     private final IpBanList ipBans;
+@@ -625,6 +626,47 @@ public abstract class PlayerList {
+         );
+     }
+ 
++    /** Explicit saves share the lifecycle queue and expose physical write failures to plugins. */
++    public CompletableFuture<Void> savePlayerDataAsync(final ServerPlayer player) {
++        return this.savePlayerDataAsync(player, true);
++    }
++
++    public CompletableFuture<Void> savePlayerDataAsync(final ServerPlayer player, final boolean checkpoint) {
++        if (!this.pluginPlayerSaves.tryAcquire()) {
++            return CompletableFuture.failedFuture(new java.util.concurrent.RejectedExecutionException("Too many pending player saves"));
++        }
++        final CompletableFuture<Void> result;
++        try {
++            result = net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "capture-plugin-player-save"),
++                () -> {
++                    if (this.getPlayer(player.getUUID()) != player) throw new IllegalStateException("Player session is no longer current");
++                    if (org.spigotmc.SpigotConfig.disablePlayerDataSaving) throw new IllegalStateException("Player saving is disabled");
++                    final PlayerDataStorage.PendingSave captured = this.playerIo.captureSave(player);
++                    if (captured == null) throw new IllegalStateException("Player data could not be captured");
++                    return this.playerSaveQueue.submit(player.getUUID(), () ->
++                        net.minecraft.server.threading.runtime.OwnerDomainExecutor.submit(
++                            net.minecraft.server.threading.runtime.OwnerDomainExecutor.asyncIo(this.server, "write-plugin-player-save"),
++                            () -> {
++                                if (checkpoint) {
++                                    try { this.playerIo.writeSaveChecked(captured); }
++                                    catch (final java.io.IOException failure) { throw new java.io.UncheckedIOException(failure); }
++                                } else {
++                                    this.playerIo.writeSave(captured);
++                                }
++                            }
++                        )
++                    );
++                }
++            ).thenCompose(save -> save);
++        } catch (final Throwable failure) {
++            this.pluginPlayerSaves.release();
++            return CompletableFuture.failedFuture(failure);
++        }
++        result.whenComplete((ignored, failure) -> this.pluginPlayerSaves.release());
++        return result.copy();
++    }
++
+     public void awaitPendingPlayerSaves() {
+         net.minecraft.server.threading.runtime.OwnerDomainExecutor.awaitCooperatively(
+             this.playerSaveQueue.drain().handle((ignored, failure) -> {
+diff --git a/net/minecraft/world/level/storage/PlayerDataStorage.java b/net/minecraft/world/level/storage/PlayerDataStorage.java
+index ee82a06da534d052540408ba61218ce2961a8f05..a7006e6c0d8fe135aa2c42dc7b3e758a82487807 100644
+--- a/net/minecraft/world/level/storage/PlayerDataStorage.java
++++ b/net/minecraft/world/level/storage/PlayerDataStorage.java
+@@ -64,6 +64,39 @@ public class PlayerDataStorage {
+         }
+     }
+ 
++    /** Flushes an explicit checkpoint, retaining the previous player file as its backup. */
++    public void writeSaveChecked(final PendingSave pendingSave) throws java.io.IOException {
++        java.util.UUID.fromString(pendingSave.playerId());
++        final Path directory = this.playerDir.toPath();
++        final Path current = directory.resolve(pendingSave.playerId() + ".dat");
++        final Path previous = directory.resolve(pendingSave.playerId() + ".dat_old");
++        final Path temporary = Files.createTempFile(directory, pendingSave.playerId() + "-checkpoint-", ".dat");
++        Path backup = null;
++        try {
++            NbtIo.writeCompressed(pendingSave.data(), temporary);
++            forceFile(temporary);
++            if (Files.exists(current)) {
++                backup = Files.createTempFile(directory, pendingSave.playerId() + "-backup-", ".dat");
++                Files.copy(current, backup, StandardCopyOption.REPLACE_EXISTING);
++                forceFile(backup);
++                Files.move(backup, previous, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
++            }
++            Files.move(temporary, current, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
++            try (final var channel = java.nio.channels.FileChannel.open(directory, java.nio.file.StandardOpenOption.READ)) {
++                channel.force(true);
++            }
++        } finally {
++            Files.deleteIfExists(temporary);
++            if (backup != null) Files.deleteIfExists(backup);
++        }
++    }
++
++    private static void forceFile(final Path file) throws java.io.IOException {
++        try (final var channel = java.nio.channels.FileChannel.open(file, java.nio.file.StandardOpenOption.WRITE)) {
++            channel.force(true);
++        }
++    }
++
+     public record PendingSave(String playerId, String playerName, CompoundTag data) {
+     }
+     // Loom end - split owner-bound capture from asynchronous file I/O

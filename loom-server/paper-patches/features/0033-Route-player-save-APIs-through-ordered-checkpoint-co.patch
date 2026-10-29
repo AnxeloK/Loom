@@ -1,0 +1,315 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Thu, 29 Oct 2026 15:58:28 +0200
+Subject: [PATCH] Route player save APIs through ordered checkpoint completion
+
+
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index f343b3b97dd21aa78120b74a8bcbd93a21aaab2a..73c953bde323bb18726d6ed00bcdb7bc621a7294 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -1351,7 +1351,18 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+ 
+     @Override
+     public void saveData() {
+-        this.server.getHandle().playerIo.save(this.getHandle());
++        if (org.spigotmc.SpigotConfig.disablePlayerDataSaving) return;
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.awaitCooperatively(
++            this.server.getHandle().savePlayerDataAsync(this.getHandle(), false).exceptionally(failure -> {
++                this.server.getLogger().log(java.util.logging.Level.WARNING, "Could not save player data for " + this.getName(), failure);
++                return null;
++            }), "save-plugin-player-data"
++        );
++    }
++
++    @Override
++    public java.util.concurrent.CompletableFuture<Void> saveDataAsync() {
++        return this.server.getHandle().savePlayerDataAsync(this.getHandle());
+     }
+ 
+     @Deprecated
+diff --git a/src/test/java/net/minecraft/server/players/ExplicitPlayerSaveTest.java b/src/test/java/net/minecraft/server/players/ExplicitPlayerSaveTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..97127edddd129c0e1030032a0538e0cc35543b6f
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/players/ExplicitPlayerSaveTest.java
+@@ -0,0 +1,128 @@
++package net.minecraft.server.players;
++
++import java.io.IOException;
++import java.lang.reflect.Field;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.UUID;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionException;
++import java.util.concurrent.RejectedExecutionException;
++import java.util.concurrent.Semaphore;
++import java.util.function.Supplier;
++import net.minecraft.nbt.CompoundTag;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.level.storage.PlayerDataStorage;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import org.mockito.MockedStatic;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class ExplicitPlayerSaveTest {
++    @Test void captureRunsOnPlayerOwnerAndCompletionWaitsForPhysicalIo() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var saved = f.save(); assertFalse(saved.isDone());
++            verify(f.storage).captureSave(f.player); verify(f.storage, never()).writeSaveChecked(any());
++            f.finishIo(); assertDoesNotThrow(saved::join); verify(f.storage).writeSaveChecked(f.captured);
++        }
++    }
++    @Test void autosavesAndReconnectReadsCannotOvertakeACheckpoint() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var checkpoint = f.save();
++            List<String> order = new ArrayList<>();
++            var later = f.queue.submit(f.id, () -> { order.add("later save"); return CompletableFuture.completedFuture(null); });
++            var login = f.queue.submit(f.id, () -> { order.add("login read"); return CompletableFuture.completedFuture(null); });
++            assertFalse(later.isDone()); assertFalse(login.isDone());
++            f.finishIo(); checkpoint.join(); later.join(); login.join();
++            assertEquals(List.of("later save", "login read"), order);
++        }
++    }
++    @Test void cancellationCannotReleaseTheReservationOrDiscardAcceptedData() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var saved = f.save(); assertTrue(saved.cancel(false));
++            var later = f.queue.submit(f.id, () -> CompletableFuture.completedFuture("after checkpoint"));
++            assertFalse(later.isDone()); f.finishIo(); assertEquals("after checkpoint", later.join());
++            verify(f.storage).writeSaveChecked(f.captured);
++        }
++    }
++    @Test void actualStorageFailureReachesTheCallerAndLaterSavesRemainAvailable() throws Exception {
++        try (Fixture f = new Fixture()) {
++            doThrow(new IOException("fixture write failed")).when(f.storage).writeSaveChecked(any());
++            var saved = f.save(); f.finishIo();
++            assertInstanceOf(java.io.UncheckedIOException.class, assertThrows(CompletionException.class, saved::join).getCause());
++            doNothing().when(f.storage).writeSaveChecked(any());
++            var next = f.save(); f.finishIo(); assertDoesNotThrow(next::join);
++        }
++    }
++    @Test void staleSessionsAndFailedCaptureNeverDispatchIo() throws Exception {
++        try (Fixture f = new Fixture()) {
++            when(f.players.getPlayer(f.id)).thenReturn(mock(ServerPlayer.class));
++            assertInstanceOf(IllegalStateException.class, assertThrows(CompletionException.class, () -> f.save().join()).getCause());
++            verify(f.storage, never()).captureSave(any()); assertTrue(f.jobs.isEmpty());
++            when(f.players.getPlayer(f.id)).thenReturn(f.player); doReturn(null).when(f.storage).captureSave(f.player);
++            assertInstanceOf(IllegalStateException.class, assertThrows(CompletionException.class, () -> f.save().join()).getCause());
++            assertTrue(f.jobs.isEmpty());
++        }
++    }
++    @Test void disabledSavingCannotAcknowledgeAnInventoryCheckpoint() throws Exception {
++        boolean original = org.spigotmc.SpigotConfig.disablePlayerDataSaving;
++        try (Fixture f = new Fixture()) {
++            org.spigotmc.SpigotConfig.disablePlayerDataSaving = true;
++            assertInstanceOf(IllegalStateException.class, assertThrows(CompletionException.class, () -> f.save().join()).getCause());
++            verify(f.storage, never()).captureSave(any()); assertTrue(f.jobs.isEmpty());
++        } finally { org.spigotmc.SpigotConfig.disablePlayerDataSaving = original; }
++    }
++    @Test void publicCheckpointsAreBoundedAndFinishingOneReleasesCapacity() throws Exception {
++        try (Fixture f = new Fixture()) {
++            List<CompletableFuture<Void>> saves = new ArrayList<>();
++            for (int i = 0; i < 64; i++) saves.add(f.save());
++            assertInstanceOf(RejectedExecutionException.class, assertThrows(CompletionException.class, () -> f.save().join()).getCause());
++            verify(f.storage, times(64)).captureSave(f.player);
++            f.finishIo(); var replacement = f.save();
++            while (!f.jobs.isEmpty()) f.finishIo();
++            CompletableFuture.allOf(saves.toArray(CompletableFuture[]::new)).join(); replacement.join();
++        }
++    }
++    private static final class Fixture implements AutoCloseable {
++        final UUID id = UUID.randomUUID();
++        final PlayerList players = mock(PlayerList.class);
++        final ServerPlayer player = mock(ServerPlayer.class);
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final PlayerDataStorage storage = mock(PlayerDataStorage.class);
++        final PlayerSaveQueue queue = new PlayerSaveQueue();
++        final PlayerDataStorage.PendingSave captured = new PlayerDataStorage.PendingSave(id.toString(), "Fixture", new CompoundTag());
++        final OwnerDomainExecutor.Owner playerOwner = mock(OwnerDomainExecutor.Owner.class), ioOwner = mock(OwnerDomainExecutor.Owner.class);
++        final MockedStatic<OwnerDomainExecutor> owners = mockStatic(OwnerDomainExecutor.class);
++        final List<Runnable> jobs = new ArrayList<>();
++        String domain;
++        Fixture() throws Exception {
++            field("server", server); field("playerIo", storage); field("playerSaveQueue", queue); field("pluginPlayerSaves", new Semaphore(64));
++            when(player.getUUID()).thenReturn(id); when(players.getPlayer(id)).thenReturn(player);
++            when(players.savePlayerDataAsync(player)).thenCallRealMethod();
++            when(players.savePlayerDataAsync(eq(player), anyBoolean())).thenCallRealMethod();
++            when(storage.captureSave(player)).thenAnswer(call -> { assertEquals("PLAYER", domain); return captured; });
++            doAnswer(call -> { assertEquals("IO", domain); return null; }).when(storage).writeSaveChecked(any());
++            owners.when(() -> OwnerDomainExecutor.player(player, "capture-plugin-player-save")).thenReturn(playerOwner);
++            owners.when(() -> OwnerDomainExecutor.asyncIo(server, "write-plugin-player-save")).thenReturn(ioOwner);
++            owners.when(() -> OwnerDomainExecutor.supply(eq(playerOwner), any())).thenAnswer(call -> {
++                domain = "PLAYER";
++                try { return CompletableFuture.completedFuture(((Supplier<?>) call.getArgument(1)).get()); }
++                catch (Throwable failure) { return CompletableFuture.failedFuture(failure); }
++                finally { domain = null; }
++            });
++            owners.when(() -> OwnerDomainExecutor.submit(eq(ioOwner), any())).thenAnswer(call -> {
++                CompletableFuture<Void> done = new CompletableFuture<>(); Runnable task = call.getArgument(1);
++                jobs.add(() -> { domain = "IO"; try { task.run(); done.complete(null); } catch (Throwable failure) { done.completeExceptionally(failure); } finally { domain = null; } });
++                return done;
++            });
++        }
++        void field(String name, Object value) throws Exception { Field field = PlayerList.class.getDeclaredField(name); field.setAccessible(true); field.set(players, value); }
++        CompletableFuture<Void> save() { return players.savePlayerDataAsync(player); }
++        void finishIo() { jobs.removeFirst().run(); }
++        @Override public void close() { owners.close(); }
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/players/PlayerSaveQueueTestSuite.java b/src/test/java/net/minecraft/server/players/PlayerSaveQueueTestSuite.java
+index b8f6d9d66fae045eede123ec2155277697e02e3e..cac993165124481cd708d83ea3727c01c6811e2a 100644
+--- a/src/test/java/net/minecraft/server/players/PlayerSaveQueueTestSuite.java
++++ b/src/test/java/net/minecraft/server/players/PlayerSaveQueueTestSuite.java
+@@ -9,7 +9,8 @@ import org.junit.platform.suite.api.SuiteDisplayName;
+ @Suite
+ @SuiteDisplayName("Ordered player saves")
+ @IncludeTags("Normal")
+-@SelectClasses({PlayerSaveQueueTest.class, PreparedPlayerProgressTest.class})
++@SelectClasses({PlayerSaveQueueTest.class, PreparedPlayerProgressTest.class, ExplicitPlayerSaveTest.class,
++    net.minecraft.world.level.storage.PlayerDataCheckpointTest.class, org.bukkit.craftbukkit.entity.CraftPlayerSaveTest.class})
+ @ConfigurationParameter(key = "TestSuite", value = "Normal")
+ public class PlayerSaveQueueTestSuite {
+ }
+diff --git a/src/test/java/net/minecraft/world/level/storage/PlayerDataCheckpointTest.java b/src/test/java/net/minecraft/world/level/storage/PlayerDataCheckpointTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..8063f6208b63fdf3cfd6c9c0a77c3b7658a8f976
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/level/storage/PlayerDataCheckpointTest.java
+@@ -0,0 +1,73 @@
++package net.minecraft.world.level.storage;
++
++import com.mojang.datafixers.DataFixer;
++import java.io.DataOutput;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.UUID;
++import net.minecraft.nbt.CompoundTag;
++import net.minecraft.nbt.NbtAccounter;
++import net.minecraft.nbt.NbtIo;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++public class PlayerDataCheckpointTest {
++    @TempDir Path directory;
++    final UUID id = UUID.randomUUID();
++    PlayerDataStorage storage;
++    @BeforeEach void setup() {
++        var access = mock(LevelStorageSource.LevelStorageAccess.class);
++        when(access.getLevelPath(LevelResource.PLAYER_DATA_DIR)).thenReturn(directory);
++        storage = new PlayerDataStorage(access, mock(DataFixer.class));
++    }
++    PlayerDataStorage.PendingSave save(int value) {
++        CompoundTag data = new CompoundTag(); data.putInt("inventory-receipt", value);
++        return new PlayerDataStorage.PendingSave(id.toString(), "CheckpointFixture", data);
++    }
++    Path current() { return directory.resolve(id + ".dat"); }
++    Path previous() { return directory.resolve(id + ".dat_old"); }
++    int read(Path path) throws IOException { return NbtIo.readCompressed(path, NbtAccounter.unlimitedHeap()).getIntOr("inventory-receipt", -1); }
++    void noTemporaryFiles() throws IOException {
++        try (var files = Files.list(directory)) {
++            assertFalse(files.anyMatch(path -> path.getFileName().toString().contains("-checkpoint-") || path.getFileName().toString().contains("-backup-")));
++        }
++    }
++    @Test void firstCheckpointIsReadableAfterCompletion() throws Exception {
++        storage.writeSaveChecked(save(1));
++        assertEquals(1, read(current())); assertFalse(Files.exists(previous())); noTemporaryFiles();
++    }
++    @Test void replacingAFileKeepsItsPreviousCompleteData() throws Exception {
++        storage.writeSaveChecked(save(1)); storage.writeSaveChecked(save(2));
++        assertEquals(2, read(current())); assertEquals(1, read(previous())); noTemporaryFiles();
++    }
++    @Test void failedOutputCannotReplaceTheLastSuccessfulPlayerFile() throws Exception {
++        storage.writeSaveChecked(save(1)); byte[] original = Files.readAllBytes(current());
++        CompoundTag broken = mock(CompoundTag.class); when(broken.getId()).thenReturn((byte) 10);
++        doAnswer(call -> {
++            ((DataOutput) call.getArgument(0)).write(new byte[4096]);
++            throw new IOException("fixture interrupted compressed output");
++        }).when(broken).write(any(DataOutput.class));
++        assertThrows(IOException.class, () -> storage.writeSaveChecked(new PlayerDataStorage.PendingSave(id.toString(), "CheckpointFixture", broken)));
++        assertArrayEquals(original, Files.readAllBytes(current())); assertEquals(1, read(current())); noTemporaryFiles();
++    }
++    @Test void failedBackupLeavesTheCurrentInventoryUnchanged() throws Exception {
++        storage.writeSaveChecked(save(1)); Files.createDirectory(previous());
++        assertThrows(IOException.class, () -> storage.writeSaveChecked(save(2)));
++        assertEquals(1, read(current())); assertTrue(Files.isDirectory(previous())); noTemporaryFiles();
++    }
++    @Test void aDirectoryAtThePlayerFileIsAnObservableFailure() throws Exception {
++        Files.createDirectory(current());
++        assertThrows(IOException.class, () -> storage.writeSaveChecked(save(1)));
++        assertTrue(Files.isDirectory(current())); noTemporaryFiles();
++    }
++    @Test void invalidIdentityCannotWriteOutsidePlayerStorage() throws Exception {
++        assertThrows(IllegalArgumentException.class, () -> storage.writeSaveChecked(new PlayerDataStorage.PendingSave("../outside", "CheckpointFixture", new CompoundTag())));
++        try (var files = Files.list(directory)) { assertEquals(0, files.count()); }
++    }
++}
+diff --git a/src/test/java/org/bukkit/craftbukkit/entity/CraftPlayerSaveTest.java b/src/test/java/org/bukkit/craftbukkit/entity/CraftPlayerSaveTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4197905f84d7c2cfe11d7ee22dfa3a11c8f0cc23
+--- /dev/null
++++ b/src/test/java/org/bukkit/craftbukkit/entity/CraftPlayerSaveTest.java
+@@ -0,0 +1,52 @@
++package org.bukkit.craftbukkit.entity;
++
++import java.io.IOException;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionException;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.dedicated.DedicatedPlayerList;
++import org.bukkit.craftbukkit.CraftServer;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++public class CraftPlayerSaveTest {
++    @Test void asyncCompletionComesFromTheOrderedNativeSave() {
++        DedicatedPlayerList players = mock(DedicatedPlayerList.class);
++        ServerPlayer player = mock(ServerPlayer.class);
++        CompletableFuture<Void> nativeSave = new CompletableFuture<>();
++        CraftPlayer craft = player(players, player);
++        when(players.savePlayerDataAsync(player)).thenReturn(nativeSave);
++        CompletableFuture<Void> result = craft.saveDataAsync();
++        assertFalse(result.isDone()); verify(players).savePlayerDataAsync(player);
++        nativeSave.complete(null); assertDoesNotThrow(result::join);
++    }
++    @Test void failedNativeCheckpointIsNotReportedAsSuccess() {
++        DedicatedPlayerList players = mock(DedicatedPlayerList.class);
++        ServerPlayer player = mock(ServerPlayer.class);
++        IOException failure = new IOException("fixture disk failure");
++        CraftPlayer craft = player(players, player);
++        when(players.savePlayerDataAsync(player)).thenReturn(CompletableFuture.failedFuture(failure));
++        assertSame(failure, assertThrows(CompletionException.class, () -> craft.saveDataAsync().join()).getCause());
++    }
++    private static CraftPlayer player(DedicatedPlayerList players, ServerPlayer player) {
++        CraftServer server = mock(CraftServer.class);
++        when(server.getHandle()).thenReturn(players);
++        when(player.getUUID()).thenReturn(java.util.UUID.randomUUID());
++        when(server.getDefaultGameMode()).thenReturn(org.bukkit.GameMode.SURVIVAL);
++        doReturn(net.minecraft.world.entity.EntityTypes.PLAYER).when(player).getType();
++        when(player.getInventory()).thenReturn(mock(net.minecraft.world.entity.player.Inventory.class));
++        when(player.getEnderChestInventory()).thenReturn(mock(net.minecraft.world.inventory.PlayerEnderChestContainer.class));
++        return new CraftPlayer(server, player);
++    }
++    @Test void legacySaveKeepsTheDisabledSavingNoOp() {
++        boolean original = org.spigotmc.SpigotConfig.disablePlayerDataSaving;
++        try {
++            org.spigotmc.SpigotConfig.disablePlayerDataSaving = true;
++            CraftPlayer craft = mock(CraftPlayer.class); doCallRealMethod().when(craft).saveData();
++            assertDoesNotThrow(craft::saveData); verify(craft, never()).getServer();
++        } finally { org.spigotmc.SpigotConfig.disablePlayerDataSaving = original; }
++    }
++}
