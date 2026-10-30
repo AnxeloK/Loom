@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 30 Oct 2026 19:39:44 +0200
+Subject: [PATCH] Expose persist first inventory checkpoints
+
+
+diff --git a/src/main/java/org/bukkit/entity/Player.java b/src/main/java/org/bukkit/entity/Player.java
+index dab57c9b8938b0fe88e8af77d30ee184de78b1c8..293410f2664c3c9dbb5c5b8f76342c39474bf8c8 100644
+--- a/src/main/java/org/bukkit/entity/Player.java
++++ b/src/main/java/org/bukkit/entity/Player.java
+@@ -561,6 +561,30 @@ public interface Player extends HumanEntity, Conversable, OfflinePlayer, PluginM
+         return CompletableFuture.failedFuture(new UnsupportedOperationException("Asynchronous player saves are not supported"));
+     }
+ 
++    /**
++     * Persists proposed storage contents and persistent data before applying them to this session.
++     * The editor receives an isolated container on the player owner. Other data is captured normally.
++     * Until completion, lifecycle saves include this proposal while its original inventory remains
++     * unchanged. The live storage and edited keys are applied only after a flushed checkpoint and
++     * a final owner check. Health, combat and world state are not suspended.
++     *
++     * <p>If the inventory changes, the player dies, or {@code canApply} declines, actual player data
++     * is saved before completing with {@code false}. A retired session or storage failure completes
++     * exceptionally; an accepted proposal may already be on disk and must be reconciled using the
++     * caller's persistent marker. Cancelling the returned future does not cancel accepted work.</p>
++     *
++     * @param storageContents exactly 36 storage slots, copied on acceptance; null slots are empty
++     * @param editPersistentData edits to the saved container, without changing the live container
++     * @param canApply final permission check on the player owner; it must not perform IO
++     * @return true when applied, false after a durable rejection, or an exceptional unknown outcome
++     */
++    default CompletableFuture<Boolean> applyInventoryCheckpointAsync(
++            @Nullable ItemStack[] storageContents,
++            java.util.function.Consumer<org.bukkit.persistence.PersistentDataContainer> editPersistentData,
++            java.util.function.BooleanSupplier canApply) {
++        return CompletableFuture.failedFuture(new UnsupportedOperationException("Inventory checkpoints are not supported"));
++    }
++
+     /**
+      * Loads the players current location, health, inventory, motion, and
+      * other information from the &lt;uuid&gt;.dat file, in the

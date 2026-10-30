@@ -1,0 +1,256 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 30 Oct 2026 19:39:44 +0200
+Subject: [PATCH] Keep pending inventory checkpoints coherent across player
+ saves
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 99ac3bbf4834d6a048e529ccd6414dd008e1560f..c4f6e41a4e5856fda790d8b86bf4d17579f7216d 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1223,6 +1223,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         if (this.server != null) this.server.awaitWorldUnloadsOnShutdown();
+         LOGGER.info("Stopping server");
+         Commands.COMMAND_SENDING_POOL.shutdownNow(); // Paper - Perf: Async command map building; Shutdown and don't bother finishing
++        if (this.playerList != null) this.playerList.awaitInventoryCheckpointsOnShutdown();
+         // CraftBukkit start
+         if (this.server != null) {
+             this.server.spark.disable(); // Paper - spark
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index 312eacce10cacb11f78f443285b5cc700f09553b..8706b798cb94e82737735c817407748e273b1e01 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -1234,6 +1234,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+             }
+             return;
+         }
++        this.server.getPlayerList().invalidateInventoryCheckpoint(this);
+         this.gameEvent(GameEvent.ENTITY_DIE); // moved from the top of this method
+         // Paper end
+ 
+diff --git a/net/minecraft/server/players/InventoryCheckpoint.java b/net/minecraft/server/players/InventoryCheckpoint.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f34bf79025e795749a812f3e7270f40849adf4f9
+--- /dev/null
++++ b/net/minecraft/server/players/InventoryCheckpoint.java
+@@ -0,0 +1,18 @@
++package net.minecraft.server.players;
++
++import net.minecraft.nbt.CompoundTag;
++
++/** An owner-bound proposal kept coherent across captures until its live application or rejection. */
++public interface InventoryCheckpoint {
++    /** Overlay a lifecycle capture only while its source state is still valid. */
++    void project(CompoundTag captured);
++
++    /** Revalidate immediately before application, including the caller's permission predicate. */
++    boolean canApply();
++
++    /** Apply already persisted inventory and metadata on the player owner. */
++    void apply();
++
++    /** Monotonic invalidation, also safe from write completion threads. Future captures use actual state. */
++    void invalidate();
++}
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 421020e3f35323d385b88098272921ef959cda94..8834b06e1789ae850710159bc75c0eb0a30d76e4 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -119,6 +119,8 @@ public abstract class PlayerList {
+     private final Map<UUID, ServerPlayer> playersByUUID = Maps.newHashMap();
+     private final PlayerSaveQueue playerSaveQueue = new PlayerSaveQueue(); // Loom - keep async autosaves ordered with logout and shutdown
+     private final java.util.concurrent.Semaphore pluginPlayerSaves = new java.util.concurrent.Semaphore(64);
++    private final java.util.concurrent.ConcurrentMap<UUID, PendingInventoryCheckpoint> inventoryCheckpoints = new java.util.concurrent.ConcurrentHashMap<>();
++    private volatile boolean inventoryCheckpointsClosing;
+     private final Map<NameAndId, PermissionLevel> playerPermissions = Maps.newHashMap();
+     private final UserBanList bans;
+     private final IpBanList ipBans;
+@@ -632,33 +634,41 @@ public abstract class PlayerList {
+     }
+ 
+     public CompletableFuture<Void> savePlayerDataAsync(final ServerPlayer player, final boolean checkpoint) {
++        return this.admitPlayerSave(() -> net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "capture-plugin-player-save"),
++            () -> this.writePluginPlayerSave(player.getUUID(), this.capturePluginPlayerSave(player), checkpoint)
++        ).thenCompose(save -> save));
++    }
++
++    private PlayerDataStorage.PendingSave capturePluginPlayerSave(final ServerPlayer player) {
++        if (this.getPlayer(player.getUUID()) != player) throw new IllegalStateException("Player session is no longer current");
++        if (org.spigotmc.SpigotConfig.disablePlayerDataSaving) throw new IllegalStateException("Player saving is disabled");
++        final PlayerDataStorage.PendingSave captured = this.playerIo.captureSave(player);
++        if (captured == null) throw new IllegalStateException("Player data could not be captured");
++        return captured;
++    }
++
++    private CompletableFuture<Void> writePluginPlayerSave(final UUID playerId, final PlayerDataStorage.PendingSave captured, final boolean checkpoint) {
++        return this.playerSaveQueue.submit(playerId, () -> net.minecraft.server.threading.runtime.OwnerDomainExecutor.submit(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.asyncIo(this.server, "write-plugin-player-save"),
++            () -> {
++                if (checkpoint) {
++                    try { this.playerIo.writeSaveChecked(captured); }
++                    catch (final java.io.IOException failure) { throw new java.io.UncheckedIOException(failure); }
++                } else {
++                    this.playerIo.writeSave(captured);
++                }
++            }
++        ));
++    }
++
++    private <T> CompletableFuture<T> admitPlayerSave(final java.util.function.Supplier<CompletableFuture<T>> work) {
+         if (!this.pluginPlayerSaves.tryAcquire()) {
+             return CompletableFuture.failedFuture(new java.util.concurrent.RejectedExecutionException("Too many pending player saves"));
+         }
+-        final CompletableFuture<Void> result;
++        final CompletableFuture<T> result;
+         try {
+-            result = net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
+-                net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "capture-plugin-player-save"),
+-                () -> {
+-                    if (this.getPlayer(player.getUUID()) != player) throw new IllegalStateException("Player session is no longer current");
+-                    if (org.spigotmc.SpigotConfig.disablePlayerDataSaving) throw new IllegalStateException("Player saving is disabled");
+-                    final PlayerDataStorage.PendingSave captured = this.playerIo.captureSave(player);
+-                    if (captured == null) throw new IllegalStateException("Player data could not be captured");
+-                    return this.playerSaveQueue.submit(player.getUUID(), () ->
+-                        net.minecraft.server.threading.runtime.OwnerDomainExecutor.submit(
+-                            net.minecraft.server.threading.runtime.OwnerDomainExecutor.asyncIo(this.server, "write-plugin-player-save"),
+-                            () -> {
+-                                if (checkpoint) {
+-                                    try { this.playerIo.writeSaveChecked(captured); }
+-                                    catch (final java.io.IOException failure) { throw new java.io.UncheckedIOException(failure); }
+-                                } else {
+-                                    this.playerIo.writeSave(captured);
+-                                }
+-                            }
+-                        )
+-                    );
+-                }
+-            ).thenCompose(save -> save);
++            result = work.get();
+         } catch (final Throwable failure) {
+             this.pluginPlayerSaves.release();
+             return CompletableFuture.failedFuture(failure);
+@@ -667,6 +677,97 @@ public abstract class PlayerList {
+         return result.copy();
+     }
+ 
++    private record PendingInventoryCheckpoint(ServerPlayer player,
++        net.minecraft.server.network.ServerGamePacketListenerImpl connection, InventoryCheckpoint projection,
++        CompletableFuture<Void> finished) {}
++
++    /** Keep lifecycle captures coherent while proposed inventory waits for its physical checkpoint. */
++    public void projectInventoryCheckpoint(final ServerPlayer player, final CompoundTag captured) {
++        final PendingInventoryCheckpoint pending = this.inventoryCheckpoints.get(player.getUUID());
++        if (pending != null && pending.player() == player) pending.projection().project(captured);
++    }
++
++    public void invalidateInventoryCheckpoint(final ServerPlayer player) {
++        final PendingInventoryCheckpoint pending = this.inventoryCheckpoints.get(player.getUUID());
++        if (pending != null && pending.player() == player) pending.projection().invalidate();
++    }
++
++    public CompletableFuture<Boolean> applyInventoryCheckpointAsync(final ServerPlayer player,
++        final java.util.function.Supplier<InventoryCheckpoint> proposal) {
++        return this.admitPlayerSave(() -> net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(player, "capture-inventory-checkpoint"),
++            () -> {
++                if (this.inventoryCheckpointsClosing) throw new java.util.concurrent.RejectedExecutionException("Server is stopping");
++                if (this.getPlayer(player.getUUID()) != player) throw new IllegalStateException("Player session is no longer current");
++                if (org.spigotmc.SpigotConfig.disablePlayerDataSaving) throw new IllegalStateException("Player saving is disabled");
++                if (this.inventoryCheckpoints.containsKey(player.getUUID())) {
++                    throw new java.util.concurrent.RejectedExecutionException("An inventory checkpoint is already pending for this player");
++                }
++                final PendingInventoryCheckpoint pending = new PendingInventoryCheckpoint(player, player.connection,
++                    java.util.Objects.requireNonNull(proposal.get(), "Inventory checkpoint proposal"), new CompletableFuture<>());
++                if (this.inventoryCheckpoints.putIfAbsent(player.getUUID(), pending) != null) {
++                    throw new java.util.concurrent.RejectedExecutionException("An inventory checkpoint is already pending for this player");
++                }
++                final CompletableFuture<Boolean> result;
++                try {
++                    result = this.writePluginPlayerSave(player.getUUID(), this.capturePluginPlayerSave(player), true)
++                        .thenCompose(ignored -> this.finishInventoryCheckpoint(player.getUUID(), pending));
++                } catch (final Throwable failure) {
++                    pending.projection().invalidate();
++                    this.inventoryCheckpoints.remove(player.getUUID(), pending);
++                    pending.finished().complete(null);
++                    throw failure;
++                }
++                return result.whenComplete((applied, failure) -> {
++                    pending.projection().invalidate();
++                    this.inventoryCheckpoints.remove(player.getUUID(), pending);
++                    pending.finished().complete(null);
++                });
++            }
++        ).thenCompose(result -> result));
++    }
++
++    private CompletableFuture<Boolean> finishInventoryCheckpoint(final UUID playerId, final PendingInventoryCheckpoint pending) {
++        return net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this.server, "resolve-inventory-checkpoint"),
++            () -> {
++                final ServerPlayer current = this.getPlayer(playerId);
++                if (current == null || current.connection != pending.connection()) {
++                    throw new IllegalStateException("Player session retired during its inventory checkpoint");
++                }
++                return net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
++                    net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(current, "finish-inventory-checkpoint"),
++                    () -> {
++                        if (this.getPlayer(playerId) != current || current.connection != pending.connection()
++                            || this.inventoryCheckpoints.get(playerId) != pending) {
++                            throw new IllegalStateException("Player session retired during its inventory checkpoint");
++                        }
++                        if (current == pending.player() && pending.projection().canApply()) {
++                            pending.projection().apply();
++                            this.inventoryCheckpoints.remove(playerId, pending);
++                            return CompletableFuture.completedFuture(true);
++                        }
++                        // Never acknowledge rejection until actual state has replaced the proposal on disk.
++                        pending.projection().invalidate();
++                        this.inventoryCheckpoints.remove(playerId, pending);
++                        return this.writePluginPlayerSave(playerId, this.capturePluginPlayerSave(current), true).thenApply(ignored -> false);
++                    }
++                ).thenCompose(result -> result);
++            }
++        ).thenCompose(result -> result);
++    }
++
++    /** Finish accepted owner continuations before plugin shutdown can wait for their IO chains. */
++    public void awaitInventoryCheckpointsOnShutdown() {
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "finish-inventory-checkpoints");
++        this.inventoryCheckpointsClosing = true;
++        final CompletableFuture<?>[] pending = this.inventoryCheckpoints.values().stream()
++            .map(PendingInventoryCheckpoint::finished).toArray(CompletableFuture[]::new);
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.awaitCooperatively(
++            CompletableFuture.allOf(pending), "finish-inventory-checkpoints"
++        );
++    }
++
+     public void awaitPendingPlayerSaves() {
+         net.minecraft.server.threading.runtime.OwnerDomainExecutor.awaitCooperatively(
+             this.playerSaveQueue.drain().handle((ignored, failure) -> {
+@@ -1003,6 +1104,7 @@ public abstract class PlayerList {
+         final ServerPlayer.@Nullable RespawnConfig respawnConfig
+     ) {
+         net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "player-respawn-transfer");
++        this.invalidateInventoryCheckpoint(serverPlayer);
+         try (var departure = serverPlayer.level().lifecycle.tryAcquire();
+              var arrival = result.transition().newLevel().lifecycle.tryAcquire()) {
+             if (departure == null || arrival == null) throw new java.util.concurrent.RejectedExecutionException("Respawn world is unloading");
+diff --git a/net/minecraft/world/level/storage/PlayerDataStorage.java b/net/minecraft/world/level/storage/PlayerDataStorage.java
+index a7006e6c0d8fe135aa2c42dc7b3e758a82487807..fa6ed284d1d2e169397e4c219b189354caff3e8e 100644
+--- a/net/minecraft/world/level/storage/PlayerDataStorage.java
++++ b/net/minecraft/world/level/storage/PlayerDataStorage.java
+@@ -44,7 +44,11 @@ public class PlayerDataStorage {
+         try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(player.problemPath(), LOGGER)) {
+             TagValueOutput output = TagValueOutput.createWithContext(reporter, player.registryAccess());
+             player.saveWithoutId(output);
+-            return new PendingSave(player.getStringUUID(), player.getPlainTextName(), output.buildResult());
++            final CompoundTag captured = output.buildResult();
++            if (player instanceof net.minecraft.server.level.ServerPlayer serverPlayer) {
++                serverPlayer.level().getServer().getPlayerList().projectInventoryCheckpoint(serverPlayer, captured);
++            }
++            return new PendingSave(player.getStringUUID(), player.getPlainTextName(), captured);
+         } catch (Exception exception) {
+             LOGGER.warn("Failed to capture player data for {}", player.getPlainTextName(), exception);
+             return null;

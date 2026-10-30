@@ -1,0 +1,547 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Fri, 30 Oct 2026 19:39:45 +0200
+Subject: [PATCH] Persist proposed player inventories before applying them
+
+
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index 73c953bde323bb18726d6ed00bcdb7bc621a7294..d3b78294d96a03d34fc1bc6a3166dd76273cba4c 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -1365,6 +1365,18 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+         return this.server.getHandle().savePlayerDataAsync(this.getHandle());
+     }
+ 
++    @Override
++    public java.util.concurrent.CompletableFuture<Boolean> applyInventoryCheckpointAsync(
++            ItemStack[] contents,
++            java.util.function.Consumer<org.bukkit.persistence.PersistentDataContainer> edit,
++            java.util.function.BooleanSupplier canApply) {
++        if (contents == null || contents.length != 36 || edit == null || canApply == null)
++            return java.util.concurrent.CompletableFuture.failedFuture(new IllegalArgumentException("An inventory checkpoint requires 36 storage slots and its callbacks"));
++        final ItemStack[] accepted = java.util.Arrays.stream(contents).map(item -> item == null ? null : item.clone()).toArray(ItemStack[]::new);
++        return this.server.getHandle().applyInventoryCheckpointAsync(this.getHandle(),
++                () -> new CraftPlayerInventoryCheckpoint(this, accepted, edit, canApply));
++    }
++
+     @Deprecated
+     @Override
+     public void updateInventory() {
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayerInventoryCheckpoint.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayerInventoryCheckpoint.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..dc5730b5f46d132d7a25697f669856dece5a3823
+--- /dev/null
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayerInventoryCheckpoint.java
+@@ -0,0 +1,103 @@
++package org.bukkit.craftbukkit.entity;
++
++import java.util.HashSet;
++import java.util.List;
++import java.util.Objects;
++import java.util.Set;
++import java.util.function.BooleanSupplier;
++import java.util.function.Consumer;
++import net.minecraft.nbt.CompoundTag;
++import net.minecraft.nbt.ListTag;
++import net.minecraft.nbt.Tag;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.players.InventoryCheckpoint;
++import net.minecraft.util.ProblemReporter;
++import net.minecraft.world.ItemStackWithSlot;
++import net.minecraft.world.level.storage.TagValueOutput;
++import org.bukkit.craftbukkit.inventory.CraftItemStack;
++import org.bukkit.craftbukkit.persistence.CraftPersistentDataContainer;
++import org.bukkit.inventory.ItemStack;
++import org.bukkit.persistence.PersistentDataContainer;
++
++/** A proposal never changes live storage until its ordered file checkpoint has completed. */
++final class CraftPlayerInventoryCheckpoint implements InventoryCheckpoint {
++    private final ServerPlayer player;
++    private final ServerLevel level;
++    private final List<net.minecraft.world.item.ItemStack> before;
++    private final List<net.minecraft.world.item.ItemStack> proposed;
++    private final CompoundTag beforeData;
++    private final CompoundTag proposedData;
++    private final Set<String> editedKeys;
++    private final ListTag serializedInventory;
++    private final BooleanSupplier allowed;
++    private volatile boolean invalidated;
++
++    CraftPlayerInventoryCheckpoint(CraftPlayer craft, ItemStack[] contents,
++            Consumer<PersistentDataContainer> edit, BooleanSupplier allowed) {
++        this.player = craft.getHandle();
++        this.level = this.player.level();
++        this.allowed = allowed;
++        this.before = this.player.getInventory().getNonEquipmentItems().stream().map(net.minecraft.world.item.ItemStack::copy).toList();
++        this.proposed = java.util.Arrays.stream(contents).map(CraftItemStack::asNMSCopy).toList();
++        CraftPersistentDataContainer live = (CraftPersistentDataContainer) craft.getPersistentDataContainer();
++        this.beforeData = live.toTagCompound().copy();
++        CraftPersistentDataContainer isolated = new CraftPersistentDataContainer(live.getDataTagTypeRegistry());
++        isolated.putAll(this.beforeData.copy());
++        edit.accept(isolated);
++        this.proposedData = isolated.toTagCompound().copy();
++        Set<String> keys = new HashSet<>(this.beforeData.keySet()); keys.addAll(this.proposedData.keySet());
++        keys.removeIf(key -> Objects.equals(this.beforeData.get(key), this.proposedData.get(key)));
++        this.editedKeys = Set.copyOf(keys);
++        ProblemReporter.Collector problems = new ProblemReporter.Collector();
++        TagValueOutput output = TagValueOutput.createWithContext(problems, this.player.registryAccess());
++        var inventory = output.list("Inventory", ItemStackWithSlot.CODEC);
++        for (int slot = 0; slot < this.proposed.size(); slot++) {
++            var item = this.proposed.get(slot);
++            if (!item.isEmpty()) inventory.add(new ItemStackWithSlot(slot, item));
++        }
++        this.serializedInventory = output.buildResult().getListOrEmpty("Inventory").copy();
++        if (!problems.isEmpty()) throw new IllegalArgumentException("Inventory contents could not be encoded");
++        if (!this.matchesSource()) throw new IllegalStateException("Player state changed while preparing its inventory checkpoint");
++    }
++
++    private boolean matchesSource() {
++        if (this.invalidated || this.player.isRemoved() || this.player.isDeadOrDying() || this.player.level() != this.level) return false;
++        var current = this.player.getInventory().getNonEquipmentItems();
++        if (current.size() != this.before.size()) return false;
++        for (int slot = 0; slot < current.size(); slot++)
++            if (!net.minecraft.world.item.ItemStack.matches(current.get(slot), this.before.get(slot))) return false;
++        var data = ((CraftPersistentDataContainer) this.player.getBukkitEntity().getPersistentDataContainer()).getRaw();
++        for (String key : this.editedKeys) if (!Objects.equals(data.get(key), this.beforeData.get(key))) return false;
++        return true;
++    }
++
++    @Override public void project(CompoundTag captured) {
++        if (!this.matchesSource()) { this.invalidated = true; return; }
++        captured.put("Inventory", this.serializedInventory.copy());
++        CompoundTag data = captured.getCompoundOrEmpty("BukkitValues").copy();
++        for (String key : this.editedKeys) {
++            Tag value = this.proposedData.get(key);
++            if (value == null) data.remove(key); else data.put(key, value.copy());
++        }
++        if (data.isEmpty()) captured.remove("BukkitValues"); else captured.put("BukkitValues", data);
++    }
++
++    @Override public boolean canApply() {
++        // A caller predicate may itself run callbacks; compare source state again after it returns.
++        return !this.invalidated && this.allowed.getAsBoolean() && this.matchesSource();
++    }
++
++    @Override public void apply() {
++        if (!this.matchesSource()) throw new IllegalStateException("Inventory checkpoint source is no longer current");
++        for (int slot = 0; slot < this.proposed.size(); slot++) this.player.getInventory().setItem(slot, this.proposed.get(slot).copy());
++        CraftPersistentDataContainer data = (CraftPersistentDataContainer) this.player.getBukkitEntity().getPersistentDataContainer();
++        for (String key : this.editedKeys) {
++            Tag value = this.proposedData.get(key);
++            if (value == null) data.getRaw().remove(key);
++            else data.put(key, value.copy());
++        }
++    }
++
++    @Override public void invalidate() { this.invalidated = true; }
++}
+diff --git a/src/test/java/net/minecraft/server/players/InventoryCheckpointTest.java b/src/test/java/net/minecraft/server/players/InventoryCheckpointTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..787939289fdaebafaabce1a771725f1f83a5d873
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/players/InventoryCheckpointTest.java
+@@ -0,0 +1,230 @@
++package net.minecraft.server.players;
++
++import java.io.IOException;
++import java.lang.reflect.Field;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.UUID;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionException;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.RejectedExecutionException;
++import java.util.concurrent.Semaphore;
++import java.util.function.Supplier;
++import net.minecraft.nbt.CompoundTag;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.network.ServerGamePacketListenerImpl;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.level.storage.PlayerDataStorage;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import org.mockito.MockedStatic;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class InventoryCheckpointTest {
++    @Test void applicationWaitsForDurableWriteAndReturnsToThePlayerOwner() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var result = f.checkpoint();
++            assertFalse(result.isDone()); verify(f.proposal, never()).apply();
++            f.finishIo();
++            assertFalse(result.isDone()); verify(f.proposal, never()).apply();
++            f.finishGlobal();
++            assertTrue(result.join()); verify(f.proposal).apply();
++            assertEquals(List.of(2), f.written); assertEquals(64, f.permits.availablePermits());
++        }
++    }
++
++    @Test void anAutosaveCapturedWhilePendingCannotOverwriteTheProposalWithOldInventory() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var result = f.checkpoint();
++            var autosave = f.players.savePlayerDataAsync(f.player);
++            f.finishIo(); f.finishGlobal(); f.finishIo();
++            assertTrue(result.join()); autosave.join();
++            assertEquals(List.of(2, 2), f.written);
++        }
++    }
++
++    @Test void invalidationPreservesActualStateAndFalseWaitsForItsCompensatingWrite() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var result = f.checkpoint();
++            f.players.invalidateInventoryCheckpoint(f.player);
++            f.actual = 7;
++            f.finishIo(); f.finishGlobal();
++            assertFalse(result.isDone()); verify(f.proposal, never()).apply();
++            assertEquals(63, f.permits.availablePermits());
++            f.finishIo();
++            assertFalse(result.join()); assertEquals(List.of(2, 7), f.written);
++        }
++    }
++
++    @Test void compensationFailureIsAnUnknownOutcomeRatherThanAnAcknowledgedRejection() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var result = f.checkpoint();
++            f.players.invalidateInventoryCheckpoint(f.player);
++            f.finishIo(); f.finishGlobal();
++            doThrow(new IOException("compensation failed")).when(f.storage).writeSaveChecked(any());
++            f.finishIo();
++            assertInstanceOf(java.io.UncheckedIOException.class, assertThrows(CompletionException.class, result::join).getCause());
++            verify(f.proposal, never()).apply(); assertEquals(64, f.permits.availablePermits());
++        }
++    }
++
++    @Test void aRetiredConnectionCannotApplyItsProposalToAReplacementLogin() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var result = f.checkpoint(); f.finishIo();
++            ServerPlayer replacement = mock(ServerPlayer.class);
++            replacement.connection = mock(ServerGamePacketListenerImpl.class);
++            when(f.players.getPlayer(f.id)).thenReturn(replacement);
++            f.finishGlobal();
++            assertInstanceOf(IllegalStateException.class, assertThrows(CompletionException.class, result::join).getCause());
++            verify(f.proposal, never()).apply(); verify(f.storage, never()).captureSave(replacement);
++            assertEquals(List.of(2), f.written);
++        }
++    }
++
++    @Test void disconnectLeavesThePersistedProposalForReceiptRecovery() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var result = f.checkpoint(); f.finishIo();
++            when(f.players.getPlayer(f.id)).thenReturn(null);
++            f.finishGlobal();
++            assertThrows(CompletionException.class, result::join);
++            verify(f.proposal, never()).apply(); assertEquals(List.of(2), f.written);
++        }
++    }
++
++    @Test void cancellationDoesNotReleaseAdmissionOrPreventAcceptedApplication() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var result = f.checkpoint(); assertTrue(result.cancel(false));
++            f.finishIo(); assertEquals(63, f.permits.availablePermits());
++            f.finishGlobal(); verify(f.proposal).apply(); assertEquals(64, f.permits.availablePermits());
++        }
++    }
++
++    @Test void onePendingProposalPerPlayerAndTheSharedGlobalBoundAreEnforced() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var result = f.checkpoint();
++            assertInstanceOf(RejectedExecutionException.class, assertThrows(CompletionException.class, () -> f.checkpoint().join()).getCause());
++            assertEquals(63, f.permits.availablePermits());
++            assertTrue(f.permits.tryAcquire(63));
++            assertInstanceOf(RejectedExecutionException.class, assertThrows(CompletionException.class, () -> f.checkpoint().join()).getCause());
++            f.permits.release(63); f.finishIo(); f.finishGlobal(); assertTrue(result.join());
++        }
++    }
++
++    @Test void aFailedInitialWriteNeverAppliesAndReleasesItsProposal() throws Exception {
++        try (Fixture f = new Fixture()) {
++            doThrow(new IOException("checkpoint failed")).when(f.storage).writeSaveChecked(any());
++            var result = f.checkpoint(); f.finishIo();
++            assertThrows(CompletionException.class, result::join);
++            verify(f.proposal, never()).apply(); assertTrue(f.global.isEmpty());
++            assertEquals(64, f.permits.availablePermits());
++            CompoundTag actual = new CompoundTag(); f.players.projectInventoryCheckpoint(f.player, actual);
++            assertFalse(actual.contains("value"));
++        }
++    }
++
++    @Test void staleSessionsAndDisabledSavingDoNotCallTheProposalFactory() throws Exception {
++        boolean original = org.spigotmc.SpigotConfig.disablePlayerDataSaving;
++        try (Fixture f = new Fixture()) {
++            Supplier<InventoryCheckpoint> factory = mock(Supplier.class);
++            when(f.players.getPlayer(f.id)).thenReturn(null);
++            assertThrows(CompletionException.class, () -> f.players.applyInventoryCheckpointAsync(f.player, factory).join());
++            when(f.players.getPlayer(f.id)).thenReturn(f.player);
++            org.spigotmc.SpigotConfig.disablePlayerDataSaving = true;
++            assertThrows(CompletionException.class, () -> f.players.applyInventoryCheckpointAsync(f.player, factory).join());
++            verifyNoInteractions(factory); assertTrue(f.io.isEmpty());
++        } finally { org.spigotmc.SpigotConfig.disablePlayerDataSaving = original; }
++    }
++
++    @Test void shutdownFinishesOwnerContinuationsBeforePluginDisableAndKeepsOrdinarySavesAvailable() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var result = f.checkpoint();
++            f.owners.when(() -> OwnerDomainExecutor.awaitCooperatively(any(CompletableFuture.class),eq("finish-inventory-checkpoints"))).thenAnswer(call -> {
++                CompletableFuture<?> drain=call.getArgument(0);assertFalse(drain.isDone());
++                f.finishIo();assertFalse(drain.isDone());f.finishGlobal();assertTrue(drain.isDone());return null;
++            });
++            f.players.awaitInventoryCheckpointsOnShutdown();assertTrue(result.join());
++            assertInstanceOf(RejectedExecutionException.class,assertThrows(CompletionException.class,() -> f.checkpoint().join()).getCause());
++            var ordinary=f.players.savePlayerDataAsync(f.player);f.finishIo();assertDoesNotThrow(ordinary::join);
++        }
++    }
++
++    @Test void shutdownAlsoWaitsForTheDurableRejectionOfAnInvalidatedProposal() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var result=f.checkpoint();f.players.invalidateInventoryCheckpoint(f.player);
++            f.owners.when(() -> OwnerDomainExecutor.awaitCooperatively(any(CompletableFuture.class),eq("finish-inventory-checkpoints"))).thenAnswer(call -> {
++                CompletableFuture<?> drain=call.getArgument(0);f.finishIo();f.finishGlobal();
++                assertFalse(drain.isDone());f.finishIo();assertTrue(drain.isDone());return null;
++            });
++            f.players.awaitInventoryCheckpointsOnShutdown();assertFalse(result.join());
++        }
++    }
++
++    private static final class Fixture implements AutoCloseable {
++        final UUID id = UUID.randomUUID();
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final PlayerList players = mock(PlayerList.class);
++        final ServerPlayer player = mock(ServerPlayer.class);
++        final PlayerDataStorage storage = mock(PlayerDataStorage.class);
++        final InventoryCheckpoint proposal = mock(InventoryCheckpoint.class);
++        final Semaphore permits = new Semaphore(64);
++        final OwnerDomainExecutor.Owner playerOwner = mock(OwnerDomainExecutor.Owner.class), ioOwner = mock(OwnerDomainExecutor.Owner.class), globalOwner = mock(OwnerDomainExecutor.Owner.class);
++        final List<Runnable> io = new ArrayList<>(), global = new ArrayList<>();
++        final List<Integer> written = new ArrayList<>();
++        final MockedStatic<OwnerDomainExecutor> owners = mockStatic(OwnerDomainExecutor.class);
++        boolean valid = true;
++        int actual = 1;
++        String domain;
++
++        Fixture() throws Exception {
++            field("server",server); field("playerIo",storage); field("playerSaveQueue",new PlayerSaveQueue());
++            field("pluginPlayerSaves",permits); field("inventoryCheckpoints",new ConcurrentHashMap<>());
++            when(player.getUUID()).thenReturn(id); player.connection = mock(ServerGamePacketListenerImpl.class);
++            when(players.getPlayer(id)).thenReturn(player);
++            when(players.applyInventoryCheckpointAsync(eq(player), any())).thenCallRealMethod();
++            when(players.savePlayerDataAsync(player)).thenCallRealMethod();
++            when(players.savePlayerDataAsync(eq(player),anyBoolean())).thenCallRealMethod();
++            doCallRealMethod().when(players).projectInventoryCheckpoint(any(),any());
++            doCallRealMethod().when(players).invalidateInventoryCheckpoint(any());
++            doCallRealMethod().when(players).awaitInventoryCheckpointsOnShutdown();
++            when(proposal.canApply()).thenAnswer(call -> { assertEquals("PLAYER",domain); return valid; });
++            doAnswer(call -> { if(valid) ((CompoundTag)call.getArgument(0)).putInt("value",2); return null; }).when(proposal).project(any());
++            doAnswer(call -> { valid=false; return null; }).when(proposal).invalidate();
++            doAnswer(call -> { assertEquals("PLAYER",domain); actual=2; return null; }).when(proposal).apply();
++            when(storage.captureSave(player)).thenAnswer(call -> {
++                assertEquals("PLAYER",domain); CompoundTag data=new CompoundTag(); data.putInt("value",actual);
++                players.projectInventoryCheckpoint(player,data);
++                return new PlayerDataStorage.PendingSave(id.toString(),"Fixture",data);
++            });
++            doAnswer(call -> { assertEquals("IO",domain); PlayerDataStorage.PendingSave save=call.getArgument(0); written.add(save.data().getIntOr("value",-1)); return null; }).when(storage).writeSaveChecked(any());
++            owners.when(() -> OwnerDomainExecutor.player(eq(player),anyString())).thenReturn(playerOwner);
++            owners.when(() -> OwnerDomainExecutor.asyncIo(eq(server),anyString())).thenReturn(ioOwner);
++            owners.when(() -> OwnerDomainExecutor.global(eq(server),anyString())).thenReturn(globalOwner);
++            owners.when(() -> OwnerDomainExecutor.supply(eq(playerOwner),any())).thenAnswer(call -> execute("PLAYER",call.getArgument(1)));
++            owners.when(() -> OwnerDomainExecutor.supply(eq(globalOwner),any())).thenAnswer(call -> {
++                CompletableFuture<Object> done=new CompletableFuture<>(); Supplier<?> task=call.getArgument(1);
++                global.add(() -> execute("GLOBAL",task).whenComplete((value,failure) -> { if(failure==null)done.complete(value);else done.completeExceptionally(failure); }));
++                return done;
++            });
++            owners.when(() -> OwnerDomainExecutor.submit(eq(ioOwner),any())).thenAnswer(call -> {
++                CompletableFuture<Void> done=new CompletableFuture<>(); Runnable task=call.getArgument(1);
++                io.add(() -> execute("IO",() -> { task.run(); return null; }).whenComplete((value,failure) -> { if(failure==null)done.complete(null);else done.completeExceptionally(failure); }));
++                return done;
++            });
++        }
++        <T> CompletableFuture<T> execute(String owner, Supplier<T> task) {
++            String previous=domain; domain=owner;
++            try { return CompletableFuture.completedFuture(task.get()); }
++            catch(Throwable failure) { return CompletableFuture.failedFuture(failure); }
++            finally { domain=previous; }
++        }
++        void field(String name,Object value) throws Exception { Field field=PlayerList.class.getDeclaredField(name);field.setAccessible(true);field.set(players,value); }
++        CompletableFuture<Boolean> checkpoint() { return players.applyInventoryCheckpointAsync(player,() -> proposal); }
++        void finishIo() { io.removeFirst().run(); }
++        void finishGlobal() { global.removeFirst().run(); }
++        @Override public void close() { owners.close(); }
++    }
++}
+diff --git a/src/test/java/net/minecraft/world/level/storage/PlayerInventoryCaptureTest.java b/src/test/java/net/minecraft/world/level/storage/PlayerInventoryCaptureTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..17b7b1d6f9274deb74a5a21114fffd81cdf76b6f
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/level/storage/PlayerInventoryCaptureTest.java
+@@ -0,0 +1,37 @@
++package net.minecraft.world.level.storage;
++
++import com.mojang.datafixers.DataFixer;
++import java.nio.file.Path;
++import java.util.UUID;
++import net.minecraft.nbt.CompoundTag;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.players.PlayerList;
++import net.minecraft.util.ProblemReporter;
++import org.bukkit.support.RegistryHelper;
++import org.bukkit.support.environment.VanillaFeature;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@VanillaFeature
++class PlayerInventoryCaptureTest {
++    @TempDir Path directory;
++    @Test void lifecycleCapturePassesThroughTheSameActiveProjection() throws Exception {
++        MinecraftServer server=mock(MinecraftServer.class);PlayerList players=mock(PlayerList.class);
++        ServerPlayer player=mock(ServerPlayer.class);ServerLevel level=mock(ServerLevel.class);
++        when(player.level()).thenReturn(level);when(level.getServer()).thenReturn(server);
++        when(server.getPlayerList()).thenReturn(players);when(player.getStringUUID()).thenReturn(UUID.randomUUID().toString());
++        when(player.getPlainTextName()).thenReturn("CaptureFixture");when(player.registryAccess()).thenReturn(RegistryHelper.registryAccess());
++        when(player.problemPath()).thenReturn(ProblemReporter.Collector.EMPTY_ROOT);
++        doAnswer(call -> {ValueOutput output=call.getArgument(0);output.putFloat("Health",18);return null;}).when(player).saveWithoutId(any());
++        doAnswer(call -> {CompoundTag capture=call.getArgument(1);assertEquals(18,capture.getFloatOr("Health",0));capture.putString("receipt","proposed");return null;}).when(players).projectInventoryCheckpoint(eq(player),any());
++        var access=mock(LevelStorageSource.LevelStorageAccess.class);when(access.getLevelPath(LevelResource.PLAYER_DATA_DIR)).thenReturn(directory);
++        PlayerDataStorage storage=new PlayerDataStorage(access,mock(DataFixer.class));
++        var captured=storage.captureSave(player);
++        assertNotNull(captured);assertEquals("proposed",captured.data().getStringOr("receipt",""));
++        assertEquals(18,captured.data().getFloatOr("Health",0));verify(players).projectInventoryCheckpoint(eq(player),same(captured.data()));
++    }
++}
+diff --git a/src/test/java/org/bukkit/craftbukkit/entity/CraftInventoryCheckpointTest.java b/src/test/java/org/bukkit/craftbukkit/entity/CraftInventoryCheckpointTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c0e9b01c73022cd19fa70d6b0aac5409b844db28
+--- /dev/null
++++ b/src/test/java/org/bukkit/craftbukkit/entity/CraftInventoryCheckpointTest.java
+@@ -0,0 +1,124 @@
++package org.bukkit.craftbukkit.entity;
++
++import java.util.UUID;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.function.Supplier;
++import net.minecraft.core.component.DataComponents;
++import net.minecraft.nbt.CompoundTag;
++import net.minecraft.network.chat.Component;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.dedicated.DedicatedPlayerList;
++import net.minecraft.server.players.InventoryCheckpoint;
++import net.minecraft.util.ProblemReporter;
++import net.minecraft.world.ItemStackWithSlot;
++import net.minecraft.world.entity.player.Inventory;
++import net.minecraft.world.entity.player.PlayerEquipment;
++import net.minecraft.world.item.Items;
++import net.minecraft.world.level.storage.TagValueInput;
++import org.bukkit.NamespacedKey;
++import org.bukkit.craftbukkit.inventory.CraftItemStack;
++import org.bukkit.craftbukkit.CraftServer;
++import org.bukkit.craftbukkit.persistence.CraftPersistentDataContainer;
++import org.bukkit.craftbukkit.persistence.CraftPersistentDataTypeRegistry;
++import org.bukkit.inventory.ItemStack;
++import org.bukkit.persistence.PersistentDataType;
++import org.bukkit.support.RegistryHelper;
++import org.bukkit.support.environment.VanillaFeature;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@VanillaFeature
++class CraftInventoryCheckpointTest {
++    final ServerPlayer player = mock(ServerPlayer.class);
++    final CraftPlayer craft = mock(CraftPlayer.class);
++    final ServerLevel level = mock(ServerLevel.class);
++    final Inventory inventory = new Inventory(null,new PlayerEquipment(null));
++    final CraftPersistentDataContainer data = new CraftPersistentDataContainer(new CraftPersistentDataTypeRegistry());
++    final NamespacedKey receipt = new NamespacedKey("fixture","receipt"), other = new NamespacedKey("fixture","other");
++    ItemStack[] proposed;
++
++    @BeforeEach void setup() {
++        when(craft.getHandle()).thenReturn(player);when(craft.getPersistentDataContainer()).thenReturn(data);
++        when(player.getBukkitEntity()).thenReturn(craft);when(player.getInventory()).thenReturn(inventory);
++        when(player.level()).thenReturn(level);when(player.registryAccess()).thenReturn(RegistryHelper.registryAccess());
++        inventory.setItem(0,new net.minecraft.world.item.ItemStack(Items.APPLE,3));
++        var item=new net.minecraft.world.item.ItemStack(Items.DIAMOND,7);item.set(DataComponents.CUSTOM_NAME,Component.literal("Receipt diamonds"));
++        proposed=new ItemStack[36];proposed[0]=CraftItemStack.asBukkitCopy(item);
++        data.set(receipt,PersistentDataType.STRING,"old");data.set(other,PersistentDataType.INTEGER,1);
++    }
++    CraftPlayerInventoryCheckpoint checkpoint() {
++        return new CraftPlayerInventoryCheckpoint(craft,proposed,pdc -> pdc.set(receipt,PersistentDataType.STRING,"next"),() -> true);
++    }
++    @Test void proposalIsIsolatedAndSerializationPreservesMetadataAndUnrelatedPlayerState() {
++        var checkpoint=checkpoint();proposed[0].setAmount(50);
++        assertEquals(3,inventory.getItem(0).getCount());assertEquals("old",data.get(receipt,PersistentDataType.STRING));
++        CompoundTag capture=new CompoundTag();capture.putFloat("Health",18);capture.putString("equipment","unchanged");
++        data.set(other,PersistentDataType.INTEGER,9);capture.put("BukkitValues",data.toTagCompound().copy());
++        checkpoint.project(capture);
++        var saved=TagValueInput.create(ProblemReporter.DISCARDING,RegistryHelper.registryAccess(),capture).listOrEmpty("Inventory",ItemStackWithSlot.CODEC).iterator().next();
++        assertEquals(0,saved.slot());assertEquals(7,saved.stack().getCount());
++        assertEquals("Receipt diamonds",saved.stack().get(DataComponents.CUSTOM_NAME).getString());
++        assertEquals(18,capture.getFloatOr("Health",0));assertEquals("unchanged",capture.getStringOr("equipment",""));
++        assertEquals("next",capture.getCompoundOrEmpty("BukkitValues").getStringOr("fixture:receipt",""));
++        assertEquals(9,capture.getCompoundOrEmpty("BukkitValues").getIntOr("fixture:other",-1));
++        assertTrue(checkpoint.canApply());checkpoint.apply();
++        assertEquals(7,inventory.getItem(0).getCount());assertEquals("next",data.get(receipt,PersistentDataType.STRING));
++        assertEquals(9,data.get(other,PersistentDataType.INTEGER));
++    }
++    @Test void anAbilityInventoryWriteIsPreservedAndPermanentlyInvalidatesLaterCaptures() {
++        var checkpoint=checkpoint();inventory.setItem(6,new net.minecraft.world.item.ItemStack(Items.GLASS_BOTTLE));
++        CompoundTag actual=new CompoundTag();actual.putString("control","actual");checkpoint.project(actual);
++        assertFalse(actual.contains("Inventory"));assertFalse(checkpoint.canApply());
++        inventory.setItem(6,net.minecraft.world.item.ItemStack.EMPTY);
++        assertFalse(checkpoint.canApply());assertThrows(IllegalStateException.class,checkpoint::apply);
++        assertEquals(3,inventory.getItem(0).getCount());
++    }
++    @Test void changedReceiptCannotBeOverwritten() {
++        var checkpoint=checkpoint();data.set(receipt,PersistentDataType.STRING,"newer");
++        assertFalse(checkpoint.canApply());assertThrows(IllegalStateException.class,checkpoint::apply);
++        assertEquals("newer",data.get(receipt,PersistentDataType.STRING));
++    }
++    @Test void deathWorldChangeAndRetirementRejectTheProposal() {
++        var checkpoint=checkpoint();when(player.isDeadOrDying()).thenReturn(true);assertFalse(checkpoint.canApply());
++        when(player.isDeadOrDying()).thenReturn(false);when(player.level()).thenReturn(mock(ServerLevel.class));assertFalse(checkpoint.canApply());
++        when(player.level()).thenReturn(level);when(player.isRemoved()).thenReturn(true);assertFalse(checkpoint.canApply());
++    }
++    @Test void permissionCallbacksCannotApplyAgainstInventoryTheyChanged() {
++        var checkpoint=new CraftPlayerInventoryCheckpoint(craft,proposed,pdc -> {},() -> {inventory.setItem(0,net.minecraft.world.item.ItemStack.EMPTY);return true;});
++        assertFalse(checkpoint.canApply());
++    }
++    @Test void editedKeysCanBeRemovedWithoutReplacingTheRestOfTheContainer() {
++        var checkpoint=new CraftPlayerInventoryCheckpoint(craft,proposed,pdc -> pdc.remove(receipt),() -> true);
++        checkpoint.apply();assertFalse(data.has(receipt));assertEquals(1,data.get(other,PersistentDataType.INTEGER));
++    }
++    @Test void explicitInvalidationSurvivesARespawnWithTheSameInventory() {
++        var checkpoint=checkpoint();checkpoint.invalidate();
++        assertFalse(checkpoint.canApply());assertThrows(IllegalStateException.class,checkpoint::apply);
++    }
++    @Test void anUnserializableStackCannotSilentlyDisappearFromItsCheckpoint() {
++        proposed[0].setAmount(100);
++        assertThrows(IllegalArgumentException.class,this::checkpoint);
++        assertEquals(3,inventory.getItem(0).getCount());assertEquals("old",data.get(receipt,PersistentDataType.STRING));
++    }
++    @Test void publicApiCopiesInputsBeforeDispatchAndReturnsNativeCompletion() {
++        DedicatedPlayerList players=mock(DedicatedPlayerList.class);CraftServer server=mock(CraftServer.class);
++        when(server.getHandle()).thenReturn(players);when(server.getDefaultGameMode()).thenReturn(org.bukkit.GameMode.SURVIVAL);
++        when(player.getUUID()).thenReturn(UUID.randomUUID());doReturn(net.minecraft.world.entity.EntityTypes.PLAYER).when(player).getType();
++        when(player.getEnderChestInventory()).thenReturn(mock(net.minecraft.world.inventory.PlayerEnderChestContainer.class));
++        CraftPlayer live=new CraftPlayer(server,player);when(player.getBukkitEntity()).thenReturn(live);
++        AtomicReference<Supplier<InventoryCheckpoint>> factory=new AtomicReference<>();
++        CompletableFuture<Boolean> nativeCompletion=new CompletableFuture<>();
++        when(players.applyInventoryCheckpointAsync(eq(player),any())).thenAnswer(call -> {factory.set(call.getArgument(1));return nativeCompletion;});
++        var result=live.applyInventoryCheckpointAsync(proposed,pdc -> pdc.set(receipt,PersistentDataType.STRING,"next"),() -> true);
++        proposed[0].setAmount(50);proposed[0]=null;
++        assertFalse(result.isDone());var pending=factory.get().get();CompoundTag saved=new CompoundTag();pending.project(saved);
++        var item=TagValueInput.create(ProblemReporter.DISCARDING,RegistryHelper.registryAccess(),saved).listOrEmpty("Inventory",ItemStackWithSlot.CODEC).iterator().next();
++        assertEquals(7,item.stack().getCount());assertFalse(live.getPersistentDataContainer().has(receipt));
++        nativeCompletion.complete(true);assertTrue(result.join());
++        assertThrows(java.util.concurrent.CompletionException.class,() -> live.applyInventoryCheckpointAsync(new ItemStack[35],pdc -> {},() -> true).join());
++    }
++}
