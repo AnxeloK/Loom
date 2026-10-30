@@ -5,9 +5,18 @@ Subject: [PATCH] Persist proposed player inventories before applying them
 
 
 diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
-index 73c953bde323bb18726d6ed00bcdb7bc621a7294..d3b78294d96a03d34fc1bc6a3166dd76273cba4c 100644
+index 73c953bde323bb18726d6ed00bcdb7bc621a7294..26f16adfd0ef8a9b4bd6427434ab232c8dc7287e 100644
 --- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
 +++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -1344,7 +1344,7 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+ 
+     @Override
+     public void loadData() {
+-        this.server.getHandle().playerIo.load(this.getHandle().nameAndId())
++        this.server.getHandle().loadPlayerData(this.getHandle().nameAndId())
+             .map(tag -> TagValueInput.create(ProblemReporter.DISCARDING, this.server.getServer().registryAccess(), tag))
+             .ifPresent(this.getHandle()::load);
+     }
 @@ -1365,6 +1365,18 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
          return this.server.getHandle().savePlayerDataAsync(this.getHandle());
      }
@@ -138,10 +147,10 @@ index 0000000000000000000000000000000000000000..dc5730b5f46d132d7a25697f669856de
 +}
 diff --git a/src/test/java/net/minecraft/server/players/InventoryCheckpointTest.java b/src/test/java/net/minecraft/server/players/InventoryCheckpointTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..787939289fdaebafaabce1a771725f1f83a5d873
+index 0000000000000000000000000000000000000000..5249f54210351a10b3af5c1121107386ca742505
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/players/InventoryCheckpointTest.java
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,281 @@
 +package net.minecraft.server.players;
 +
 +import java.io.IOException;
@@ -155,6 +164,7 @@ index 0000000000000000000000000000000000000000..787939289fdaebafaabce1a771725f1f
 +import java.util.concurrent.RejectedExecutionException;
 +import java.util.concurrent.Semaphore;
 +import java.util.function.Supplier;
++import com.mojang.authlib.GameProfile;
 +import net.minecraft.nbt.CompoundTag;
 +import net.minecraft.server.MinecraftServer;
 +import net.minecraft.server.level.ServerPlayer;
@@ -307,6 +317,44 @@ index 0000000000000000000000000000000000000000..787939289fdaebafaabce1a771725f1f
 +        }
 +    }
 +
++    @Test void aLoginReadWaitsForTheFinalDecisionAndCompensatingWrite() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var result=f.checkpoint();f.players.invalidateInventoryCheckpoint(f.player);f.actual=7;
++            var login=f.players.preparePlayerLoginAsync(new GameProfile(f.id,"Fixture"),false);
++            f.finishIo();
++            assertTrue(f.io.isEmpty(),"A login must not read the proposed file before the final decision");
++            assertFalse(login.isDone());f.finishGlobal();assertFalse(login.isDone());
++            f.finishIo();assertFalse(login.isDone());f.finishIo();
++            assertFalse(result.join());assertEquals(7,login.join().playerData().orElseThrow().getIntOr("value",-1));
++        }
++    }
++
++    @Test void aLegacyReloadCannotExposeAnUncommittedInventoryProposal() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var result=f.checkpoint();f.finishIo();
++            CompoundTag raw=new CompoundTag();raw.putInt("value",2);
++            doReturn(java.util.Optional.of(raw)).when(f.storage).load(any());
++            var loaded=f.players.loadPlayerData(new NameAndId(f.id,"Fixture")).orElseThrow();
++            assertEquals(1,loaded.getIntOr("value",-1));
++            f.finishGlobal();assertTrue(result.join());
++        }
++    }
++
++    @Test void aDisconnectedActorStillInTheRegistryCannotAcknowledgeRejection() throws Exception {
++        try (Fixture f = new Fixture()) {
++            var result=f.checkpoint();f.finishIo();when(f.player.hasDisconnected()).thenReturn(true);
++            f.finishGlobal();
++            assertThrows(CompletionException.class,result::join);verify(f.proposal,never()).apply();
++            assertEquals(List.of(2),f.written);
++        }
++    }
++    @Test void inlineLoginIoCannotHoldTheCheckpointAdmissionLock() throws Exception {
++        try (Fixture f = new Fixture()) {
++            f.owners.when(() -> OwnerDomainExecutor.supply(eq(f.ioOwner),any())).thenAnswer(call -> f.execute("IO",call.getArgument(1)));
++            assertDoesNotThrow(() -> f.players.preparePlayerLoginAsync(new GameProfile(f.id,"Fixture"),false).join());
++        }
++    }
++
 +    private static final class Fixture implements AutoCloseable {
 +        final UUID id = UUID.randomUUID();
 +        final MinecraftServer server = mock(MinecraftServer.class);
@@ -315,18 +363,25 @@ index 0000000000000000000000000000000000000000..787939289fdaebafaabce1a771725f1f
 +        final PlayerDataStorage storage = mock(PlayerDataStorage.class);
 +        final InventoryCheckpoint proposal = mock(InventoryCheckpoint.class);
 +        final Semaphore permits = new Semaphore(64);
++        final ConcurrentHashMap<UUID,Object> projections = new ConcurrentHashMap<>();
 +        final OwnerDomainExecutor.Owner playerOwner = mock(OwnerDomainExecutor.Owner.class), ioOwner = mock(OwnerDomainExecutor.Owner.class), globalOwner = mock(OwnerDomainExecutor.Owner.class);
 +        final List<Runnable> io = new ArrayList<>(), global = new ArrayList<>();
 +        final List<Integer> written = new ArrayList<>();
 +        final MockedStatic<OwnerDomainExecutor> owners = mockStatic(OwnerDomainExecutor.class);
 +        boolean valid = true;
 +        int actual = 1;
++        int disk = 1;
 +        String domain;
 +
 +        Fixture() throws Exception {
 +            field("server",server); field("playerIo",storage); field("playerSaveQueue",new PlayerSaveQueue());
-+            field("pluginPlayerSaves",permits); field("inventoryCheckpoints",new ConcurrentHashMap<>());
++            field("pluginPlayerSaves",permits); field("inventoryCheckpoints",projections);
 +            when(player.getUUID()).thenReturn(id); player.connection = mock(ServerGamePacketListenerImpl.class);
++            when(server.getWorldData()).thenReturn(mock(net.minecraft.world.level.storage.WorldData.class));
++            when(storage.getPlayerDir()).thenReturn(new java.io.File(System.getProperty("java.io.tmpdir")));
++            when(players.preparePlayerLoginAsync(any(),anyBoolean())).thenCallRealMethod();
++            when(players.loadPlayerData(any())).thenCallRealMethod();
++            when(storage.load(any())).thenAnswer(call -> {assertEquals("IO",domain);assertFalse(Thread.holdsLock(projections));CompoundTag data=new CompoundTag();data.putInt("value",disk);return java.util.Optional.of(data);});
 +            when(players.getPlayer(id)).thenReturn(player);
 +            when(players.applyInventoryCheckpointAsync(eq(player), any())).thenCallRealMethod();
 +            when(players.savePlayerDataAsync(player)).thenCallRealMethod();
@@ -343,11 +398,16 @@ index 0000000000000000000000000000000000000000..787939289fdaebafaabce1a771725f1f
 +                players.projectInventoryCheckpoint(player,data);
 +                return new PlayerDataStorage.PendingSave(id.toString(),"Fixture",data);
 +            });
-+            doAnswer(call -> { assertEquals("IO",domain); PlayerDataStorage.PendingSave save=call.getArgument(0); written.add(save.data().getIntOr("value",-1)); return null; }).when(storage).writeSaveChecked(any());
++            doAnswer(call -> { assertEquals("IO",domain); PlayerDataStorage.PendingSave save=call.getArgument(0);disk=save.data().getIntOr("value",-1);written.add(disk);return null; }).when(storage).writeSaveChecked(any());
 +            owners.when(() -> OwnerDomainExecutor.player(eq(player),anyString())).thenReturn(playerOwner);
 +            owners.when(() -> OwnerDomainExecutor.asyncIo(eq(server),anyString())).thenReturn(ioOwner);
 +            owners.when(() -> OwnerDomainExecutor.global(eq(server),anyString())).thenReturn(globalOwner);
 +            owners.when(() -> OwnerDomainExecutor.supply(eq(playerOwner),any())).thenAnswer(call -> execute("PLAYER",call.getArgument(1)));
++            owners.when(() -> OwnerDomainExecutor.supply(eq(ioOwner),any())).thenAnswer(call -> {
++                CompletableFuture<Object> done=new CompletableFuture<>();Supplier<?> task=call.getArgument(1);
++                io.add(() -> execute("IO",task).whenComplete((value,failure) -> {if(failure==null)done.complete(value);else done.completeExceptionally(failure);}));
++                return done;
++            });
 +            owners.when(() -> OwnerDomainExecutor.supply(eq(globalOwner),any())).thenAnswer(call -> {
 +                CompletableFuture<Object> done=new CompletableFuture<>(); Supplier<?> task=call.getArgument(1);
 +                global.add(() -> execute("GLOBAL",task).whenComplete((value,failure) -> { if(failure==null)done.complete(value);else done.completeExceptionally(failure); }));
@@ -545,3 +605,24 @@ index 0000000000000000000000000000000000000000..c0e9b01c73022cd19fa70d6b0aac5409
 +        assertThrows(java.util.concurrent.CompletionException.class,() -> live.applyInventoryCheckpointAsync(new ItemStack[35],pdc -> {},() -> true).join());
 +    }
 +}
+diff --git a/src/test/java/org/bukkit/craftbukkit/entity/CraftPlayerSaveTest.java b/src/test/java/org/bukkit/craftbukkit/entity/CraftPlayerSaveTest.java
+index 4197905f84d7c2cfe11d7ee22dfa3a11c8f0cc23..08e1a893412032d1ffd534f447a0e6b1435501ed 100644
+--- a/src/test/java/org/bukkit/craftbukkit/entity/CraftPlayerSaveTest.java
++++ b/src/test/java/org/bukkit/craftbukkit/entity/CraftPlayerSaveTest.java
+@@ -31,6 +31,16 @@ public class CraftPlayerSaveTest {
+         when(players.savePlayerDataAsync(player)).thenReturn(CompletableFuture.failedFuture(failure));
+         assertSame(failure, assertThrows(CompletionException.class, () -> craft.saveDataAsync().join()).getCause());
+     }
++    @Test void legacyReloadUsesTheInventoryCheckpointReadView() {
++        DedicatedPlayerList players = mock(DedicatedPlayerList.class);
++        ServerPlayer player = mock(ServerPlayer.class);
++        CraftPlayer craft = player(players, player);
++        var identity = new net.minecraft.server.players.NameAndId(java.util.UUID.randomUUID(), "Fixture");
++        when(player.nameAndId()).thenReturn(identity);
++        when(players.loadPlayerData(identity)).thenReturn(java.util.Optional.empty());
++        assertDoesNotThrow(craft::loadData);
++        verify(players).loadPlayerData(identity);
++    }
+     private static CraftPlayer player(DedicatedPlayerList players, ServerPlayer player) {
+         CraftServer server = mock(CraftServer.class);
+         when(server.getHandle()).thenReturn(players);

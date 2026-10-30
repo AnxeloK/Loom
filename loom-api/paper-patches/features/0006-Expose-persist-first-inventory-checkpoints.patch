@@ -5,10 +5,10 @@ Subject: [PATCH] Expose persist first inventory checkpoints
 
 
 diff --git a/src/main/java/org/bukkit/entity/Player.java b/src/main/java/org/bukkit/entity/Player.java
-index dab57c9b8938b0fe88e8af77d30ee184de78b1c8..293410f2664c3c9dbb5c5b8f76342c39474bf8c8 100644
+index dab57c9b8938b0fe88e8af77d30ee184de78b1c8..afafcf3fbebb48a735da1057289cb04cb0f08e46 100644
 --- a/src/main/java/org/bukkit/entity/Player.java
 +++ b/src/main/java/org/bukkit/entity/Player.java
-@@ -561,6 +561,30 @@ public interface Player extends HumanEntity, Conversable, OfflinePlayer, PluginM
+@@ -561,6 +561,32 @@ public interface Player extends HumanEntity, Conversable, OfflinePlayer, PluginM
          return CompletableFuture.failedFuture(new UnsupportedOperationException("Asynchronous player saves are not supported"));
      }
  
@@ -18,6 +18,8 @@ index dab57c9b8938b0fe88e8af77d30ee184de78b1c8..293410f2664c3c9dbb5c5b8f76342c39
 +     * Until completion, lifecycle saves include this proposal while its original inventory remains
 +     * unchanged. The live storage and edited keys are applied only after a flushed checkpoint and
 +     * a final owner check. Health, combat and world state are not suspended.
++     * Login reads wait for the final decision. A synchronous reload during the operation reads
++     * actual captured state, without the proposed inventory or persistent data edits.
 +     *
 +     * <p>If the inventory changes, the player dies, or {@code canApply} declines, actual player data
 +     * is saved before completing with {@code false}. A retired session or storage failure completes
