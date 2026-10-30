@@ -54,7 +54,7 @@ index 0000000000000000000000000000000000000000..f34bf79025e795749a812f3e7270f408
 +    void invalidate();
 +}
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index 421020e3f35323d385b88098272921ef959cda94..8f917fd13760e24a0eae9007cdd5840e11ffa235 100644
+index 421020e3f35323d385b88098272921ef959cda94..cc2821d1afccae6118fae5e81580cbdf5ff423a6 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
 @@ -119,6 +119,8 @@ public abstract class PlayerList {
@@ -170,7 +170,7 @@ index 421020e3f35323d385b88098272921ef959cda94..8f917fd13760e24a0eae9007cdd5840e
          } catch (final Throwable failure) {
              this.pluginPlayerSaves.release();
              return CompletableFuture.failedFuture(failure);
-@@ -667,6 +693,103 @@ public abstract class PlayerList {
+@@ -667,6 +693,111 @@ public abstract class PlayerList {
          return result.copy();
      }
  
@@ -233,14 +233,14 @@ index 421020e3f35323d385b88098272921ef959cda94..8f917fd13760e24a0eae9007cdd5840e
 +    }
 +
 +    private CompletableFuture<Boolean> finishInventoryCheckpoint(final UUID playerId, final PendingInventoryCheckpoint pending) {
-+        return net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
++        final CompletableFuture<CompletableFuture<Boolean>> resolving = net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
 +            net.minecraft.server.threading.runtime.OwnerDomainExecutor.global(this.server, "resolve-inventory-checkpoint"),
 +            () -> {
 +                final ServerPlayer current = this.getPlayer(playerId);
 +                if (current == null || current.hasDisconnected() || current.connection != pending.connection()) {
 +                    throw new IllegalStateException("Player session retired during its inventory checkpoint");
 +                }
-+                return net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
++                final CompletableFuture<CompletableFuture<Boolean>> applying = net.minecraft.server.threading.runtime.OwnerDomainExecutor.supply(
 +                    net.minecraft.server.threading.runtime.OwnerDomainExecutor.player(current, "finish-inventory-checkpoint"),
 +                    () -> {
 +                        if (this.getPlayer(playerId) != current || current.hasDisconnected() || current.connection != pending.connection()
@@ -255,9 +255,13 @@ index 421020e3f35323d385b88098272921ef959cda94..8f917fd13760e24a0eae9007cdd5840e
 +                        pending.projection().invalidate();
 +                        return this.writePluginPlayerSave(playerId, this.capturePluginPlayerSave(current), true).thenApply(ignored -> false);
 +                    }
-+                ).thenCompose(result -> result);
++                );
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.linkWaitDependency(pending.finished(), applying);
++                return applying.thenCompose(result -> result);
 +            }
-+        ).thenCompose(result -> result);
++        );
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.linkWaitDependency(pending.finished(), resolving);
++        return resolving.thenCompose(result -> result);
 +    }
 +
 +    /** Finish accepted owner continuations before plugin shutdown can wait for their IO chains. */
@@ -266,15 +270,19 @@ index 421020e3f35323d385b88098272921ef959cda94..8f917fd13760e24a0eae9007cdd5840e
 +        this.inventoryCheckpointsClosing = true;
 +        final CompletableFuture<?>[] pending = this.inventoryCheckpoints.values().stream()
 +            .map(PendingInventoryCheckpoint::finished).toArray(CompletableFuture[]::new);
++        final CompletableFuture<Void> drained = CompletableFuture.allOf(pending);
++        for (final CompletableFuture<?> checkpoint : pending) {
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.linkWaitDependency(drained, checkpoint);
++        }
 +        net.minecraft.server.threading.runtime.OwnerDomainExecutor.awaitCooperatively(
-+            CompletableFuture.allOf(pending), "finish-inventory-checkpoints"
++            drained, "finish-inventory-checkpoints"
 +        );
 +    }
 +
      public void awaitPendingPlayerSaves() {
          net.minecraft.server.threading.runtime.OwnerDomainExecutor.awaitCooperatively(
              this.playerSaveQueue.drain().handle((ignored, failure) -> {
-@@ -1003,6 +1126,7 @@ public abstract class PlayerList {
+@@ -1003,6 +1134,7 @@ public abstract class PlayerList {
          final ServerPlayer.@Nullable RespawnConfig respawnConfig
      ) {
          net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.server, "player-respawn-transfer");
@@ -298,6 +306,28 @@ index 5fd8f8d651f74d77d8bd5f9b1a378f7ae00c0e8f..3df0f73d1d2d706e2091f77a16aaaba5
          final CompletableFuture<T> result = new CompletableFuture<>();
          reservation.previous().handle((ignored, failure) -> null)
              .thenCompose(ignored -> operation.get())
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index c625db3480a40169d06cacce8b5cf20e2a5fa06a..7834f2b57676c9dffc7487479024aca3e3ccab7d 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -1576,10 +1576,16 @@ public class TickRegions {
+      */
+     public static boolean helpQueuedOwnerTask(final Predicate<Runnable> predicate) {
+         Objects.requireNonNull(predicate, "Predicate may not be null");
+-        if (CURRENT_CONTEXT.get() == null) {
++        final boolean hasRegionContext = CURRENT_CONTEXT.get() != null;
++        final OwnerDomainExecutor.Owner currentOwner = OwnerDomainExecutor.currentOwner();
++        if (!hasRegionContext && (currentOwner == null || currentOwner.domain() != OwnerDomainExecutor.Domain.GLOBAL_CONTROL)) {
+             return false;
+         }
+         for (final WorldSchedulerState state : SCHEDULER_STATES.values()) {
++            // A global wait may claim a bounded lease in its own server, including during shutdown.
++            if (!hasRegionContext && !OwnerDomainExecutor.isGlobalOwner(state.world.getServer())) {
++                continue;
++            }
+             if (state.helpQueuedOwnerTask(predicate)) {
+                 return true;
+             }
 diff --git a/net/minecraft/world/level/storage/PlayerDataStorage.java b/net/minecraft/world/level/storage/PlayerDataStorage.java
 index a7006e6c0d8fe135aa2c42dc7b3e758a82487807..fa6ed284d1d2e169397e4c219b189354caff3e8e 100644
 --- a/net/minecraft/world/level/storage/PlayerDataStorage.java

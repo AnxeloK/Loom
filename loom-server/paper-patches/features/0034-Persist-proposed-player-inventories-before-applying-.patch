@@ -145,6 +145,147 @@ index 0000000000000000000000000000000000000000..dc5730b5f46d132d7a25697f669856de
 +
 +    @Override public void invalidate() { this.invalidated = true; }
 +}
+diff --git a/src/test/java/net/minecraft/server/players/InventoryCheckpointShutdownTest.java b/src/test/java/net/minecraft/server/players/InventoryCheckpointShutdownTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..7d747204229039b88938be647176a1041dc249db
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/players/InventoryCheckpointShutdownTest.java
+@@ -0,0 +1,135 @@
++package net.minecraft.server.players;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import java.lang.reflect.Field;
++import java.util.Queue;
++import java.util.UUID;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ConcurrentLinkedQueue;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.Semaphore;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.function.Predicate;
++import net.minecraft.nbt.CompoundTag;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.network.ServerGamePacketListenerImpl;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.level.storage.PlayerDataStorage;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class InventoryCheckpointShutdownTest {
++    @Test
++    void shutdownCompletesThePlayerContinuationAfterItsQueuedDiskWrite() throws Exception {
++        checkShutdown(true);
++    }
++
++    @Test
++    void shutdownCompletesCompensationAfterItsQueuedDiskWrite() throws Exception {
++        checkShutdown(false);
++    }
++
++    private void checkShutdown(boolean accepted) throws Exception {
++        MinecraftServer server = mock(MinecraftServer.class);
++        ServerLevel level = mock(ServerLevel.class);
++        ServerPlayer player = mock(ServerPlayer.class);
++        PlayerList players = mock(PlayerList.class);
++        PlayerDataStorage storage = mock(PlayerDataStorage.class);
++        InventoryCheckpoint proposal = mock(InventoryCheckpoint.class);
++        UUID id = UUID.randomUUID();
++        player.connection = mock(ServerGamePacketListenerImpl.class);
++        when(player.level()).thenReturn(level);
++        when(player.chunkPosition()).thenReturn(new ChunkPos(7, 7));
++        when(player.getUUID()).thenReturn(id);
++        when(level.getServer()).thenReturn(server);
++        when(level.dimension()).thenReturn(Level.OVERWORLD);
++        when(players.getPlayer(id)).thenReturn(player);
++        when(proposal.canApply()).thenAnswer(call -> {
++            assertTrue(OwnerDomainExecutor.isPlayerOwner(player));
++            return accepted;
++        });
++        doAnswer(call -> {
++            assertTrue(OwnerDomainExecutor.isPlayerOwner(player));
++            return null;
++        }).when(proposal).apply();
++        when(storage.captureSave(player)).thenAnswer(call -> {
++            assertTrue(OwnerDomainExecutor.isPlayerOwner(player));
++            return new PlayerDataStorage.PendingSave(id.toString(), "Fixture", new CompoundTag());
++        });
++        PlayerSaveQueue saves = new PlayerSaveQueue();
++        field(players, "server", server);
++        field(players, "playerIo", storage);
++        field(players, "playerSaveQueue", saves);
++        field(players, "pluginPlayerSaves", new Semaphore(64));
++        field(players, "inventoryCheckpoints", new ConcurrentHashMap<>());
++        when(players.applyInventoryCheckpointAsync(eq(player), any())).thenCallRealMethod();
++        doCallRealMethod().when(players).awaitInventoryCheckpointsOnShutdown();
++        Queue<Runnable> globalTasks = new ConcurrentLinkedQueue<>();
++        when(server.enqueueGlobalOwnerTask(any())).thenAnswer(call -> globalTasks.add(call.getArgument(0)));
++        when(server.runQueuedGlobalOwnerTask(any())).thenAnswer(call -> {
++            Predicate<Runnable> predicate = call.getArgument(0);
++            for (Runnable task : globalTasks) {
++                if (predicate.test(task) && globalTasks.remove(task)) {
++                    task.run(); return true;
++                }
++            }
++            return false;
++        });
++        var heldWrite = saves.reserve(id);
++        CompletableFuture<Boolean> checkpoint;
++        try (var owner = OwnerDomainExecutor.enter(OwnerDomainExecutor.player(player, "prepare-shutdown-checkpoint"))) {
++            checkpoint = players.applyInventoryCheckpointAsync(player, () -> proposal);
++        }
++        assertFalse(checkpoint.isDone());
++        CountDownLatch shutdownEntered = new CountDownLatch(1);
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        Thread shutdown = new TickThread(() -> {
++            try (var owner = OwnerDomainExecutor.enter(OwnerDomainExecutor.global(server, "checkpoint-shutdown"))) {
++                shutdownEntered.countDown();
++                players.awaitInventoryCheckpointsOnShutdown();
++            } catch (Throwable error) {
++                failure.set(error);
++            }
++        }, "checkpoint-shutdown-owner");
++        shutdown.setDaemon(true);
++        shutdown.start();
++        assertTrue(shutdownEntered.await(5, TimeUnit.SECONDS));
++        heldWrite.completion().complete(null);
++        shutdown.join(TimeUnit.SECONDS.toMillis(5));
++        boolean stranded = shutdown.isAlive();
++        if (stranded) {
++            // Let a failing regression release its queued task and owner before reporting failure.
++            var region = TickRegions.pushRegionContext(level, 7, 7, 7, 7);
++            try {
++                try (var owner = OwnerDomainExecutor.enter(OwnerDomainExecutor.player(player, "cleanup-shutdown-checkpoint"))) {
++                    OwnerDomainExecutor.awaitCooperatively(checkpoint, "cleanup-shutdown-checkpoint");
++                }
++            } finally {
++                TickRegions.popContext(region);
++            }
++            shutdown.join(TimeUnit.SECONDS.toMillis(5));
++        }
++        assertFalse(stranded, "shutdown stranded the final player continuation after disk completion");
++        assertNull(failure.get());
++        assertEquals(accepted, checkpoint.getNow(null));
++        verify(proposal, accepted ? times(1) : never()).apply();
++        verify(storage, times(accepted ? 1 : 2)).writeSaveChecked(any());
++    }
++
++    private static void field(PlayerList players, String name, Object value) throws Exception {
++        Field field = PlayerList.class.getDeclaredField(name);
++        field.setAccessible(true);
++        field.set(players, value);
++    }
++}
 diff --git a/src/test/java/net/minecraft/server/players/InventoryCheckpointTest.java b/src/test/java/net/minecraft/server/players/InventoryCheckpointTest.java
 new file mode 100644
 index 0000000000000000000000000000000000000000..5249f54210351a10b3af5c1121107386ca742505
@@ -432,6 +573,80 @@ index 0000000000000000000000000000000000000000..5249f54210351a10b3af5c1121107386
 +        @Override public void close() { owners.close(); }
 +    }
 +}
+diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
+index 4322a7f69ba03f2b46aba2f100608fe1511c1bb5..94d461f412547f4852f1f7993aaea08cde5b26dc 100644
+--- a/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
++++ b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
+@@ -23,6 +23,69 @@ import org.mockito.Mockito;
+ @Normal
+ class OwnerDomainExecutorCooperativeWaitTest {
+ 
++    @Test
++    void globalWaitClaimsItsDeclaredRegionDependencyWithoutAnExistingRegionContext() throws InterruptedException {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++        Mockito.when(level.dimension()).thenReturn(Level.OVERWORLD);
++        final CompletableFuture<String> prerequisite = OwnerDomainExecutor.supply(
++            OwnerDomainExecutor.region(level, 512, 512, "global-region-dependency"), () -> "completed"
++        );
++        final CompletableFuture<String> outward = new CompletableFuture<>();
++        OwnerDomainExecutor.linkWaitDependency(outward, prerequisite);
++        prerequisite.whenComplete((value, error) -> {
++            if (error == null) outward.complete(value);
++            else outward.completeExceptionally(error);
++        });
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread ownerThread = new TickThread(() -> {
++            try (var owner = OwnerDomainExecutor.enterGlobal(server, "global-dependent-wait")) {
++                Assertions.assertEquals("completed", OwnerDomainExecutor.awaitCooperatively(outward, "global-dependent-wait"));
++            } catch (Throwable error) {
++                failure.set(error);
++            }
++        }, "global-dependent-owner");
++        ownerThread.setDaemon(true);
++        ownerThread.start();
++        ownerThread.join(TimeUnit.SECONDS.toMillis(5));
++        final boolean stranded = ownerThread.isAlive();
++        if (stranded) {
++            final var context = TickRegions.pushRegionContext(level, 512, 512, 512, 512);
++            try {
++                OwnerDomainExecutor.awaitCooperatively(prerequisite, "cleanup-global-dependency");
++            } finally {
++                TickRegions.popContext(context);
++            }
++            ownerThread.join(TimeUnit.SECONDS.toMillis(5));
++        }
++        Assertions.assertFalse(stranded, "global wait did not claim its declared bounded region task");
++        Assertions.assertNull(failure.get());
++    }
++
++    @Test
++    void globalHelpingRequiresTheRegionServerAndNeverGrantsAnUnownedCallerAccess() {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final MinecraftServer otherServer = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++        Mockito.when(level.dimension()).thenReturn(Level.OVERWORLD);
++        final CompletableFuture<String> queued = OwnerDomainExecutor.supply(
++            OwnerDomainExecutor.region(level, 512, 512, "server-bound-help"), () -> "completed"
++        );
++        Assertions.assertFalse(TickRegions.helpQueuedOwnerTask(task -> true));
++        try (var owner = OwnerDomainExecutor.enterGlobal(otherServer, "other-server-help")) {
++            Assertions.assertFalse(TickRegions.helpQueuedOwnerTask(task -> true));
++        }
++        Assertions.assertFalse(queued.isDone());
++        final var context = TickRegions.pushRegionContext(level, 512, 512, 512, 512);
++        try {
++            Assertions.assertEquals("completed", OwnerDomainExecutor.awaitCooperatively(queued, "cleanup-server-bound-help"));
++        } finally {
++            TickRegions.popContext(context);
++        }
++    }
++
+     @Test
+     void cooperativeWaitClaimsQueuedRegionOwnerTask() throws InterruptedException {
+         final MinecraftServer server = Mockito.mock(MinecraftServer.class);
 diff --git a/src/test/java/net/minecraft/world/level/storage/PlayerInventoryCaptureTest.java b/src/test/java/net/minecraft/world/level/storage/PlayerInventoryCaptureTest.java
 new file mode 100644
 index 0000000000000000000000000000000000000000..17b7b1d6f9274deb74a5a21114fffd81cdf76b6f
