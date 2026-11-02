@@ -5,10 +5,96 @@ Subject: [PATCH] Test nonrecursive full chunk status draining
 
 
 diff --git a/src/test/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManagerOwnerRoutingTest.java b/src/test/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManagerOwnerRoutingTest.java
-index 1a8fc14f84842d8475b7ae24a76c22af83d672f2..55f03d290ddef244cc04fbfb522c268e6a3d2b86 100644
+index 1a8fc14f84842d8475b7ae24a76c22af83d672f2..a929950c3e5a5fbf54369e4c891254e3218ed35d 100644
 --- a/src/test/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManagerOwnerRoutingTest.java
 +++ b/src/test/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManagerOwnerRoutingTest.java
-@@ -85,6 +85,60 @@ class ChunkHolderManagerOwnerRoutingTest {
+@@ -13,6 +13,85 @@ import org.mockito.Mockito;
+ @Normal
+ class ChunkHolderManagerOwnerRoutingTest {
+ 
++    @Test
++    void globalPlayerCallbackCompletesChunkStatusesUnderFullWorldLease() throws Exception {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final ServerLevel level = Mockito.mock(ServerLevel.class);
++        Mockito.when(level.getServer()).thenReturn(server);
++        Mockito.when(level.dimension()).thenReturn(net.minecraft.world.level.Level.OVERWORLD);
++        Mockito.when(server.isReady()).thenReturn(true);
++        final net.minecraft.server.level.ServerPlayer player = Mockito.mock(net.minecraft.server.level.ServerPlayer.class);
++        Mockito.when(player.level()).thenReturn(level);
++        Mockito.when(player.chunkPosition()).thenReturn(new net.minecraft.world.level.ChunkPos(0, 0));
++        Mockito.when(player.getUUID()).thenReturn(java.util.UUID.randomUUID());
++        final io.papermc.paper.plugin.configuration.PluginMeta meta = Mockito.mock(io.papermc.paper.plugin.configuration.PluginMeta.class);
++        final org.bukkit.plugin.Plugin plugin = Mockito.mock(org.bukkit.plugin.Plugin.class);
++        Mockito.when(plugin.getPluginMeta()).thenReturn(meta);
++        Mockito.when(meta.getName()).thenReturn("ChunkLoader");
++        Mockito.when(meta.getMainClass()).thenReturn("example.ChunkLoader");
++        Mockito.when(meta.getPluginDependencies()).thenReturn(java.util.List.of());
++        Mockito.when(meta.getPluginSoftDependencies()).thenReturn(java.util.List.of());
++
++        final ChunkHolderManager manager = new ChunkHolderManager(level, Mockito.mock(ChunkTaskScheduler.class));
++        final NewChunkHolder holder = Mockito.mock(NewChunkHolder.class);
++        final java.util.concurrent.CompletableFuture<String> loaded = new java.util.concurrent.CompletableFuture<>();
++        Mockito.when(holder.handleFullStatusChange(Mockito.anyList())).thenAnswer(call -> {
++            Assertions.assertTrue(canDrainWithLease(level));
++            loaded.complete("loaded");
++            return true;
++        });
++        final net.minecraft.util.thread.BlockableEventLoop<?> loop = Mockito.mock(net.minecraft.util.thread.BlockableEventLoop.class);
++        Mockito.doAnswer(call -> {
++            Assertions.assertTrue(canDrainWithLease(level));
++            Assertions.assertTrue(manager.processTicketUpdates());
++            Assertions.assertTrue(((java.util.function.BooleanSupplier)call.getArgument(0)).getAsBoolean());
++            return null;
++        }).when(loop).managedBlock(Mockito.any(java.util.function.BooleanSupplier.class));
++
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread thread = new TickThread(() -> {
++            try (var global = OwnerDomainExecutor.enterGlobal(server, "global-player-chunk-test")) {
++                final var context = net.minecraft.server.threading.TickRegions.pushRegionContext(level, 0, 0, 0, 0);
++                try (var compatibility = io.papermc.paper.plugin.manager.compat.CompatibilityRuntimeContext.enter(plugin, 1L, false)) {
++                    OwnerDomainExecutor.runPlayerNow(player, "nested-player-test", () -> {
++                        manager.addChangedStatuses(java.util.List.of(holder));
++                        Assertions.assertFalse(ChunkHolderManager.canProcessPendingFullStatusUpdates(level));
++                        net.minecraft.server.threading.runtime.ThreadedRegionsBlockingBarrier.awaitStartupChunkLoad(
++                            loop, loaded, level, 0, 0, net.minecraft.world.level.chunk.status.ChunkStatus.FULL
++                        );
++                        Assertions.assertEquals("loaded", loaded.getNow(null));
++                        Assertions.assertEquals(OwnerDomainExecutor.Domain.PLAYER, OwnerDomainExecutor.currentDomain());
++                        Assertions.assertFalse(ChunkHolderManager.canProcessPendingFullStatusUpdates(level));
++                    });
++                } finally {
++                    net.minecraft.server.threading.TickRegions.popContext(context);
++                }
++            } catch (Throwable error) {
++                failure.set(error);
++            }
++        }, "global-player-chunk-test");
++        thread.setDaemon(true);
++        Mockito.when(server.getRunningThread()).thenReturn(thread);
++        thread.start();
++        thread.join(5_000L);
++        final boolean stranded = thread.isAlive();
++        if (stranded) {
++            loaded.completeExceptionally(new IllegalStateException("test cleanup"));
++            thread.join(5_000L);
++        }
++        Assertions.assertFalse(stranded, "A player callback stranded the world status completion");
++        Assertions.assertNull(failure.get());
++        Mockito.verify(loop).managedBlock(Mockito.any(java.util.function.BooleanSupplier.class));
++        Mockito.verify(holder).handleFullStatusChange(Mockito.anyList());
++    }
++
++    private static boolean canDrainWithLease(final ServerLevel level) {
++        return ChunkHolderManager.canProcessPendingFullStatusUpdates(level)
++            && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(
++                level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE
++            );
++    }
++
+     @Test
+     void boundedRegionCannotDrainWorldFullStatusQueue() throws InterruptedException {
+         final MinecraftServer server = Mockito.mock(MinecraftServer.class);
+@@ -85,6 +164,60 @@ class ChunkHolderManagerOwnerRoutingTest {
          });
      }
  
@@ -69,3 +155,10 @@ index 1a8fc14f84842d8475b7ae24a76c22af83d672f2..55f03d290ddef244cc04fbfb522c268e
      private static void runOnTickThread(final Runnable action) throws InterruptedException {
          final AtomicReference<Throwable> failure = new AtomicReference<>();
          final Thread thread = new TickThread(() -> {
+@@ -101,4 +234,4 @@ class ChunkHolderManagerOwnerRoutingTest {
+             Assertions.fail(failure.get());
+         }
+     }
+-}
+\ No newline at end of file
++}
