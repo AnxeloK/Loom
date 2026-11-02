@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 3 Nov 2026 00:23:23 +0200
+Subject: [PATCH] Use nearby players for bounded distance queries
+
+
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+index f2900d396b76513de9366da3ec45c2c99badb7c8..38c46eaed79def0e5287b4f4a13d29c244982a8d 100644
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -952,27 +952,54 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+         if (maxDistance <= 0) {
+             return false;
+         }
+-        final double targetX = pos.getX();
+-        final double targetY = pos.getY();
+-        final double targetZ = pos.getZ();
++        final ca.spottedleaf.moonrise.common.misc.NearbyPlayers.NearbyMapType type;
++        if (maxDistance <= ca.spottedleaf.moonrise.common.misc.NearbyPlayers.GENERAL_REALLY_SMALL_AREA_VIEW_DISTANCE_BLOCKS) {
++            type = ca.spottedleaf.moonrise.common.misc.NearbyPlayers.NearbyMapType.GENERAL_REALLY_SMALL;
++        } else if (maxDistance <= ca.spottedleaf.moonrise.common.misc.NearbyPlayers.GENERAL_SMALL_AREA_VIEW_DISTANCE_BLOCKS) {
++            type = ca.spottedleaf.moonrise.common.misc.NearbyPlayers.NearbyMapType.GENERAL_SMALL;
++        } else if (maxDistance <= ca.spottedleaf.moonrise.common.misc.NearbyPlayers.GENERAL_AREA_VIEW_DISTANCE_BLOCKS) {
++            type = ca.spottedleaf.moonrise.common.misc.NearbyPlayers.NearbyMapType.GENERAL;
++        } else {
++            type = null;
++        }
+         final double maxDistanceSquared = (double)maxDistance * (double)maxDistance;
+-
+-        for (ServerPlayer player : this.playerMap.getAllPlayers()) {
+-            if (player.isSpectator()) {
+-                continue;
++        if (type == null) {
++            for (final ServerPlayer player : this.playerMap.getAllPlayers()) {
++                if (playerIsCloseEnough(player, pos, maxDistanceSquared)) {
++                    return true;
++                }
+             }
+-            final Vec3 playerPos = player.position();
+-            final double deltaX = playerPos.x - targetX;
+-            final double deltaY = playerPos.y - targetY;
+-            final double deltaZ = playerPos.z - targetZ;
+-            if (deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ < maxDistanceSquared) {
++            return false;
++        }
++
++        // These maps follow entity section changes and do not depend on view or spawn settings.
++        final ca.spottedleaf.moonrise.common.list.ReferenceList<ServerPlayer> players =
++            this.level.moonrise$getNearbyPlayers().getPlayers(pos, type);
++        if (players == null) {
++            return false;
++        }
++        final ServerPlayer[] raw = players.getRawDataUnchecked();
++        final int len = players.size();
++        Objects.checkFromIndexSize(0, len, raw.length);
++        for (int i = 0; i < len; ++i) {
++            if (playerIsCloseEnough(raw[i], pos, maxDistanceSquared)) {
+                 return true;
+             }
+         }
+-
+         return false;
+     }
+ 
++    private static boolean playerIsCloseEnough(final ServerPlayer player, final BlockPos pos, final double maxDistanceSquared) {
++        if (player.isSpectator()) {
++            return false;
++        }
++        final Vec3 playerPos = player.position();
++        final double deltaX = playerPos.x - pos.getX();
++        final double deltaY = playerPos.y - pos.getY();
++        final double deltaZ = playerPos.z - pos.getZ();
++        return deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ < maxDistanceSquared;
++    }
++
+     private boolean anyPlayerCloseEnoughForSpawningInternal(final ChunkPos pos) {
+         // Spigot start
+         return this.anyPlayerCloseEnoughForSpawningInternal(pos, false);
