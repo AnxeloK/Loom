@@ -1,0 +1,118 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 2 Nov 2026 22:10:11 +0200
+Subject: [PATCH] Reconcile player waypoints after movement validation
+
+
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index 8706b798cb94e82737735c817407748e273b1e01..19f1c8eaeb11bf5c9ff32aa5ff334e2f8298ce66 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -1662,6 +1662,63 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+         return new RespawnResult(transition.withChangedLocation(selected), isBedSpawn, isAnchorSpawn);
+     }
+ 
++    // Loom start - reconcile position waypoints once after movement validation
++    private volatile @Nullable ServerLevel waypointPositionBatchLevel;
++    private int waypointPositionBatchDepth;
++    private boolean waypointPositionBatchDirty;
++
++    public int beginWaypointPositionBatch() {
++        final ServerLevel level = this.level();
++        if (!net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(
++            level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE
++        ) || (this.waypointPositionBatchLevel != null && this.waypointPositionBatchLevel != level)) {
++            return 0;
++        }
++        this.waypointPositionBatchLevel = level;
++        return ++this.waypointPositionBatchDepth;
++    }
++
++    public boolean deferWaypointPositionUpdate(final ServerLevel level) {
++        if (this.waypointPositionBatchLevel != level) {
++            return false;
++        }
++        this.waypointPositionBatchDirty = true;
++        return true;
++    }
++
++    public void endWaypointPositionBatch(final int depth) {
++        if (depth == 0) {
++            return;
++        }
++        if (depth != this.waypointPositionBatchDepth) {
++            throw new IllegalStateException("Waypoint position batches must close in order");
++        }
++        if (--this.waypointPositionBatchDepth != 0) {
++            return;
++        }
++        final ServerLevel level = this.waypointPositionBatchLevel;
++        final boolean dirty = this.waypointPositionBatchDirty;
++        this.waypointPositionBatchDirty = false;
++        this.waypointPositionBatchLevel = null;
++        // A transfer has its own untrack/track lifecycle. New-world moves are never deferred
++        // by a source-world batch, and a replaced or removed player must not be reintroduced.
++        if (!dirty || this.level() != level || this.firstTick || this.isRemoved()) {
++            return;
++        }
++        if (!net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(
++            level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE
++        )) {
++            throw new IllegalStateException("Waypoint position batch lost its world owner");
++        }
++        if (this.isTransmittingWaypoint()) {
++            level.getWaypointManager().updateWaypoint(this);
++        }
++        if (this.isReceivingWaypoints() && this.connection != null) {
++            level.getWaypointManager().updatePlayer(this);
++        }
++    }
++    // Loom end - reconcile position waypoints once after movement validation
++
+     public boolean isReceivingWaypoints() {
+         return this.getAttributeValue(Attributes.WAYPOINT_RECEIVE_RANGE) > 0.0;
+     }
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index 6af717544c04982d1befe28caed7bd51d91e7a5e..212e4fa7992e3ea41eef4015e299f42388b2196c 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -1524,6 +1524,25 @@ public class ServerGamePacketListenerImpl
+         final float requestedXRot,
+         final boolean isOnGround,
+         final boolean horizontalCollision
++    ) {
++        // Capture the entity: a plugin callback can replace the connection's player during respawn.
++        final ServerPlayer movingPlayer = this.player;
++        final int waypointBatch = movingPlayer.beginWaypointPositionBatch();
++        try {
++            this.handlePlayerPositionChangeNow(requestedX, requestedY, requestedZ, requestedYRot, requestedXRot, isOnGround, horizontalCollision);
++        } finally {
++            movingPlayer.endWaypointPositionBatch(waypointBatch);
++        }
++    }
++
++    private void handlePlayerPositionChangeNow(
++        final double requestedX,
++        final double requestedY,
++        final double requestedZ,
++        final float requestedYRot,
++        final float requestedXRot,
++        final boolean isOnGround,
++        final boolean horizontalCollision
+     ) {
+         double targetX = clampHorizontal(requestedX);
+         double targetY = clampVertical(requestedY);
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index 2b1c1fd5469bd4f2ea63281c26ea22515dce17df..cc8ae5b615e16195ea5444ccf8afcd44581d7d4f 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -5471,7 +5471,8 @@ public abstract class Entity
+             }
+ 
+             this.levelCallback.onMove();
+-            if (!this.firstTick && this.level instanceof ServerLevel serverLevel && !this.isRemoved()) {
++            if (!this.firstTick && this.level instanceof ServerLevel serverLevel && !this.isRemoved()
++                && !(this instanceof ServerPlayer player && player.deferWaypointPositionUpdate(serverLevel))) { // Loom - movement validation batch
+                 if (this instanceof WaypointTransmitter waypoint && waypoint.isTransmittingWaypoint()) {
+                     serverLevel.getWaypointManager().updateWaypoint(waypoint);
+                 }

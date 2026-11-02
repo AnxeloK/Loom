@@ -1,0 +1,251 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 2 Nov 2026 22:10:11 +0200
+Subject: [PATCH] Check waypoint updates through movement validation
+
+
+diff --git a/src/test/java/net/minecraft/server/level/ServerPlayerWaypointBatchTest.java b/src/test/java/net/minecraft/server/level/ServerPlayerWaypointBatchTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d3e078e77af27f1a2754a3540b29fdbcf246658
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/level/ServerPlayerWaypointBatchTest.java
+@@ -0,0 +1,239 @@
++package net.minecraft.server.level;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import java.lang.reflect.Field;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.core.BlockPos;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.network.ServerGamePacketListenerImpl;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.server.waypoints.ServerWaypointManager;
++import net.minecraft.world.entity.Entity;
++import net.minecraft.world.entity.EntityTypes;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.level.entity.EntityInLevelCallback;
++import net.minecraft.world.phys.Vec3;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class ServerPlayerWaypointBatchTest {
++    @BeforeAll
++    static void prepareMockTypes() {
++        mock(MinecraftServer.class);
++        mock(ServerLevel.class);
++        mock(ServerPlayer.class);
++        mock(ServerWaypointManager.class);
++        mock(ServerGamePacketListenerImpl.class);
++    }
++
++    @Test
++    void ordinaryPositionChangesStillUpdateEveryWaypointAndTracker() throws Exception {
++        final Fixture f = new Fixture();
++        f.positions();
++        verify(f.manager, times(3)).updateWaypoint(f.player);
++        verify(f.manager, times(3)).updatePlayer(f.player);
++        verify(f.callback, times(3)).onMove();
++        assertEquals(new Vec3(2, 0, 0), f.player.position());
++    }
++
++    @Test
++    void validationKeepsEveryPhysicalMoveButReconcilesWaypointsOnce() throws Exception {
++        final Fixture f = new Fixture();
++        f.owned(() -> {
++            final int batch = f.player.beginWaypointPositionBatch();
++            assertEquals(1, batch);
++            try { f.positions(); }
++            finally { f.player.endWaypointPositionBatch(batch); }
++        });
++        verify(f.manager).updateWaypoint(f.player);
++        verify(f.manager).updatePlayer(f.player);
++        verify(f.callback, times(3)).onMove();
++        assertEquals(new Vec3(2, 0, 0), f.player.position());
++        assertEquals(new BlockPos(2, 0, 0), f.player.blockPosition());
++    }
++
++    @Test
++    void cancellationReconcilesTheRestoredPosition() throws Exception {
++        final Fixture f = new Fixture();
++        final AtomicReference<Vec3> published = new AtomicReference<>();
++        doAnswer(call -> { published.set(f.player.position()); return null; }).when(f.manager).updateWaypoint(f.player);
++        f.owned(() -> {
++            final int batch = f.player.beginWaypointPositionBatch();
++            try {
++                f.player.setPosRaw(2, 0, 0);
++                f.player.setPosRaw(0, 0, 0);
++            } finally { f.player.endWaypointPositionBatch(batch); }
++        });
++        assertEquals(Vec3.ZERO, published.get());
++        verify(f.manager).updateWaypoint(f.player);
++        verify(f.callback, times(2)).onMove();
++    }
++
++    @Test
++    void nestedValidationFlushesOnlyWhenTheOuterCallCompletes() throws Exception {
++        final Fixture f = new Fixture();
++        f.owned(() -> {
++            final int outer = f.player.beginWaypointPositionBatch();
++            f.player.setPosRaw(1, 0, 0);
++            final int inner = f.player.beginWaypointPositionBatch();
++            assertEquals(2, inner);
++            f.player.setPosRaw(2, 0, 0);
++            f.player.endWaypointPositionBatch(inner);
++            verifyNoInteractions(f.manager);
++            f.player.endWaypointPositionBatch(outer);
++        });
++        verify(f.manager).updateWaypoint(f.player);
++        verify(f.manager).updatePlayer(f.player);
++    }
++
++    @Test
++    void aBoundedOwnerKeepsImmediateUpdates() throws Exception {
++        final Fixture f = new Fixture();
++        run(() -> {
++            final var owner = TickRegions.pushRegionContext(f.level, 0, 0, 0, 0);
++            try {
++                final int batch = f.player.beginWaypointPositionBatch();
++                assertEquals(0, batch);
++                f.positions();
++                f.player.endWaypointPositionBatch(batch);
++            } finally { TickRegions.popContext(owner); }
++        });
++        verify(f.manager, times(3)).updateWaypoint(f.player);
++        verify(f.manager, times(3)).updatePlayer(f.player);
++    }
++
++    @Test
++    void transferUsesTheDestinationLifecycleAndDiscardsTheSourceFlush() throws Exception {
++        final Fixture f = new Fixture();
++        final ServerLevel destination = mock(ServerLevel.class);
++        final ServerWaypointManager destinationManager = mock(ServerWaypointManager.class);
++        when(destination.getWaypointManager()).thenReturn(destinationManager);
++        f.owned(() -> {
++            final int batch = f.player.beginWaypointPositionBatch();
++            f.player.setPosRaw(1, 0, 0);
++            try { set(f.player, "level", destination); }
++            catch (Exception failure) { throw new AssertionError(failure); }
++            f.player.setPosRaw(2, 0, 0);
++            f.player.endWaypointPositionBatch(batch);
++        });
++        verifyNoInteractions(f.manager);
++        verify(destinationManager).updateWaypoint(f.player);
++        verify(destinationManager).updatePlayer(f.player);
++        assertFalse(f.player.deferWaypointPositionUpdate(f.level));
++    }
++
++    @Test
++    void removalDoesNotReintroduceTheOldPlayer() throws Exception {
++        final Fixture f = new Fixture();
++        f.owned(() -> {
++            final int batch = f.player.beginWaypointPositionBatch();
++            f.player.setPosRaw(1, 0, 0);
++            doReturn(true).when(f.player).isRemoved();
++            f.player.endWaypointPositionBatch(batch);
++        });
++        verifyNoInteractions(f.manager);
++        assertFalse(f.player.deferWaypointPositionUpdate(f.level));
++    }
++
++    @Test
++    void exceptionCleanupAllowsFollowingMovesToUpdateImmediately() throws Exception {
++        final Fixture f = new Fixture();
++        f.owned(() -> {
++            final int batch = f.player.beginWaypointPositionBatch();
++            assertThrows(IllegalArgumentException.class, () -> {
++                try {
++                    f.player.setPosRaw(1, 0, 0);
++                    throw new IllegalArgumentException("event failure");
++                } finally { f.player.endWaypointPositionBatch(batch); }
++            });
++        });
++        f.player.setPosRaw(2, 0, 0);
++        verify(f.manager, times(2)).updateWaypoint(f.player);
++        verify(f.manager, times(2)).updatePlayer(f.player);
++    }
++
++    @Test
++    void unchangedPositionDoesNotScanAndCurrentEligibilityControlsTheFlush() throws Exception {
++        final Fixture f = new Fixture();
++        f.owned(() -> {
++            int batch = f.player.beginWaypointPositionBatch();
++            f.player.setPosRaw(0, 0, 0);
++            f.player.endWaypointPositionBatch(batch);
++            verifyNoInteractions(f.manager);
++            batch = f.player.beginWaypointPositionBatch();
++            f.player.setPosRaw(1, 0, 0);
++            doReturn(false).when(f.player).isTransmittingWaypoint();
++            doReturn(false).when(f.player).isReceivingWaypoints();
++            f.player.endWaypointPositionBatch(batch);
++        });
++        verifyNoInteractions(f.manager);
++    }
++
++    private static final class Fixture {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel level = mock(ServerLevel.class);
++        final ServerWaypointManager manager = mock(ServerWaypointManager.class);
++        final ServerPlayer player = mock(ServerPlayer.class, CALLS_REAL_METHODS);
++        final EntityInLevelCallback callback = mock(EntityInLevelCallback.class);
++
++        Fixture() throws Exception {
++            when(level.getServer()).thenReturn(server);
++            when(level.dimension()).thenReturn(Level.OVERWORLD);
++            when(level.getWaypointManager()).thenReturn(manager);
++            set(player, "level", level);
++            set(player, "position", Vec3.ZERO);
++            set(player, "blockPosition", BlockPos.ZERO);
++            set(player, "chunkPosition", new ChunkPos(0, 0));
++            set(player, "posLock", new Object());
++            set(player, "levelCallback", callback);
++            doReturn(EntityTypes.PLAYER).when(player).getType();
++            doReturn(true).when(player).isTransmittingWaypoint();
++            doReturn(true).when(player).isReceivingWaypoints();
++            player.connection = mock(ServerGamePacketListenerImpl.class);
++        }
++
++        void positions() {
++            player.setPosRaw(1, 0, 0);
++            player.setPosRaw(0, 0, 0);
++            player.setPosRaw(2, 0, 0);
++        }
++
++        void owned(final Runnable action) throws Exception {
++            run(() -> {
++                final var context = TickRegions.pushLevelContext(level);
++                try { action.run(); }
++                finally { TickRegions.popContext(context); }
++            });
++        }
++    }
++
++    private static void set(final Object target, final String name, final Object value) throws Exception {
++        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
++            try {
++                final Field field = type.getDeclaredField(name);
++                field.setAccessible(true);
++                field.set(target, value);
++                return;
++            } catch (NoSuchFieldException ignored) { }
++        }
++        throw new NoSuchFieldException(name);
++    }
++
++    private static void run(final Runnable action) throws Exception {
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread thread = new TickThread(() -> {
++            try { action.run(); }
++            catch (Throwable error) { failure.set(error); }
++        }, "waypoint-owner-test");
++        thread.setDaemon(true);
++        thread.start();
++        thread.join(10_000L);
++        assertFalse(thread.isAlive(), "waypoint owner did not finish");
++        if (failure.get() != null) throw new AssertionError(failure.get());
++    }
++}
