@@ -6,10 +6,10 @@ Subject: [PATCH] Check waypoint updates through movement validation
 
 diff --git a/src/test/java/net/minecraft/server/level/ServerPlayerWaypointBatchTest.java b/src/test/java/net/minecraft/server/level/ServerPlayerWaypointBatchTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..3d3e078e77af27f1a2754a3540b29fdbcf246658
+index 0000000000000000000000000000000000000000..9875b396977093307068a1aabaee9f03a6fcc95c
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/level/ServerPlayerWaypointBatchTest.java
-@@ -0,0 +1,239 @@
+@@ -0,0 +1,285 @@
 +package net.minecraft.server.level;
 +
 +import ca.spottedleaf.moonrise.common.util.TickThread;
@@ -39,6 +39,8 @@ index 0000000000000000000000000000000000000000..3d3e078e77af27f1a2754a3540b29fdb
 +        mock(MinecraftServer.class);
 +        mock(ServerLevel.class);
 +        mock(ServerPlayer.class);
++        mock(ServerChunkCache.class);
++        mock(ChunkMap.class);
 +        mock(ServerWaypointManager.class);
 +        mock(ServerGamePacketListenerImpl.class);
 +    }
@@ -186,10 +188,52 @@ index 0000000000000000000000000000000000000000..3d3e078e77af27f1a2754a3540b29fdb
 +        verifyNoInteractions(f.manager);
 +    }
 +
++    @Test
++    void chunkTrackingMoveJoinsTheSameWaypointReconciliation() throws Exception {
++        final Fixture f = new Fixture();
++        f.owned(() -> {
++            final int batch = f.player.beginWaypointPositionBatch();
++            try {
++                f.positions();
++                f.cache.move(f.player);
++                verify(f.map).move(f.player);
++                verifyNoInteractions(f.manager);
++            } finally { f.player.endWaypointPositionBatch(batch); }
++        });
++        verify(f.manager).updateWaypoint(f.player);
++        verify(f.manager).updatePlayer(f.player);
++        verify(f.callback, times(3)).onMove();
++    }
++
++    @Test
++    void stationaryChunkTrackingOnlyReconcilesTheReceiver() throws Exception {
++        final Fixture f = new Fixture();
++        f.owned(() -> {
++            final int batch = f.player.beginWaypointPositionBatch();
++            try { f.cache.move(f.player); }
++            finally { f.player.endWaypointPositionBatch(batch); }
++        });
++        verify(f.map).move(f.player);
++        verify(f.manager).updatePlayer(f.player);
++        verify(f.manager, never()).updateWaypoint(f.player);
++    }
++
++    @Test
++    void chunkTrackingWithoutValidationKeepsImmediateReceiverUpdates() throws Exception {
++        final Fixture f = new Fixture();
++        f.cache.move(f.player);
++        f.cache.move(f.player);
++        verify(f.map, times(2)).move(f.player);
++        verify(f.manager, times(2)).updatePlayer(f.player);
++        verify(f.manager, never()).updateWaypoint(f.player);
++    }
++
 +    private static final class Fixture {
 +        final MinecraftServer server = mock(MinecraftServer.class);
 +        final ServerLevel level = mock(ServerLevel.class);
 +        final ServerWaypointManager manager = mock(ServerWaypointManager.class);
++        final ServerChunkCache cache = mock(ServerChunkCache.class, CALLS_REAL_METHODS);
++        final ChunkMap map = mock(ChunkMap.class);
 +        final ServerPlayer player = mock(ServerPlayer.class, CALLS_REAL_METHODS);
 +        final EntityInLevelCallback callback = mock(EntityInLevelCallback.class);
 +
@@ -197,6 +241,8 @@ index 0000000000000000000000000000000000000000..3d3e078e77af27f1a2754a3540b29fdb
 +            when(level.getServer()).thenReturn(server);
 +            when(level.dimension()).thenReturn(Level.OVERWORLD);
 +            when(level.getWaypointManager()).thenReturn(manager);
++            set(cache, "level", level);
++            set(cache, "chunkMap", map);
 +            set(player, "level", level);
 +            set(player, "position", Vec3.ZERO);
 +            set(player, "blockPosition", BlockPos.ZERO);

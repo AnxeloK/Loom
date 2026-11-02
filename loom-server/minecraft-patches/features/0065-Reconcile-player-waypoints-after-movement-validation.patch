@@ -4,18 +4,32 @@ Date: Mon, 2 Nov 2026 22:10:11 +0200
 Subject: [PATCH] Reconcile player waypoints after movement validation
 
 
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index 682fb7c3bd9e3e88c513be25d598ef9fb32c2904..115a84e1f89d03a97f91adee741ec84539a486d6 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -940,7 +940,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+     public void move(final ServerPlayer player) {
+         if (!player.isRemoved()) {
+             this.chunkMap.move(player);
+-            if (player.isReceivingWaypoints()) {
++            if (player.isReceivingWaypoints() && !player.deferWaypointReceiverUpdate(this.level)) {
+                 this.level.getWaypointManager().updatePlayer(player);
+             }
+         }
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index 8706b798cb94e82737735c817407748e273b1e01..19f1c8eaeb11bf5c9ff32aa5ff334e2f8298ce66 100644
+index 8706b798cb94e82737735c817407748e273b1e01..1cb54fb8bc654354cbf762a8837de986c6b4278c 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
-@@ -1662,6 +1662,63 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1662,6 +1662,74 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
          return new RespawnResult(transition.withChangedLocation(selected), isBedSpawn, isAnchorSpawn);
      }
  
 +    // Loom start - reconcile position waypoints once after movement validation
 +    private volatile @Nullable ServerLevel waypointPositionBatchLevel;
 +    private int waypointPositionBatchDepth;
-+    private boolean waypointPositionBatchDirty;
++    private boolean waypointPositionBatchMoved;
++    private boolean waypointPositionBatchReceiverDirty;
 +
 +    public int beginWaypointPositionBatch() {
 +        final ServerLevel level = this.level();
@@ -32,7 +46,15 @@ index 8706b798cb94e82737735c817407748e273b1e01..19f1c8eaeb11bf5c9ff32aa5ff334e2f
 +        if (this.waypointPositionBatchLevel != level) {
 +            return false;
 +        }
-+        this.waypointPositionBatchDirty = true;
++        this.waypointPositionBatchMoved = true;
++        return true;
++    }
++
++    public boolean deferWaypointReceiverUpdate(final ServerLevel level) {
++        if (this.waypointPositionBatchLevel != level) {
++            return false;
++        }
++        this.waypointPositionBatchReceiverDirty = true;
 +        return true;
 +    }
 +
@@ -47,8 +69,10 @@ index 8706b798cb94e82737735c817407748e273b1e01..19f1c8eaeb11bf5c9ff32aa5ff334e2f
 +            return;
 +        }
 +        final ServerLevel level = this.waypointPositionBatchLevel;
-+        final boolean dirty = this.waypointPositionBatchDirty;
-+        this.waypointPositionBatchDirty = false;
++        final boolean moved = this.waypointPositionBatchMoved;
++        final boolean dirty = moved || this.waypointPositionBatchReceiverDirty;
++        this.waypointPositionBatchMoved = false;
++        this.waypointPositionBatchReceiverDirty = false;
 +        this.waypointPositionBatchLevel = null;
 +        // A transfer has its own untrack/track lifecycle. New-world moves are never deferred
 +        // by a source-world batch, and a replaced or removed player must not be reintroduced.
@@ -60,7 +84,7 @@ index 8706b798cb94e82737735c817407748e273b1e01..19f1c8eaeb11bf5c9ff32aa5ff334e2f
 +        )) {
 +            throw new IllegalStateException("Waypoint position batch lost its world owner");
 +        }
-+        if (this.isTransmittingWaypoint()) {
++        if (moved && this.isTransmittingWaypoint()) {
 +            level.getWaypointManager().updateWaypoint(this);
 +        }
 +        if (this.isReceivingWaypoints() && this.connection != null) {
