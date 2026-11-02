@@ -1,0 +1,375 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 2 Nov 2026 14:12:51 +0200
+Subject: [PATCH] Cover concurrent tracker membership and ordered pairing
+
+
+diff --git a/src/test/java/net/minecraft/server/level/ChunkMapTrackingTest.java b/src/test/java/net/minecraft/server/level/ChunkMapTrackingTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..87b04d43a61b5c2d79ae9ddc54d036c86a88e577
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/level/ChunkMapTrackingTest.java
+@@ -0,0 +1,363 @@
++package net.minecraft.server.level;
++
++import ca.spottedleaf.moonrise.common.list.ReferenceList;
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import it.unimi.dsi.fastutil.ints.Int2ObjectMaps;
++import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
++import it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap;
++import java.lang.reflect.Field;
++import java.util.ArrayDeque;
++import java.util.List;
++import java.util.UUID;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.CyclicBarrier;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.core.BlockPos;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.util.debug.LevelDebugSynchronizers;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.entity.Entity;
++import net.minecraft.world.entity.EntityTypes;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import io.papermc.paper.entity.activation.ActivationType;
++import org.spigotmc.SpigotWorldConfig;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class ChunkMapTrackingTest {
++    @BeforeAll
++    static void prepareMockTypes() {
++        mock(MinecraftServer.class);
++        mock(ServerLevel.class);
++        mock(ChunkMap.class);
++        mock(Entity.class);
++        mock(ServerEntity.class);
++    }
++
++    @Test
++    void independentRegionsKeepTheTrackerListAndIdIndexConsistent() throws Exception {
++        final Fixture fixture = new Fixture();
++        final CyclicBarrier unguardedInsertions = new CyclicBarrier(2);
++        set(fixture.entities, "referenceToIndex", new Reference2IntOpenHashMap<Entity>() {
++            { defaultReturnValue(Integer.MIN_VALUE); }
++            @Override
++            public int putIfAbsent(final Entity entity, final int index) {
++                final int previous;
++                synchronized (this) { previous = super.putIfAbsent(entity, index); }
++                if (!Thread.holdsLock(fixture.map.entityMap)) {
++                    // Two unprotected insertions have both read the same dense-list size. Keep
++                    // that interleaving deterministic, without delaying a serialized transaction.
++                    try { unguardedInsertions.await(5, TimeUnit.SECONDS); }
++                    catch (Exception failure) { throw new AssertionError(failure); }
++                }
++                return previous;
++            }
++        });
++        final Entity first = fixture.entity(1, 0);
++        final Entity second = fixture.entity(2, 32);
++        final CountDownLatch held = new CountDownLatch(1);
++        final CountDownLatch release = new CountDownLatch(1);
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread blocker = thread(failure, () -> {
++            final var context = TickRegions.pushRegionContext(fixture.level, 1000, 1000, 1000, 1000);
++            try { held.countDown(); await(release); }
++            finally { TickRegions.popContext(context); }
++        });
++        assertTrue(held.await(5, TimeUnit.SECONDS));
++        try {
++            final CyclicBarrier ready = new CyclicBarrier(2);
++            final Thread left = thread(failure, () -> fixture.register(first, 0, ready));
++            final Thread right = thread(failure, () -> fixture.register(second, 32, ready));
++            join(left, failure);
++            join(right, failure);
++            assertEquals(2, fixture.map.entityMap.size());
++            assertEquals(2, fixture.entities.size(), "the dense list lost a concurrent registration");
++            assertTrue(fixture.entities.contains(first));
++            assertTrue(fixture.entities.contains(second));
++        } finally {
++            release.countDown();
++            join(blocker, failure);
++        }
++        final Thread cleanup = thread(failure, () -> {
++            final var context = TickRegions.pushLevelContext(fixture.level);
++            try {
++                TickRegions.runFullLevelContinuations(fixture.level);
++                fixture.map.removeEntity(first);
++                fixture.map.removeEntity(second);
++                assertEquals(0, fixture.entities.size());
++                assertTrue(fixture.map.entityMap.isEmpty());
++            } finally { TickRegions.popContext(context); }
++        });
++        join(cleanup, failure);
++    }
++
++    @Test
++    void aViewerInAnotherWorldCanBeUnpairedUnderTheSourceOwner() throws Exception {
++        final Fixture fixture = new Fixture();
++        final Entity entity = fixture.entity(1, 0);
++        final ServerPlayer player = fixture.viewer(mock(ServerLevel.class), 32);
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread owner = thread(failure, () -> {
++            final var context = TickRegions.pushLevelContext(fixture.level);
++            try (var construction = mockConstruction(ServerEntity.class)) {
++                final var tracked = fixture.map.new TrackedEntity(entity, 48, net.minecraft.world.entity.UpdateInterval.NEVER, false);
++                tracked.seenBy.add(player.connection);
++                tracked.removePlayer(player);
++                assertTrue(tracked.seenBy.isEmpty());
++                verify(tracked.serverEntity).removePairing(player);
++            } finally { TickRegions.popContext(context); }
++        });
++        join(owner, failure);
++    }
++
++    @Test
++    void unpairingWaitsForTheWorldOwnerWithoutTakingAnotherWorkersLease() throws Exception {
++        final Fixture fixture = new Fixture();
++        final Entity entity = fixture.entity(1, 0);
++        final ServerPlayer player = fixture.viewer(fixture.level, 32);
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final CountDownLatch held = new CountDownLatch(1);
++        final CountDownLatch release = new CountDownLatch(1);
++        final AtomicReference<ChunkMap.TrackedEntity> tracked = new AtomicReference<>();
++        final Thread viewerOwner = thread(failure, () -> {
++            final var context = TickRegions.pushRegionContext(fixture.level, 32, 0, 32, 0);
++            try { held.countDown(); await(release); }
++            finally { TickRegions.popContext(context); }
++        });
++        assertTrue(held.await(5, TimeUnit.SECONDS));
++        try {
++            final Thread entityOwner = thread(failure, () -> {
++                final var context = TickRegions.pushRegionContext(fixture.level, 0, 0, 0, 0);
++                try (var construction = mockConstruction(ServerEntity.class)) {
++                    final var tracker = fixture.map.new TrackedEntity(entity, 48, net.minecraft.world.entity.UpdateInterval.NEVER, false);
++                    tracked.set(tracker);
++                    tracker.seenBy.add(player.connection);
++                    tracker.removePlayer(player);
++                    assertTrue(tracker.seenBy.contains(player.connection));
++                    verifyNoInteractions(tracker.serverEntity);
++                } finally { TickRegions.popContext(context); }
++            });
++            join(entityOwner, failure);
++        } finally {
++            release.countDown();
++            join(viewerOwner, failure);
++        }
++        final Thread worldOwner = thread(failure, () -> {
++            final var context = TickRegions.pushLevelContext(fixture.level);
++            try {
++                TickRegions.runFullLevelContinuations(fixture.level);
++                assertTrue(tracked.get().seenBy.isEmpty());
++                verify(tracked.get().serverEntity).removePairing(player);
++            } finally { TickRegions.popContext(context); }
++        });
++        join(worldOwner, failure);
++    }
++
++    @Test
++    void deferredRegistrationCannotPairAnEntityThatHasAlreadyRetired() throws Exception {
++        final Fixture fixture = new Fixture();
++        final Entity entity = fixture.entity(1, 0);
++        final ServerPlayer player = fixture.viewer(fixture.level, 32);
++        when(fixture.level.players()).thenReturn(List.of(player));
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final CountDownLatch held = new CountDownLatch(1);
++        final CountDownLatch release = new CountDownLatch(1);
++        final AtomicReference<ServerEntity> network = new AtomicReference<>();
++        final Thread viewerOwner = thread(failure, () -> {
++            final var context = TickRegions.pushRegionContext(fixture.level, 32, 0, 32, 0);
++            try { held.countDown(); await(release); }
++            finally { TickRegions.popContext(context); }
++        });
++        assertTrue(held.await(5, TimeUnit.SECONDS));
++        try {
++            final Thread entityOwner = thread(failure, () -> {
++                final var context = TickRegions.pushRegionContext(fixture.level, 0, 0, 0, 0);
++                try (var construction = mockConstruction(ServerEntity.class)) {
++                    fixture.map.addEntity(entity);
++                    network.set(construction.constructed().getFirst());
++                    fixture.map.removeEntity(entity);
++                    assertTrue(fixture.map.entityMap.isEmpty());
++                    assertEquals(0, fixture.entities.size());
++                } finally { TickRegions.popContext(context); }
++            });
++            join(entityOwner, failure);
++        } finally {
++            release.countDown();
++            join(viewerOwner, failure);
++        }
++        final Thread worldOwner = thread(failure, () -> {
++            final var context = TickRegions.pushLevelContext(fixture.level);
++            try {
++                TickRegions.runFullLevelContinuations(fixture.level);
++                verify(network.get(), never()).addPairing(any());
++            } finally { TickRegions.popContext(context); }
++        });
++        join(worldOwner, failure);
++    }
++
++    @Test
++    void aNestedPlayerOwnerCanUnpairWithinItsCoveringWorldLease() throws Exception {
++        final Fixture fixture = new Fixture();
++        final Entity entity = fixture.entity(1, 0);
++        final ServerPlayer player = fixture.viewer(fixture.level, 0);
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread owner = thread(failure, () -> {
++            final var context = TickRegions.pushLevelContext(fixture.level);
++            try (var construction = mockConstruction(ServerEntity.class)) {
++                final var tracked = fixture.map.new TrackedEntity(entity, 48, net.minecraft.world.entity.UpdateInterval.NEVER, false);
++                tracked.seenBy.add(player.connection);
++                OwnerDomainExecutor.runPlayerNow(player, "nested-tracker-player", () -> tracked.removePlayer(player));
++                assertTrue(tracked.seenBy.isEmpty());
++                verify(tracked.serverEntity).removePairing(player);
++            } finally { TickRegions.popContext(context); }
++        });
++        join(owner, failure);
++    }
++
++    @Test
++    void aFailedPairingCallbackLeavesLaterUpdatesForTheNextTrackerTick() throws Exception {
++        final Fixture fixture = new Fixture();
++        final Entity first = fixture.entity(1, 0);
++        final Entity second = fixture.entity(2, 0);
++        final ServerPlayer player = fixture.viewer(fixture.level, 32);
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final CountDownLatch held = new CountDownLatch(1);
++        final CountDownLatch release = new CountDownLatch(1);
++        final AtomicReference<ChunkMap.TrackedEntity> secondTracker = new AtomicReference<>();
++        final Thread viewerOwner = thread(failure, () -> {
++            final var context = TickRegions.pushRegionContext(fixture.level, 32, 0, 32, 0);
++            try { held.countDown(); await(release); }
++            finally { TickRegions.popContext(context); }
++        });
++        assertTrue(held.await(5, TimeUnit.SECONDS));
++        try {
++            final Thread producer = thread(failure, () -> {
++                final var context = TickRegions.pushRegionContext(fixture.level, 0, 0, 0, 0);
++                try (var construction = mockConstruction(ServerEntity.class)) {
++                    final var firstTracker = fixture.map.new TrackedEntity(first, 48, net.minecraft.world.entity.UpdateInterval.NEVER, false);
++                    final var later = fixture.map.new TrackedEntity(second, 48, net.minecraft.world.entity.UpdateInterval.NEVER, false);
++                    secondTracker.set(later);
++                    firstTracker.seenBy.add(player.connection);
++                    later.seenBy.add(player.connection);
++                    doThrow(new IllegalStateException("pairing failed")).when(firstTracker.serverEntity).removePairing(player);
++                    firstTracker.removePlayer(player);
++                    later.removePlayer(player);
++                    verifyNoInteractions(later.serverEntity);
++                } finally { TickRegions.popContext(context); }
++            });
++            join(producer, failure);
++        } finally {
++            release.countDown();
++            join(viewerOwner, failure);
++        }
++        final Thread consumer = thread(failure, () -> {
++            final var context = TickRegions.pushLevelContext(fixture.level);
++            try {
++                TickRegions.runFullLevelContinuations(fixture.level);
++                assertTrue(TickRegions.recentDiagnostics().stream().anyMatch(event -> event.detail().contains("pairing failed")));
++                assertFalse(secondTracker.get().seenBy.isEmpty());
++                fixture.map.tick();
++                assertTrue(secondTracker.get().seenBy.isEmpty());
++                verify(secondTracker.get().serverEntity).removePairing(player);
++            } finally { TickRegions.popContext(context); }
++        });
++        join(consumer, failure);
++    }
++
++    private static final class Fixture {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel level = mock(ServerLevel.class);
++        final ChunkMap map = mock(ChunkMap.class, CALLS_REAL_METHODS);
++        final ReferenceList<Entity> entities = new ReferenceList<>(new Entity[0]);
++
++        Fixture() throws Exception {
++            when(level.getServer()).thenReturn(server);
++            when(level.dimension()).thenReturn(Level.OVERWORLD);
++            when(level.players()).thenReturn(List.of());
++            when(level.debugSynchronizers()).thenReturn(mock(LevelDebugSynchronizers.class));
++            final SpigotWorldConfig config = mock(SpigotWorldConfig.class);
++            config.otherTrackingRange = 48;
++            set(level, "spigotConfig", config);
++            set(map, "level", level);
++            set(map, "entityMap", Int2ObjectMaps.synchronize(new Int2ObjectOpenHashMap<>()));
++            set(map, "trackerEntities", entities);
++            try { set(map, "trackerUpdates", new ArrayDeque<>()); }
++            catch (NoSuchFieldException originalImplementation) { /* Also run against the original bytecode. */ }
++        }
++
++        Entity entity(final int id, final int chunk) throws Exception {
++            final Entity entity = mock(Entity.class);
++            entity.valid = true;
++            set(entity, "activationType", ActivationType.MISC);
++            when(entity.level()).thenReturn(level);
++            doReturn(EntityTypes.PIG).when(entity).getType();
++            when(entity.getId()).thenReturn(id);
++            when(entity.chunkPosition()).thenReturn(new ChunkPos(chunk, 0));
++            when(entity.blockPosition()).thenReturn(new BlockPos(chunk * 16 + 1, 64, 1));
++            final AtomicReference<ChunkMap.TrackedEntity> tracker = new AtomicReference<>();
++            when(entity.moonrise$getTrackedEntity()).thenAnswer(ignored -> tracker.get());
++            doAnswer(call -> { tracker.set(call.getArgument(0)); return null; }).when(entity).moonrise$setTrackedEntity(any());
++            return entity;
++        }
++
++        ServerPlayer viewer(final ServerLevel world, final int chunk) {
++            final ServerPlayer player = mock(ServerPlayer.class);
++            when(player.level()).thenReturn(world);
++            when(player.getUUID()).thenReturn(UUID.randomUUID());
++            when(player.chunkPosition()).thenReturn(new ChunkPos(chunk, 0));
++            when(player.blockPosition()).thenReturn(new BlockPos(chunk * 16 + 1, 64, 1));
++            player.connection = mock(net.minecraft.server.network.ServerGamePacketListenerImpl.class);
++            when(player.connection.getPlayer()).thenReturn(player);
++            return player;
++        }
++
++        void register(final Entity entity, final int chunk, final CyclicBarrier ready) {
++            final var context = TickRegions.pushRegionContext(level, chunk, 0, chunk, 0);
++            try (var construction = mockConstruction(ServerEntity.class)) {
++                try { ready.await(5, TimeUnit.SECONDS); }
++                catch (Exception failure) { throw new AssertionError(failure); }
++                map.addEntity(entity);
++            } finally { TickRegions.popContext(context); }
++        }
++    }
++
++    private static void set(final Object target, final String name, final Object value) throws Exception {
++        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
++            try {
++                final Field field = type.getDeclaredField(name);
++                field.setAccessible(true);
++                field.set(target, value);
++                return;
++            } catch (NoSuchFieldException ignored) { }
++        }
++        throw new NoSuchFieldException(name);
++    }
++
++    private static Thread thread(final AtomicReference<Throwable> failure, final Runnable action) {
++        final Thread thread = new TickThread(() -> {
++            try { action.run(); }
++            catch (Throwable error) { failure.compareAndSet(null, error); }
++        }, "tracker-owner-test");
++        thread.setDaemon(true);
++        thread.start();
++        return thread;
++    }
++
++    private static void await(final CountDownLatch latch) {
++        try { assertTrue(latch.await(10, TimeUnit.SECONDS)); }
++        catch (InterruptedException failure) { throw new AssertionError(failure); }
++    }
++
++    private static void join(final Thread thread, final AtomicReference<Throwable> failure) throws Exception {
++        thread.join(10_000L);
++        assertFalse(thread.isAlive(), "tracker owner did not complete");
++        if (failure.get() != null) throw new AssertionError(failure.get());
++    }
++}

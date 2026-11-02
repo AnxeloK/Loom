@@ -5,24 +5,6 @@ Subject: [PATCH] Reduce region dispatch bookkeeping
 
 Reuse covering ownership and stable region partitions so region dispatch performs less lease and bucket work on every tick.
 
-diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
-index 148fb355e2ef31a4c49973375bb2d995e4a41365..73d90a78d760ad7108e587ac4ebe496e61e829b1 100644
---- a/net/minecraft/server/level/ChunkMap.java
-+++ b/net/minecraft/server/level/ChunkMap.java
-@@ -1471,6 +1471,13 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
-             if (player.level() != ChunkMap.this.level) {
-                 return ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(player);
-             }
-+            // Fast path: the serial tracker tick runs under the level's full-extent owner context (or
-+            // the global owner on serial paths), which covers both endpoints by definition. This loop
-+            // runs per tracked entity per viewing player per tick, so the two lease lookups and two
-+            // ChunkPos allocations below are only paid on sub-region workers.
-+            if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.isCurrentFullLevelOwnerOrGlobal(ChunkMap.this.level)) {
-+                return true;
-+            }
-             final ChunkPos entityChunk = this.entity.chunkPosition();
-             final ChunkPos playerChunk = player.chunkPosition();
-             return net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(ChunkMap.this.level, entityChunk.x(), entityChunk.z())
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
 index ba7894cce76ead632003429bbaa9ba8731f92eed..3da0149ce35c19b21668946121e12124b98afcd2 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
