@@ -1,0 +1,131 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 3 Nov 2026 01:13:22 +0200
+Subject: [PATCH] Reconcile connection tick waypoints under a world lease
+
+
+diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
+index a37e34a4e1b6aaf75a702ebb98fee4070109aa9f..0b97163d12040aabd7c9e9ebad0a963c2da90f46 100644
+--- a/net/minecraft/network/Connection.java
++++ b/net/minecraft/network/Connection.java
+@@ -709,6 +709,26 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+     }
+ 
+     private void tickListenerInOwnerContext(final PacketListener listener, final TickablePacketListener tickable) {
++        // Connection ticking follows the joined world phase. Take a full lease when it is free so
++        // player simulation can reconcile its temporary positions under one world owner.
++        if (listener instanceof net.minecraft.server.network.ServerGamePacketListenerImpl gameListener
++            && net.minecraft.server.threading.TickRegions.currentContext() == null
++            && net.minecraft.server.threading.runtime.OwnerDomainExecutor.currentDomain()
++                == net.minecraft.server.threading.runtime.OwnerDomainExecutor.Domain.GLOBAL_CONTROL) {
++            final net.minecraft.server.level.ServerLevel level = gameListener.player.level();
++            if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(level.getServer())) {
++                final net.minecraft.server.threading.TickRegions.RegionContext context =
++                    net.minecraft.server.threading.TickRegions.tryPushLevelContext(level);
++                if (context != null) {
++                    try {
++                        this.runListenerInOwnerContext(listener, tickable::tick);
++                    } finally {
++                        net.minecraft.server.threading.TickRegions.popContext(context);
++                    }
++                    return;
++                }
++            }
++        }
+         this.runListenerInOwnerContext(listener, tickable::tick);
+     }
+ 
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index 212e4fa7992e3ea41eef4015e299f42388b2196c..eb6dc052915a0abc7649da9f211ed018cfd29ed5 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -396,8 +396,14 @@ public class ServerGamePacketListenerImpl
+         this.player.xo = this.player.getX();
+         this.player.yo = this.player.getY();
+         this.player.zo = this.player.getZ();
+-        this.player.doTick();
+-        this.player.absSnapTo(this.firstGoodX, this.firstGoodY, this.firstGoodZ, this.player.getYRot(), this.player.getXRot());
++        final ServerPlayer tickingPlayer = this.player;
++        final int waypointBatch = tickingPlayer.beginWaypointPositionBatch();
++        try {
++            this.player.doTick();
++            this.player.absSnapTo(this.firstGoodX, this.firstGoodY, this.firstGoodZ, this.player.getYRot(), this.player.getXRot());
++        } finally {
++            tickingPlayer.endWaypointPositionBatch(waypointBatch);
++        }
+         this.tickCount++;
+         this.knownMovePacketCount = this.receivedMovePacketCount;
+         if (this.clientIsFloating && !this.player.isSleeping() && !this.player.isPassenger() && !this.player.isDeadOrDying()) {
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index 7834f2b57676c9dffc7487479024aca3e3ccab7d..84fc880783d55c14263eaac4abe5108b1c25b152 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -237,30 +237,46 @@ public class TickRegions {
+                 ex
+             );
+         }
+-        final OwnerDomainExecutor.Scope ownerScope = OwnerDomainExecutor.enterRegion(
+-            world,
+-            minChunkX,
+-            minChunkZ,
+-            maxChunkX,
+-            maxChunkZ,
+-            "region-context"
++        return enterClaimedRegionContext(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, previous, leaseId);
++    }
++
++    /** Tries a full-world lease for an ordinary global callback without hiding its caller's owner scope. */
++    public static @Nullable RegionContext tryPushLevelContext(final ServerLevel world) {
++        OwnerDomainExecutor.assertGlobalOwner(world.getServer(), "try-level-context");
++        if (OwnerDomainExecutor.currentDomain() != OwnerDomainExecutor.Domain.GLOBAL_CONTROL || CURRENT_CONTEXT.get() != null) {
++            throw new IllegalStateException("Full-world entry requires the global owner without a retained region context");
++        }
++        final long leaseId = REGION_RUNTIME.tryClaimLease(
++            world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, Thread.currentThread()
+         );
+-        final RegionContext next = new RegionContext(
+-            world,
+-            minChunkX,
+-            minChunkZ,
+-            maxChunkX,
+-            maxChunkZ,
+-            previous,
+-            previous,
+-            leaseId,
+-            currentThread.threadId(),
+-            ownerScope,
+-            null,
+-            false
++        if (leaseId == RegionRuntime.NO_LEASE) {
++            return null;
++        }
++        return enterClaimedRegionContext(
++            world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, null, leaseId
+         );
+-        CURRENT_CONTEXT.set(next);
+-        return next;
++    }
++
++    private static RegionContext enterClaimedRegionContext(
++        final ServerLevel world, final int minChunkX, final int minChunkZ, final int maxChunkX, final int maxChunkZ,
++        final @Nullable RegionContext previous, final long leaseId
++    ) {
++        OwnerDomainExecutor.Scope ownerScope = null;
++        try {
++            ownerScope = OwnerDomainExecutor.enterRegion(world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, "region-context");
++            final RegionContext next = new RegionContext(
++                world, minChunkX, minChunkZ, maxChunkX, maxChunkZ, previous, previous,
++                leaseId, Thread.currentThread().threadId(), ownerScope, null, false
++            );
++            CURRENT_CONTEXT.set(next);
++            return next;
++        } catch (final Throwable failure) {
++            if (ownerScope != null) {
++                ownerScope.close();
++            }
++            REGION_RUNTIME.releaseLease(world, leaseId);
++            throw failure;
++        }
+     }
+ 
+     /**

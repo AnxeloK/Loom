@@ -1,0 +1,325 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 3 Nov 2026 01:13:22 +0200
+Subject: [PATCH] Check connection tick waypoint ownership and cleanup
+
+
+diff --git a/src/test/java/net/minecraft/network/ConnectionWaypointTickTest.java b/src/test/java/net/minecraft/network/ConnectionWaypointTickTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..5519a5cda9c57f73d6aed7875ac3e13b11601748
+--- /dev/null
++++ b/src/test/java/net/minecraft/network/ConnectionWaypointTickTest.java
+@@ -0,0 +1,313 @@
++package net.minecraft.network;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import ca.spottedleaf.moonrise.patches.chunk_system.player.RegionizedPlayerChunkLoader;
++import io.netty.channel.Channel;
++import io.netty.channel.EventLoop;
++import java.lang.reflect.Field;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.util.UUID;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.core.BlockPos;
++import net.minecraft.network.protocol.PacketFlow;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.network.ServerGamePacketListenerImpl;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.server.waypoints.ServerWaypointManager;
++import net.minecraft.world.entity.EntityTypes;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.level.entity.EntityInLevelCallback;
++import net.minecraft.world.phys.Vec3;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class ConnectionWaypointTickTest {
++    @BeforeAll
++    static void prepareTypes() {
++        mock(MinecraftServer.class);
++        mock(ServerLevel.class);
++        mock(ServerPlayer.class);
++        mock(ServerGamePacketListenerImpl.class);
++        mock(ServerWaypointManager.class);
++        mock(RegionizedPlayerChunkLoader.class);
++    }
++
++    @Test
++    void playerTickOwnsItsWholeWorldAndRetainsTheGlobalCaller() throws Exception {
++        final Fixture f = new Fixture();
++        doAnswer(call -> {
++            assertTrue(fullOwner(f.level));
++            assertEquals(OwnerDomainExecutor.Domain.PLAYER, OwnerDomainExecutor.currentDomain());
++            assertTrue(OwnerDomainExecutor.isGlobalOwner(f.server));
++            return null;
++        }).when(f.listener).tick();
++        f.global(f.connection::tick);
++    }
++
++    @Test
++    void simulationAndPositionRestoreReconcileWaypointsOnce() throws Exception {
++        final Fixture f = new Fixture();
++        f.simulate(f::positions);
++        f.global(f.connection::tick);
++        verify(f.manager).updateWaypoint(f.player);
++        verify(f.manager).updatePlayer(f.player);
++        verify(f.callback, times(4)).onMove();
++        assertEquals(Vec3.ZERO, f.player.position());
++        assertFalse(f.player.deferWaypointPositionUpdate(f.level));
++    }
++
++    @Test
++    void aRetainedBoundedOwnerKeepsImmediateUpdates() throws Exception {
++        final Fixture f = new Fixture();
++        f.simulate(f::positions);
++        f.global(() -> {
++            final var context = TickRegions.pushRegionContext(f.level, -12, -12, 12, 12);
++            try {
++                f.connection.tick();
++                assertSame(context, TickRegions.currentContext());
++                assertFalse(fullOwner(f.level));
++            } finally { TickRegions.popContext(context); }
++        });
++        verify(f.manager, times(4)).updateWaypoint(f.player);
++        verify(f.manager, times(4)).updatePlayer(f.player);
++        verify(f.callback, times(4)).onMove();
++    }
++
++    @Test
++    void aBusyDistantRegionKeepsTheExistingBoundedPath() throws Exception {
++        final Fixture f = new Fixture();
++        f.simulate(() -> { assertFalse(fullOwner(f.level)); f.positions(); });
++        final CountDownLatch held = new CountDownLatch(1), release = new CountDownLatch(1);
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread competitor = new TickThread(() -> {
++            try {
++                final var context = TickRegions.pushRegionContext(f.level, 1000, 1000, 1000, 1000);
++                try { held.countDown(); assertTrue(release.await(10, TimeUnit.SECONDS)); }
++                finally { TickRegions.popContext(context); }
++            } catch (Throwable error) { failure.set(error); held.countDown(); }
++        }, "connection-tick-competing-owner");
++        competitor.setDaemon(true);
++        competitor.start();
++        try {
++            assertTrue(held.await(10, TimeUnit.SECONDS));
++            assertNull(failure.get());
++            f.global(f.connection::tick);
++        } finally { release.countDown(); competitor.join(10_000L); }
++        assertFalse(competitor.isAlive());
++        assertNull(failure.get());
++        verify(f.manager, times(4)).updateWaypoint(f.player);
++        verify(f.manager, times(4)).updatePlayer(f.player);
++        verify(f.callback, times(4)).onMove();
++    }
++
++    @Test
++    void anExceptionClosesBothTheBatchAndTheWorldLease() throws Exception {
++        final Fixture f = new Fixture();
++        f.simulate(() -> { f.player.setPosRaw(2, 0, 0); throw new IllegalArgumentException("physics failure"); });
++        f.global(() -> assertThrows(IllegalArgumentException.class, f.connection::tick));
++        assertFalse(f.player.deferWaypointPositionUpdate(f.level));
++        f.player.setPosRaw(3, 0, 0);
++        verify(f.manager, times(2)).updateWaypoint(f.player);
++        verify(f.manager, times(2)).updatePlayer(f.player);
++    }
++
++    @Test
++    void aStationaryTickDoesNotAddWaypointUpdates() throws Exception {
++        final Fixture f = new Fixture();
++        f.simulate(() -> { });
++        f.global(f.connection::tick);
++        verifyNoInteractions(f.manager, f.callback);
++    }
++
++    @Test
++    void nonPlayerListenersKeepTheirGlobalContext() throws Exception {
++        final Fixture f = new Fixture();
++        final TickablePacketListener other = mock(TickablePacketListener.class);
++        doAnswer(call -> {
++            assertNull(TickRegions.currentContext());
++            assertEquals(OwnerDomainExecutor.Domain.GLOBAL_CONTROL, OwnerDomainExecutor.currentDomain());
++            return null;
++        }).when(other).tick();
++        set(f.connection, "packetListener", other);
++        f.global(f.connection::tick);
++        verify(other).tick();
++    }
++
++    @Test
++    void theNextTickResolvesThePlayersCurrentWorld() throws Exception {
++        final Fixture f = new Fixture();
++        final ServerLevel destination = f.level();
++        final AtomicReference<ServerLevel> level = new AtomicReference<>(f.level);
++        doAnswer(call -> {
++            assertTrue(fullOwner(level.get()));
++            assertTrue(OwnerDomainExecutor.isGlobalOwner(f.server));
++            return null;
++        }).when(f.listener).tick();
++        f.global(() -> {
++            f.connection.tick();
++            level.set(destination);
++            try { set(f.player, "level", destination); }
++            catch (Exception error) { throw new AssertionError(error); }
++            f.connection.tick();
++        });
++    }
++
++    @Test
++    void aReplacedPlayerClosesTheOriginalBatch() throws Exception {
++        final Fixture f = new Fixture();
++        final ServerPlayer replacement = mock(ServerPlayer.class);
++        doReturn(f.player).when(replacement).getRootVehicle();
++        f.simulate(() -> {
++            f.player.setPosRaw(2, 0, 0);
++            doReturn(true).when(f.player).isRemoved();
++            f.listener.player = replacement;
++        });
++        f.global(f.connection::tick);
++        assertFalse(f.player.deferWaypointPositionUpdate(f.level));
++        assertFalse(replacement.deferWaypointPositionUpdate(f.level));
++    }
++
++    @Test
++    void fullWorldEntryRequiresTheMatchingGlobalOwner() throws Exception {
++        final Fixture f = new Fixture();
++        final MinecraftServer foreign = mock(MinecraftServer.class);
++        run(() -> {
++            assertThrows(IllegalStateException.class, () -> TickRegions.tryPushLevelContext(f.level));
++            try (var ignored = OwnerDomainExecutor.enterGlobal(foreign, "foreign-level-entry")) {
++                assertThrows(IllegalStateException.class, () -> TickRegions.tryPushLevelContext(f.level));
++                assertNull(TickRegions.currentContext());
++            }
++        });
++    }
++
++    @Test
++    void fullWorldEntryCannotUpgradeARetainedRegion() throws Exception {
++        final Fixture f = new Fixture();
++        f.global(() -> {
++            final var context = TickRegions.pushRegionContext(f.level, 0, 0, 0, 0);
++            try {
++                assertThrows(IllegalStateException.class, () -> TickRegions.tryPushLevelContext(f.level));
++                assertSame(context, TickRegions.currentContext());
++                assertEquals(1, TickRegions.getActiveOwnershipLeases(f.level));
++            } finally { TickRegions.popContext(context); }
++        });
++    }
++
++    private static boolean fullOwner(final ServerLevel level) {
++        return TickRegions.isCurrentThreadOwnerQuiet(level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE);
++    }
++
++    private static final class Fixture {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel level = level();
++        final ServerWaypointManager manager = mock(ServerWaypointManager.class);
++        final ServerPlayer player = mock(ServerPlayer.class, CALLS_REAL_METHODS);
++        final EntityInLevelCallback callback = mock(EntityInLevelCallback.class);
++        final ServerGamePacketListenerImpl listener = mock(ServerGamePacketListenerImpl.class);
++        final Connection connection = new Connection(PacketFlow.SERVERBOUND);
++
++        Fixture() throws Exception {
++            when(level.getWaypointManager()).thenReturn(manager);
++            set(player, "level", level);
++            set(player, "position", Vec3.ZERO);
++            set(player, "blockPosition", BlockPos.ZERO);
++            set(player, "chunkPosition", new ChunkPos(0, 0));
++            set(player, "posLock", new Object());
++            set(player, "levelCallback", callback);
++            doReturn(UUID.randomUUID()).when(player).getUUID();
++            doReturn(EntityTypes.PLAYER).when(player).getType();
++            doReturn(true).when(player).isTransmittingWaypoint();
++            doReturn(true).when(player).isReceivingWaypoints();
++            doReturn(player).when(player).getRootVehicle();
++            doReturn(0.0f).when(player).getYRot();
++            doReturn(0.0f).when(player).getXRot();
++            listener.player = player;
++            player.connection = listener;
++            set(connection, "packetListener", listener);
++            final Channel channel = mock(Channel.class);
++            when(channel.isOpen()).thenReturn(true);
++            when(channel.eventLoop()).thenReturn(mock(EventLoop.class));
++            connection.channel = channel;
++        }
++
++        ServerLevel level() {
++            final ServerLevel result = mock(ServerLevel.class);
++            when(result.getServer()).thenReturn(server);
++            when(result.dimension()).thenReturn(Level.OVERWORLD);
++            when(result.moonrise$getPlayerChunkLoader()).thenReturn(mock(RegionizedPlayerChunkLoader.class));
++            return result;
++        }
++
++        void positions() {
++            player.setPosRaw(1, 0, 0);
++            player.setPosRaw(0, 0, 0);
++            player.setPosRaw(2, 0, 0);
++        }
++
++        void simulate(final Runnable physics) throws Exception {
++            doAnswer(call -> { physics.run(); return null; }).when(player).doTick();
++            doAnswer(call -> { player.setPosRaw(call.getArgument(0), call.getArgument(1), call.getArgument(2)); return null; })
++                .when(player).absSnapTo(anyDouble(), anyDouble(), anyDouble(), anyFloat(), anyFloat());
++            final Method tick = ServerGamePacketListenerImpl.class.getDeclaredMethod("tickPlayer");
++            tick.setAccessible(true);
++            doAnswer(call -> {
++                try { return tick.invoke(listener); }
++                catch (InvocationTargetException error) { throw error.getCause(); }
++            }).when(listener).tick();
++        }
++
++        void global(final Runnable action) throws Exception {
++            final Field singleton = MinecraftServer.class.getDeclaredField("SERVER");
++            singleton.setAccessible(true);
++            final Object previous = singleton.get(null);
++            when(server.isSameThread()).thenReturn(true);
++            singleton.set(null, server);
++            try {
++                run(() -> {
++                    try (var ignored = OwnerDomainExecutor.enterGlobal(server, "connection-tick-test")) {
++                        action.run();
++                        assertNull(TickRegions.currentContext());
++                        assertEquals(OwnerDomainExecutor.Domain.GLOBAL_CONTROL, OwnerDomainExecutor.currentDomain());
++                    }
++                });
++            } finally { singleton.set(null, previous); }
++        }
++
++    }
++
++    private static void set(final Object target, final String name, final Object value) throws Exception {
++        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
++            try {
++                final Field field = type.getDeclaredField(name);
++                field.setAccessible(true);
++                field.set(target, value);
++                return;
++            } catch (NoSuchFieldException ignored) { }
++        }
++        throw new NoSuchFieldException(name);
++    }
++
++    private static void run(final Runnable action) throws Exception {
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread thread = new TickThread(() -> {
++            try { action.run(); }
++            catch (Throwable error) { failure.set(error); }
++        }, "connection-waypoint-owner-test");
++        thread.setDaemon(true);
++        thread.start();
++        thread.join(10_000L);
++        assertFalse(thread.isAlive(), "connection tick owner did not finish");
++        if (failure.get() != null) throw new AssertionError(failure.get());
++    }
++}
