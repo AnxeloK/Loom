@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 2 Nov 2026 17:51:42 +0200
+Subject: [PATCH] Check world preparation under continuous packet traffic
+
+
+diff --git a/src/test/java/net/minecraft/server/WorldPreparationPollingTest.java b/src/test/java/net/minecraft/server/WorldPreparationPollingTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..041a56f8f155f3971c2753f37b561a3dfcbefaad
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/WorldPreparationPollingTest.java
+@@ -0,0 +1,113 @@
++package net.minecraft.server;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import java.lang.reflect.Field;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.server.level.ChunkHolder;
++import net.minecraft.server.level.ChunkMap;
++import net.minecraft.server.level.ServerChunkCache;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.progress.LevelLoadListener;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.level.chunk.status.ChunkStatus;
++import net.minecraft.world.level.storage.SavedDataStorage;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class WorldPreparationPollingTest {
++    @Test
++    void preparedWorldReturnsWhilePacketsKeepArriving() throws Exception {
++        prepare(false, true);
++    }
++
++    @Test
++    void pendingChunksAreRecheckedWhilePacketsKeepArriving() throws Exception {
++        prepare(true, true);
++    }
++
++    @Test
++    void emptyQueuesStillRunWorldReadinessAndCompletionHooks() throws Exception {
++        prepare(false, false);
++    }
++
++    private static void prepare(final boolean pendingChunk, final boolean incomingPackets) throws Exception {
++        final MinecraftServer server = mock(MinecraftServer.class, CALLS_REAL_METHODS);
++        final ServerLevel level = mock(ServerLevel.class);
++        final ServerChunkCache chunks = mock(ServerChunkCache.class);
++        final AtomicInteger scans = new AtomicInteger();
++        final AtomicReference<ChunkHolder> pending = new AtomicReference<>();
++        // Use the real load counter with chunk status supplied by the store.
++        final ChunkMap map = mock(ChunkMap.class, call -> {
++            if (call.getMethod().getName().equals("allChunksWithAtLeastStatus")) {
++                return scans.incrementAndGet() > 1 && pending.get() != null
++                    ? java.util.stream.Stream.of(pending.get()) : java.util.stream.Stream.empty();
++            }
++            return RETURNS_DEFAULTS.answer(call);
++        });
++        final SavedDataStorage storage = mock(SavedDataStorage.class);
++        final LevelLoadListener progress = mock(LevelLoadListener.class);
++        set(chunks, "chunkMap", map);
++        set(level, "levelLoadListener", progress);
++        when(level.getServer()).thenReturn(server);
++        when(level.dimension()).thenReturn(Level.OVERWORLD);
++        when(level.getChunkSource()).thenReturn(chunks);
++        when(level.getDataStorage()).thenReturn(storage);
++        doNothing().when(server).updateEffectiveRespawnData();
++        final AtomicInteger polls = new AtomicInteger();
++        if (pendingChunk) {
++            final ChunkHolder holder = mock(ChunkHolder.class);
++            when(holder.getPos()).thenReturn(new ChunkPos(0, 0));
++            when(holder.getLatestStatus()).thenAnswer(call -> polls.get() >= 2 ? ChunkStatus.FULL : ChunkStatus.EMPTY);
++            pending.set(holder);
++        }
++        doAnswer(call -> {
++            assertTrue(TickRegions.isCurrentThreadOwnerQuiet(level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE));
++            if (polls.incrementAndGet() > 64) {
++                throw new AssertionError("World preparation drained an endless packet queue instead of rechecking ready chunks");
++            }
++            return incomingPackets;
++        }).when(server).pollTask();
++        final org.bukkit.plugin.PluginManager events = mock(org.bukkit.plugin.PluginManager.class);
++        doAnswer(call -> {
++            assertTrue(OwnerDomainExecutor.isGlobalOwner(server));
++            assertEquals(server.getRunningThread(), Thread.currentThread());
++            return null;
++        }).when(events).callEvent(any(org.bukkit.event.Event.class));
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread thread = new TickThread(() -> {
++            try (var bukkit = mockStatic(org.bukkit.Bukkit.class, CALLS_REAL_METHODS);
++                 var owner = OwnerDomainExecutor.enterGlobal(server, "world-preparation-test")) {
++                bukkit.when(org.bukkit.Bukkit::getPluginManager).thenReturn(events);
++                server.prepareLevel(level);
++                assertNull(TickRegions.currentContext());
++                assertEquals(OwnerDomainExecutor.Domain.GLOBAL_CONTROL, OwnerDomainExecutor.currentDomain());
++            } catch (Throwable error) {
++                failure.set(error);
++            }
++        }, "world-preparation-test");
++        when(server.getRunningThread()).thenReturn(thread);
++        thread.setDaemon(true);
++        thread.start();
++        thread.join(10_000L);
++        assertFalse(thread.isAlive(), "World preparation did not return");
++        assertNull(failure.get(), () -> String.valueOf(failure.get()));
++        assertTrue(polls.get() >= (pendingChunk ? 2 : 1));
++        assertTrue(polls.get() <= 64);
++        verify(progress).finish(LevelLoadListener.Stage.LOAD_INITIAL_CHUNKS);
++        verify(server).updateEffectiveRespawnData();
++        verify(events).callEvent(any(org.bukkit.event.world.WorldLoadEvent.class));
++    }
++
++    private static void set(final Object target, final String name, final Object value) throws Exception {
++        final Field field = target.getClass().getField(name);
++        field.setAccessible(true);
++        field.set(target, value);
++    }
++}

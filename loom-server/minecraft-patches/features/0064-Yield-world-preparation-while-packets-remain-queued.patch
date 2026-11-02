@@ -1,0 +1,20 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 2 Nov 2026 17:51:42 +0200
+Subject: [PATCH] Yield world preparation while packets remain queued
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 713c2c686876394bb86a2d6123ca19f96617a0e4..f96fbd00c1b67810f6fc41975503807b73484980 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1827,7 +1827,8 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     }
+ 
+     private void executeModerately() {
+-        this.runAllTasks();
++        // Return to the chunk readiness check even while new packets keep arriving.
++        this.pollTask();
+         java.util.concurrent.locks.LockSupport.parkNanos("executing tasks", 1000L);
+         // CraftBukkit end
+     }
