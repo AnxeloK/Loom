@@ -5,15 +5,24 @@ Subject: [PATCH] Test nonrecursive full chunk status draining
 
 
 diff --git a/src/test/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManagerOwnerRoutingTest.java b/src/test/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManagerOwnerRoutingTest.java
-index 1a8fc14f84842d8475b7ae24a76c22af83d672f2..a929950c3e5a5fbf54369e4c891254e3218ed35d 100644
+index 1a8fc14f84842d8475b7ae24a76c22af83d672f2..848abc726fc7f1c522b464456abe0a87fb7d0ba4 100644
 --- a/src/test/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManagerOwnerRoutingTest.java
 +++ b/src/test/java/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManagerOwnerRoutingTest.java
-@@ -13,6 +13,85 @@ import org.mockito.Mockito;
+@@ -13,6 +13,96 @@ import org.mockito.Mockito;
  @Normal
  class ChunkHolderManagerOwnerRoutingTest {
  
 +    @Test
 +    void globalPlayerCallbackCompletesChunkStatusesUnderFullWorldLease() throws Exception {
++        completesGlobalChunkLoad(true);
++    }
++
++    @Test
++    void nativeGlobalCallbackCompletesWithoutACompatibilityPluginContext() throws Exception {
++        completesGlobalChunkLoad(false);
++    }
++
++    private void completesGlobalChunkLoad(final boolean compatibilityPlugin) throws Exception {
 +        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
 +        final ServerLevel level = Mockito.mock(ServerLevel.class);
 +        Mockito.when(level.getServer()).thenReturn(server);
@@ -51,7 +60,9 @@ index 1a8fc14f84842d8475b7ae24a76c22af83d672f2..a929950c3e5a5fbf54369e4c891254e3
 +        final Thread thread = new TickThread(() -> {
 +            try (var global = OwnerDomainExecutor.enterGlobal(server, "global-player-chunk-test")) {
 +                final var context = net.minecraft.server.threading.TickRegions.pushRegionContext(level, 0, 0, 0, 0);
-+                try (var compatibility = io.papermc.paper.plugin.manager.compat.CompatibilityRuntimeContext.enter(plugin, 1L, false)) {
++                try (var compatibility = compatibilityPlugin
++                    ? io.papermc.paper.plugin.manager.compat.CompatibilityRuntimeContext.enter(plugin, 1L, false) : null) {
++                    Assertions.assertEquals(compatibilityPlugin, io.papermc.paper.plugin.manager.compat.CompatibilityChunkBridge.isEnabledForCurrentContext());
 +                    OwnerDomainExecutor.runPlayerNow(player, "nested-player-test", () -> {
 +                        manager.addChangedStatuses(java.util.List.of(holder));
 +                        Assertions.assertFalse(ChunkHolderManager.canProcessPendingFullStatusUpdates(level));
@@ -94,7 +105,7 @@ index 1a8fc14f84842d8475b7ae24a76c22af83d672f2..a929950c3e5a5fbf54369e4c891254e3
      @Test
      void boundedRegionCannotDrainWorldFullStatusQueue() throws InterruptedException {
          final MinecraftServer server = Mockito.mock(MinecraftServer.class);
-@@ -85,6 +164,60 @@ class ChunkHolderManagerOwnerRoutingTest {
+@@ -85,6 +175,60 @@ class ChunkHolderManagerOwnerRoutingTest {
          });
      }
  
@@ -155,7 +166,7 @@ index 1a8fc14f84842d8475b7ae24a76c22af83d672f2..a929950c3e5a5fbf54369e4c891254e3
      private static void runOnTickThread(final Runnable action) throws InterruptedException {
          final AtomicReference<Throwable> failure = new AtomicReference<>();
          final Thread thread = new TickThread(() -> {
-@@ -101,4 +234,4 @@ class ChunkHolderManagerOwnerRoutingTest {
+@@ -101,4 +245,4 @@ class ChunkHolderManagerOwnerRoutingTest {
              Assertions.fail(failure.get());
          }
      }

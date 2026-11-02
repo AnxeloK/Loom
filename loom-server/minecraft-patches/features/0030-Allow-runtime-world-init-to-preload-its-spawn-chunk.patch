@@ -16,7 +16,7 @@ init call by a depth counter so no other runtime path gains a
 blocking chunk wait.
 
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 97a8f0c399975ee55aa6098e60d4ec4b0b4b36e3..dcc08c3201bf17d9dfffde47e181b6d53d30fe1f 100644
+index 049fec577b6632b06e19156f5d9a1a12aeab7364..4c02320eca4d17565b1fa33b07b18446c3075c1a 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -792,6 +792,8 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
@@ -39,7 +39,7 @@ index 97a8f0c399975ee55aa6098e60d4ec4b0b4b36e3..dcc08c3201bf17d9dfffde47e181b6d5
  
          GlobalPos focusPos = this.selectLevelLoadFocusPos();
 diff --git a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
-index 1b39a05db2daed6a2267725f559b88e5c8b131a0..85145bdc2422898bd824329e87209b482ca584d6 100644
+index 1b39a05db2daed6a2267725f559b88e5c8b131a0..25440774d85f6f5dd93eefb1f747124fa6b51ee3 100644
 --- a/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
 +++ b/net/minecraft/server/threading/runtime/ThreadedRegionsBlockingBarrier.java
 @@ -37,7 +37,30 @@ public final class ThreadedRegionsBlockingBarrier {
@@ -74,18 +74,17 @@ index 1b39a05db2daed6a2267725f559b88e5c8b131a0..85145bdc2422898bd824329e87209b48
      }
  
      public static boolean isShutdownThread(final MinecraftServer server) {
-@@ -55,7 +78,13 @@ public final class ThreadedRegionsBlockingBarrier {
+@@ -55,7 +78,12 @@ public final class ThreadedRegionsBlockingBarrier {
          if (future.isDone()) {
              return;
          }
 -        if (isStartupChunkLoadBarrier(level)) {
-+        // A global callback may temporarily carry a bounded player/region owner. Chunk completion
-+        // still needs to drain world-wide status changes, under a real full-world lease.
++        // Global callbacks include native entity tasks as well as compatibility listeners. A nested
++        // player owner still needs a real full world lease to drain the chunk status transitions.
 +        final MinecraftServer server = level.getServer();
-+        final boolean globalCompatibilityLoad = CompatibilityChunkBridge.isEnabledForCurrentContext()
-+            && Thread.currentThread() == server.getRunningThread()
++        final boolean globalChunkLoad = Thread.currentThread() == server.getRunningThread()
 +            && OwnerDomainExecutor.isGlobalOwner(server);
-+        if (isStartupChunkLoadBarrier(level) || isWorldInitBarrier(level) || globalCompatibilityLoad) {
++        if (isStartupChunkLoadBarrier(level) || isWorldInitBarrier(level) || globalChunkLoad) {
              final TickRegions.RegionContext context = TickRegions.pushLevelContext(level);
              try {
                  owner.managedBlock(future::isDone);
