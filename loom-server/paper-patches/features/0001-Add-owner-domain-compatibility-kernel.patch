@@ -2438,7 +2438,7 @@ index 0000000000000000000000000000000000000000..50dd4e1c08d432d6a244fbfe5e29b297
 +    }
 +}
 diff --git a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransaction.java b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransaction.java
-index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..203912d98f76937fc7f5f26688a1ade7c4d274ad 100644
+index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..4309bf6b9c767e1f187b9a62e4192ec086b90a48 100644
 --- a/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransaction.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransaction.java
 @@ -6,12 +6,16 @@ import java.lang.reflect.Modifier;
@@ -2458,7 +2458,7 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..203912d98f76937fc7f5f26688a1ade7
  
  public final class CompatibilityTransaction {
  
-@@ -46,9 +50,19 @@ public final class CompatibilityTransaction {
+@@ -46,9 +50,38 @@ public final class CompatibilityTransaction {
      ) {
      }
  
@@ -2472,13 +2472,32 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..203912d98f76937fc7f5f26688a1ade7
 +
      private static final AtomicLong NEXT_ID = new AtomicLong(1L);
 +    private static final ListenerSnapshot NON_MONITOR_SNAPSHOT = new ListenerSnapshot(0, false);
++    // Keep class metadata with its defining class, without retaining plugin class loaders.
++    private static final ClassValue<Field[]> DIGEST_FIELDS = new ClassValue<>() {
++        @Override
++        protected Field[] computeValue(final Class<?> type) {
++            final List<Field> result = new ArrayList<>();
++            for (Class<?> current = type; current != null && Event.class.isAssignableFrom(current); current = current.getSuperclass()) {
++                final Field[] fields = current.getDeclaredFields();
++                Arrays.sort(fields, Comparator.comparing(Field::getName));
++                for (final Field field : fields) {
++                    if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic()) {
++                        continue;
++                    }
++                    field.setAccessible(true);
++                    result.add(field);
++                }
++            }
++            return result.toArray(Field[]::new);
++        }
++    };
  
      private final long id;
 +    private final long parentTransactionId;
      private final long startedNanos;
      private final Event event;
      private final EventSemanticIndex.EventSemantics semantics;
-@@ -57,12 +71,16 @@ public final class CompatibilityTransaction {
+@@ -57,12 +90,16 @@ public final class CompatibilityTransaction {
  
      private volatile State state = State.OPEN;
      private volatile long finishedNanos;
@@ -2497,7 +2516,7 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..203912d98f76937fc7f5f26688a1ade7
          this.startedNanos = System.nanoTime();
          this.event = Objects.requireNonNull(event, "event");
          this.semantics = Objects.requireNonNull(semantics, "semantics");
-@@ -78,6 +96,10 @@ public final class CompatibilityTransaction {
+@@ -78,6 +115,10 @@ public final class CompatibilityTransaction {
          return this.event;
      }
  
@@ -2508,7 +2527,7 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..203912d98f76937fc7f5f26688a1ade7
      public EventSemanticIndex.EventSemantics semantics() {
          return this.semantics;
      }
-@@ -94,12 +116,19 @@ public final class CompatibilityTransaction {
+@@ -94,12 +135,19 @@ public final class CompatibilityTransaction {
          return this.state;
      }
  
@@ -2529,7 +2548,7 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..203912d98f76937fc7f5f26688a1ade7
          return new ListenerSnapshot(eventDigest(this.event), this.cancellable && ((Cancellable)this.event).isCancelled());
      }
  
-@@ -109,8 +138,14 @@ public final class CompatibilityTransaction {
+@@ -109,8 +157,14 @@ public final class CompatibilityTransaction {
          final ListenerSnapshot before,
          final long durationNanos
      ) {
@@ -2544,7 +2563,7 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..203912d98f76937fc7f5f26688a1ade7
          this.listenerPasses.add(new ListenerPass(
              listener.getPlugin().getPluginMeta().getName(),
              lane,
-@@ -119,7 +154,10 @@ public final class CompatibilityTransaction {
+@@ -119,7 +173,10 @@ public final class CompatibilityTransaction {
              cancelledAfter
          ));
  
@@ -2556,7 +2575,7 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..203912d98f76937fc7f5f26688a1ade7
              this.monitorMutations.add(new MonitorMutation(
                  listener.getPlugin().getPluginMeta().getName(),
                  this.event.getEventName(),
-@@ -136,19 +174,77 @@ public final class CompatibilityTransaction {
+@@ -136,37 +193,87 @@ public final class CompatibilityTransaction {
              return;
          }
          if (this.cancellable && ((Cancellable)this.event).isCancelled()) {
@@ -2572,7 +2591,7 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..203912d98f76937fc7f5f26688a1ade7
 +    public void commit() {
 +        if (this.state != State.OPEN) {
 +            return;
-         }
++        }
 +        this.state = State.COMMITTED;
 +        this.finishedNanos = System.nanoTime();
 +    }
@@ -2580,7 +2599,7 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..203912d98f76937fc7f5f26688a1ade7
 +    public void abort(final String reason) {
 +        if (this.state != State.OPEN) {
 +            return;
-+        }
+         }
 +        this.state = State.ABORTED;
 +        this.abortReason = reason;
          this.finishedNanos = System.nanoTime();
@@ -2639,7 +2658,31 @@ index e9bac55e3d6f67b1af00bb59b698b2b4d6b4e069..203912d98f76937fc7f5f26688a1ade7
      }
  
      private static int eventDigest(final Event event) {
-@@ -212,4 +308,4 @@ public final class CompatibilityTransaction {
+         int hash = 1;
+-        for (Class<?> current = event.getClass(); current != null && Event.class.isAssignableFrom(current); current = current.getSuperclass()) {
+-            final Field[] fields = current.getDeclaredFields();
+-            Arrays.sort(fields, Comparator.comparing(Field::getName));
+-            for (final Field field : fields) {
+-                if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic()) {
+-                    continue;
+-                }
+-                field.setAccessible(true);
+-                hash = 31 * hash + field.getName().hashCode();
+-                try {
+-                    hash = 31 * hash + deepHash(field.get(event));
+-                } catch (final IllegalAccessException ignored) {
+-                    hash = 31 * hash + 7;
+-                }
++        for (final Field field : DIGEST_FIELDS.get(event.getClass())) {
++            hash = 31 * hash + field.getName().hashCode();
++            try {
++                hash = 31 * hash + deepHash(field.get(event));
++            } catch (final IllegalAccessException ignored) {
++                hash = 31 * hash + 7;
+             }
+         }
+         return hash;
+@@ -212,4 +319,4 @@ public final class CompatibilityTransaction {
          }
          return hash;
      }
@@ -4439,7 +4482,7 @@ index 0000000000000000000000000000000000000000..b184d2638016c67c432362ae819ebab5
 +    }
 +}
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransactionTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransactionTest.java
-index a1e3974ac242e1ed63f27c98ba5bfd686e2b0c81..6da37be18083d7a9620f046b31ad3a71ddc95a3e 100644
+index a1e3974ac242e1ed63f27c98ba5bfd686e2b0c81..839cba40dd3e2068cb41496b012f59dccda129b1 100644
 --- a/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransactionTest.java
 +++ b/src/test/java/io/papermc/paper/plugin/manager/compat/CompatibilityTransactionTest.java
 @@ -41,7 +41,7 @@ class CompatibilityTransactionTest {
@@ -4451,7 +4494,7 @@ index a1e3974ac242e1ed63f27c98ba5bfd686e2b0c81..6da37be18083d7a9620f046b31ad3a71
          final long started = System.nanoTime();
          registered.callEvent(event);
          transaction.afterListener(registered, EventSemanticIndex.lane(registered.getPriority()), before, System.nanoTime() - started);
-@@ -54,6 +54,45 @@ class CompatibilityTransactionTest {
+@@ -54,6 +54,78 @@ class CompatibilityTransactionTest {
          Assertions.assertEquals("OldClaims", mutation.plugin());
      }
  
@@ -4494,10 +4537,43 @@ index a1e3974ac242e1ed63f27c98ba5bfd686e2b0c81..6da37be18083d7a9620f046b31ad3a71
 +        Assertions.assertTrue(transaction.listenerPasses().isEmpty());
 +    }
 +
++    @Test
++    void monitorSnapshotsReadInheritedAndArrayValuesOnEveryPass() {
++        final Plugin plugin = mockPlugin("Observer");
++        final RegisteredListener registered = new RegisteredListener(
++            Mockito.mock(Listener.class), (ignored, event) -> {}, EventPriority.MONITOR, plugin, false
++        );
++        final TestArrayEvent event = new TestArrayEvent();
++        final EventSemanticIndex.EventSemantics semantics = new EventSemanticIndex().resolve(event, new RegisteredListener[] {registered});
++        final CompatibilityTransaction transaction = new CompatibilityTransaction(event, semantics);
++
++        final CompatibilityTransaction.ListenerSnapshot initial = transaction.beforeListener(EventSemanticIndex.Lane.MONITOR);
++        transaction.afterListener(registered, EventSemanticIndex.Lane.MONITOR, initial, 1L);
++        Assertions.assertTrue(transaction.monitorMutations().isEmpty());
++
++        event.inherited = "changed";
++        transaction.afterListener(registered, EventSemanticIndex.Lane.MONITOR, initial, 1L);
++        Assertions.assertEquals(1, transaction.monitorMutations().size());
++
++        final CompatibilityTransaction.ListenerSnapshot inherited = transaction.beforeListener(EventSemanticIndex.Lane.MONITOR);
++        event.values[0] = 42;
++        transaction.afterListener(registered, EventSemanticIndex.Lane.MONITOR, inherited, 1L);
++        Assertions.assertEquals(2, transaction.monitorMutations().size());
++
++        final CompatibilityTransaction.ListenerSnapshot array = transaction.beforeListener(EventSemanticIndex.Lane.MONITOR);
++        ((byte[])event.nested[0])[0] = 9;
++        transaction.afterListener(registered, EventSemanticIndex.Lane.MONITOR, array, 1L);
++        Assertions.assertEquals(3, transaction.monitorMutations().size());
++
++        final TestArrayEvent other = new TestArrayEvent();
++        final CompatibilityTransaction otherTransaction = new CompatibilityTransaction(other, semantics);
++        Assertions.assertEquals(initial.digest(), otherTransaction.beforeListener(EventSemanticIndex.Lane.MONITOR).digest());
++    }
++
      private static Plugin mockPlugin(final String name) {
          final PluginMeta meta = Mockito.mock(PluginMeta.class);
          Mockito.when(meta.getName()).thenReturn(name);
-@@ -102,4 +141,24 @@ class CompatibilityTransactionTest {
+@@ -102,4 +174,39 @@ class CompatibilityTransactionTest {
              return HANDLERS;
          }
      }
@@ -4522,6 +4598,21 @@ index a1e3974ac242e1ed63f27c98ba5bfd686e2b0c81..6da37be18083d7a9620f046b31ad3a71
 +        public static HandlerList getHandlerList() {
 +            return HANDLERS;
 +        }
++    }
++
++    private static class TestParentEvent extends Event {
++        private static final HandlerList HANDLERS = new HandlerList();
++        String inherited = "initial";
++
++        @Override
++        public HandlerList getHandlers() {
++            return HANDLERS;
++        }
++    }
++
++    private static final class TestArrayEvent extends TestParentEvent {
++        private final int[] values = {1, 2};
++        private final Object[] nested = {new byte[] {3}, null};
 +    }
 +}
 diff --git a/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java b/src/test/java/io/papermc/paper/plugin/manager/compat/PluginCompatibilityProfileTest.java
