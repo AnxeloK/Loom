@@ -1,0 +1,281 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Mon, 2 Nov 2026 12:58:32 +0200
+Subject: [PATCH] Test packet batch ownership and ordering
+
+
+diff --git a/src/test/java/net/minecraft/network/PacketProcessorBatchTest.java b/src/test/java/net/minecraft/network/PacketProcessorBatchTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae05a7bba5baac56a49941209dcb5db5af56bd55
+--- /dev/null
++++ b/src/test/java/net/minecraft/network/PacketProcessorBatchTest.java
+@@ -0,0 +1,269 @@
++package net.minecraft.network;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.UUID;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.network.protocol.Packet;
++import net.minecraft.network.protocol.game.ServerboundClientTickEndPacket;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.network.ServerGamePacketListenerImpl;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class PacketProcessorBatchTest {
++    @BeforeAll
++    static void prepareMockTypes() {
++        // Class transformation belongs outside the bounded owner-thread checks.
++        mock(MinecraftServer.class);
++        mock(ServerLevel.class);
++        mock(ServerPlayer.class);
++        mock(ServerGamePacketListenerImpl.class);
++        mock(ServerboundClientTickEndPacket.class);
++    }
++
++    @Test
++    void consecutiveWorldPacketsShareTheirLeaseAndKeepOrder() throws Exception {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel level = level(server);
++        final ServerGamePacketListenerImpl first = listener(level);
++        final ServerGamePacketListenerImpl second = listener(level);
++        run(() -> {
++            final PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            final List<Integer> order = new ArrayList<>();
++            final List<TickRegions.RegionContext> contexts = new ArrayList<>();
++            enqueue(processor, first, () -> { order.add(1); contexts.add(context(level)); });
++            enqueue(processor, second, () -> { order.add(2); contexts.add(context(level)); });
++            enqueue(processor, first, () -> { order.add(3); contexts.add(context(level)); });
++            try (var global = OwnerDomainExecutor.enterGlobal(server, "packet-batch-test")) {
++                try (var batch = processor.beginBatch()) {
++                    assertTrue(batch.executeSinglePacket());
++                    assertTrue(batch.executeSinglePacket());
++                    assertTrue(batch.executeSinglePacket());
++                    assertFalse(batch.executeSinglePacket());
++                }
++                assertEquals(OwnerDomainExecutor.Domain.GLOBAL_CONTROL, OwnerDomainExecutor.currentDomain());
++                assertNull(TickRegions.currentContext());
++            }
++            assertEquals(List.of(1, 2, 3), order);
++            assertSame(contexts.get(0), contexts.get(1));
++            assertSame(contexts.get(0), contexts.get(2));
++        });
++    }
++
++    @Test
++    void changedPlayerWorldRetiresThePreviousLeaseBeforeTheNextPacket() throws Exception {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel source = level(server);
++        final ServerLevel destination = level(server);
++        final AtomicReference<ServerLevel> current = new AtomicReference<>(source);
++        final ServerGamePacketListenerImpl listener = listener(source);
++        when(listener.player.level()).thenAnswer(ignored -> current.get());
++        run(() -> {
++            final PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, listener, () -> { context(source); current.set(destination); });
++            enqueue(processor, listener, () -> {
++                context(destination);
++                assertFalse(TickRegions.isCurrentThreadOwnerQuiet(source, 0, 0));
++            });
++            try (var global = OwnerDomainExecutor.enterGlobal(server, "packet-retarget-test");
++                 var batch = processor.beginBatch()) {
++                assertTrue(batch.executeSinglePacket());
++                assertTrue(batch.executeSinglePacket());
++            }
++            assertNull(TickRegions.currentContext());
++        });
++    }
++
++    @Test
++    void loginPacketsRunWithoutAnUnrelatedWorldLease() throws Exception {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel level = level(server);
++        final ServerGamePacketListenerImpl player = listener(level);
++        final PacketListener login = mock(PacketListener.class);
++        @SuppressWarnings("unchecked") final Packet<PacketListener> packet = mock(Packet.class);
++        when(login.shouldHandleMessage(packet)).thenReturn(true);
++        doAnswer(ignored -> {
++            assertNull(TickRegions.currentContext());
++            assertEquals(OwnerDomainExecutor.Domain.GLOBAL_CONTROL, OwnerDomainExecutor.currentDomain());
++            return null;
++        }).when(packet).handle(login);
++        run(() -> {
++            final PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, player, () -> context(level));
++            processor.scheduleIfPossible(login, packet);
++            enqueue(processor, player, () -> context(level));
++            try (var global = OwnerDomainExecutor.enterGlobal(server, "packet-login-test");
++                 var batch = processor.beginBatch()) {
++                assertTrue(batch.executeSinglePacket());
++                assertTrue(batch.executeSinglePacket());
++                assertTrue(batch.executeSinglePacket());
++            }
++            verify(packet).handle(login);
++            assertNull(TickRegions.currentContext());
++        });
++    }
++
++    @Test
++    void boundedOwnerCannotBeginAnUnboundedPacketBatch() throws Exception {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel level = level(server);
++        run(() -> {
++            final PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            try (var owner = OwnerDomainExecutor.enterRegion(level, 0, 0, 0, 0, "bounded-packet-test")) {
++                assertThrows(IllegalStateException.class, processor::beginBatch);
++            }
++            assertThrows(IllegalStateException.class, processor::beginBatch);
++        });
++    }
++
++    @Test
++    void aForeignServerCannotAcquireAWorldThroughTheBatch() throws Exception {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel foreign = level(mock(MinecraftServer.class));
++        final ServerGamePacketListenerImpl listener = listener(foreign);
++        run(() -> {
++            final PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, listener, () -> fail("foreign packet ran"));
++            try (var global = OwnerDomainExecutor.enterGlobal(server, "foreign-packet-test");
++                 var batch = processor.beginBatch()) {
++                assertThrows(IllegalStateException.class, batch::executeSinglePacket);
++            }
++            assertNull(TickRegions.currentContext());
++        });
++    }
++
++    @Test
++    void closingTwiceDoesNotRetireTheRestoredOwnerAndClosedBatchesRejectWork() throws Exception {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel level = level(server);
++        final ServerGamePacketListenerImpl listener = listener(level);
++        run(() -> {
++            final PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, listener, () -> context(level));
++            try (var global = OwnerDomainExecutor.enterGlobal(server, "packet-close-test")) {
++                final PacketProcessor.PacketBatch batch = processor.beginBatch();
++                assertTrue(batch.executeSinglePacket());
++                batch.close();
++                batch.close();
++                assertNull(TickRegions.currentContext());
++                assertEquals(OwnerDomainExecutor.Domain.GLOBAL_CONTROL, OwnerDomainExecutor.currentDomain());
++                assertThrows(IllegalStateException.class, batch::executeSinglePacket);
++            }
++        });
++    }
++
++    private static TickRegions.RegionContext context(final ServerLevel level) {
++        assertEquals(OwnerDomainExecutor.Domain.PLAYER, OwnerDomainExecutor.currentDomain());
++        assertTrue(TickRegions.isCurrentThreadOwnerQuiet(level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE));
++        return TickRegions.currentContext();
++    }
++
++    @Test
++    void aHandlerFailureReleasesTheWorldAndRestoresTheGlobalOwner() throws Exception {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel level = level(server);
++        final ServerGamePacketListenerImpl listener = listener(level);
++        run(() -> {
++            final PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, listener, () -> { throw new AssertionError("handler failed"); });
++            try (var global = OwnerDomainExecutor.enterGlobal(server, "packet-failure-test")) {
++                assertThrows(AssertionError.class, () -> {
++                    try (var batch = processor.beginBatch()) {
++                        batch.executeSinglePacket();
++                    }
++                });
++                assertNull(TickRegions.currentContext());
++                assertEquals(OwnerDomainExecutor.Domain.GLOBAL_CONTROL, OwnerDomainExecutor.currentDomain());
++            }
++        });
++    }
++
++    @Test
++    void aForeignThreadCannotConsumePacketsOrCloseTheOwnersBatch() throws Exception {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel level = level(server);
++        final ServerGamePacketListenerImpl listener = listener(level);
++        run(() -> {
++            final PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, listener, () -> context(level));
++            try (var global = OwnerDomainExecutor.enterGlobal(server, "packet-thread-test");
++                 var batch = processor.beginBatch()) {
++                final AtomicReference<Throwable> failure = new AtomicReference<>();
++                final Thread foreign = new Thread(() -> {
++                    try {
++                        assertThrows(IllegalStateException.class, batch::executeSinglePacket);
++                        assertThrows(IllegalStateException.class, batch::close);
++                    } catch (Throwable error) {
++                        failure.set(error);
++                    }
++                }, "foreign-packet-thread");
++                foreign.setDaemon(true);
++                foreign.start();
++                try {
++                    foreign.join(1_000L);
++                } catch (InterruptedException interrupted) {
++                    throw new AssertionError(interrupted);
++                }
++                assertFalse(foreign.isAlive());
++                assertNull(failure.get());
++                assertTrue(processor.hasPendingPackets());
++                assertTrue(batch.executeSinglePacket());
++            }
++            assertNull(TickRegions.currentContext());
++        });
++    }
++
++    private static ServerLevel level(final MinecraftServer server) {
++        final ServerLevel level = mock(ServerLevel.class);
++        when(level.getServer()).thenReturn(server);
++        when(level.dimension()).thenReturn(Level.OVERWORLD);
++        return level;
++    }
++
++    private static ServerGamePacketListenerImpl listener(final ServerLevel level) {
++        final ServerPlayer player = mock(ServerPlayer.class);
++        when(player.level()).thenReturn(level);
++        when(player.chunkPosition()).thenReturn(new ChunkPos(0, 0));
++        when(player.getUUID()).thenReturn(UUID.randomUUID());
++        final ServerGamePacketListenerImpl listener = mock(ServerGamePacketListenerImpl.class);
++        listener.player = player;
++        return listener;
++    }
++
++    private static void enqueue(final PacketProcessor processor, final ServerGamePacketListenerImpl listener, final Runnable action) {
++        final ServerboundClientTickEndPacket packet = mock(ServerboundClientTickEndPacket.class);
++        when(listener.shouldHandleMessage(packet)).thenReturn(true);
++        doAnswer(ignored -> { action.run(); return null; }).when(packet).handle(listener);
++        processor.scheduleIfPossible(listener, packet);
++    }
++
++    private static void run(final Runnable action) throws Exception {
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread thread = new TickThread(() -> {
++            try {
++                action.run();
++            } catch (Throwable error) {
++                failure.set(error);
++            }
++        }, "packet-batch-owner-test");
++        thread.setDaemon(true);
++        thread.start();
++        thread.join(5_000L);
++        assertFalse(thread.isAlive(), "packet owner stranded");
++        if (failure.get() != null) {
++            throw new AssertionError(failure.get());
++        }
++    }
++}

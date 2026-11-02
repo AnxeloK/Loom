@@ -474,10 +474,81 @@ index f59046b4df39107b378a8acdab660363c524d932..42d673d45f5a7788cc1a7356ee6ed53b
  
                  if (this.removed) {
 diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
-index ae5d61788e44603ab3031435817f0359aed95e99..2900503c1278e339eac992d81c402b671a6c62ef 100644
+index ae5d61788e44603ab3031435817f0359aed95e99..98f8e3a08cbf240fc61e15500d9a79abe42cd556 100644
 --- a/net/minecraft/network/PacketProcessor.java
 +++ b/net/minecraft/network/PacketProcessor.java
-@@ -35,6 +35,15 @@ public class PacketProcessor implements AutoCloseable {
+@@ -19,6 +19,70 @@ public class PacketProcessor implements AutoCloseable {
+         this.runningThread = runningThread;
+     }
+ 
++    public PacketBatch beginBatch() {
++        if (!this.isSameThread()
++            || net.minecraft.server.threading.runtime.OwnerDomainExecutor.currentDomain()
++                != net.minecraft.server.threading.runtime.OwnerDomainExecutor.Domain.GLOBAL_CONTROL) {
++            throw new IllegalStateException("Packet batches require the global packet owner");
++        }
++        return new PacketBatch();
++    }
++
++    // The global drain retains one world lease across consecutive packets, without reordering them.
++    // Non-player packets release it, and every player packet resolves its current world again.
++    public final class PacketBatch implements AutoCloseable {
++        private net.minecraft.server.threading.TickRegions.RegionContext context;
++        private boolean closed;
++
++        private PacketBatch() {
++        }
++
++        public boolean executeSinglePacket() {
++            if (!PacketProcessor.this.isSameThread()) {
++                throw new IllegalStateException("Packet batch used outside its packet owner");
++            }
++            if (this.closed) {
++                throw new IllegalStateException("Packet batch is closed");
++            }
++            if (PacketProcessor.this.closed) {
++                return false;
++            }
++            final ListenerAndPacket<?> task = PacketProcessor.this.packetsToBeHandled.poll();
++            if (task == null) {
++                return false;
++            }
++            final net.minecraft.server.level.ServerLevel level = task.listener() instanceof net.minecraft.server.network.ServerGamePacketListenerImpl listener
++                ? listener.player.level() : null;
++            if (this.context != null && this.context.world() != level) {
++                this.releaseWorld();
++            }
++            if (level != null && this.context == null) {
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(level.getServer(), "packet-batch");
++                this.context = net.minecraft.server.threading.TickRegions.pushLevelContext(level);
++            }
++            task.handle();
++            return true;
++        }
++
++        private void releaseWorld() {
++            if (this.context != null) {
++                net.minecraft.server.threading.TickRegions.popContext(this.context);
++                this.context = null;
++            }
++        }
++
++        @Override
++        public void close() {
++            if (!PacketProcessor.this.isSameThread()) {
++                throw new IllegalStateException("Packet batch closed outside its packet owner");
++            }
++            if (!this.closed) {
++                this.releaseWorld();
++                this.closed = true;
++            }
++        }
++    }
++
+     // Paper start - improve tick loop
+     public final boolean executeSinglePacket() {
+         if (this.closed) {
+@@ -35,6 +99,15 @@ public class PacketProcessor implements AutoCloseable {
      }
      // Paper end - improve tick loop
  
@@ -493,7 +564,7 @@ index ae5d61788e44603ab3031435817f0359aed95e99..2900503c1278e339eac992d81c402b67
      public boolean canHandleInline() {
          return net.minecraft.server.threading.runtime.OwnerDomainExecutor.canRunSynchronousCallbacks();
      }
-@@ -77,11 +86,39 @@ public class PacketProcessor implements AutoCloseable {
+@@ -77,11 +150,39 @@ public class PacketProcessor implements AutoCloseable {
      // Paper start - detailed watchdog information
      public static final java.util.concurrent.ConcurrentLinkedDeque<PacketListener> packetProcessing = new java.util.concurrent.ConcurrentLinkedDeque<>();
      static final java.util.concurrent.atomic.AtomicLong totalMainThreadPacketsProcessed = new java.util.concurrent.atomic.AtomicLong();
@@ -533,7 +604,7 @@ index ae5d61788e44603ab3031435817f0359aed95e99..2900503c1278e339eac992d81c402b67
      public static java.util.List<PacketListener> getCurrentPacketProcessors() {
          java.util.List<PacketListener> listeners = new java.util.ArrayList<>(4);
          for (PacketListener listener : packetProcessing) {
-@@ -91,12 +128,12 @@ public class PacketProcessor implements AutoCloseable {
+@@ -91,12 +192,12 @@ public class PacketProcessor implements AutoCloseable {
          return listeners;
      }
  
@@ -548,7 +619,7 @@ index ae5d61788e44603ab3031435817f0359aed95e99..2900503c1278e339eac992d81c402b67
              final int minChunkX = chunkPos.x() - radius;
              final int minChunkZ = chunkPos.z() - radius;
              final int maxChunkX = chunkPos.x() + radius;
-@@ -125,13 +162,50 @@ public class PacketProcessor implements AutoCloseable {
+@@ -125,13 +226,50 @@ public class PacketProcessor implements AutoCloseable {
          action.run();
      }
  
@@ -601,7 +672,7 @@ index ae5d61788e44603ab3031435817f0359aed95e99..2900503c1278e339eac992d81c402b67
                  if (this.listener.shouldHandleMessage(this.packet)) {
                      try {
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 3bae538f6a1ebf59a74903506499c6eebd43f352..fbe5d25dd1e2fe0e4be46d6663942cc04e798a73 100644
+index 3bae538f6a1ebf59a74903506499c6eebd43f352..8b85a3b35e8990c183dd165711b2438d03480b08 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -195,6 +195,19 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
@@ -628,10 +699,10 @@ index 3bae538f6a1ebf59a74903506499c6eebd43f352..fbe5d25dd1e2fe0e4be46d6663942cc0
          this.addTickTime(time);
      }
  
-+    private boolean executeTickStartPacket(final TickStartPacketDrain drain) {
++    private boolean executeTickStartPacket(final TickStartPacketDrain drain, final PacketProcessor.@Nullable PacketBatch batch) {
 +        final boolean urgent = this.packetProcessor.hasUrgentPacketAtHead();
 +        final long start = Util.getNanos();
-+        final boolean executed = this.packetProcessor.executeSinglePacket();
++        final boolean executed = batch == null ? this.packetProcessor.executeSinglePacket() : batch.executeSinglePacket();
 +        final long elapsed = Util.getNanos() - start;
 +        if (executed) {
 +            ++drain.packets;
@@ -674,20 +745,26 @@ index 3bae538f6a1ebf59a74903506499c6eebd43f352..fbe5d25dd1e2fe0e4be46d6663942cc0
  
          // note: To avoid possibly spinning forever, only execute tasks that are roughly available at the beginning
          //       of this call. Packet processing and chunk system tasks are possibly always being queued.
-@@ -1181,10 +1235,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1181,12 +1235,14 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              // draining is large - chunk system and packet processing may be latency sensitive
  
              ((ca.spottedleaf.moonrise.patches.chunk_system.server.ChunkSystemMinecraftServer)this).moonrise$executeMidTickTasks(); // Paper - rewrite chunk system
 -            this.packetProcessor.executeSinglePacket();
-+            this.executeTickStartPacket(packetDrain);
++            this.executeTickStartPacket(packetDrain, null);
          }
          profiler.popPush("moonrise:run_all_packets");
 -        while (this.packetProcessor.executeSinglePacket()) {
-+        while (this.shouldDrainTickStartPacket(packetDrain) && this.executeTickStartPacket(packetDrain)) {
-             // execute possibly latency sensitive chunk system tasks (see above)
-             ((ca.spottedleaf.moonrise.patches.chunk_system.server.ChunkSystemMinecraftServer)this).moonrise$executeMidTickTasks(); // Paper - rewrite chunk system
+-            // execute possibly latency sensitive chunk system tasks (see above)
+-            ((ca.spottedleaf.moonrise.patches.chunk_system.server.ChunkSystemMinecraftServer)this).moonrise$executeMidTickTasks(); // Paper - rewrite chunk system
++        try (PacketProcessor.PacketBatch batch = this.packetProcessor.beginBatch()) {
++            while (this.shouldDrainTickStartPacket(packetDrain) && this.executeTickStartPacket(packetDrain, batch)) {
++                // execute possibly latency sensitive chunk system tasks (see above)
++                ((ca.spottedleaf.moonrise.patches.chunk_system.server.ChunkSystemMinecraftServer)this).moonrise$executeMidTickTasks(); // Paper - rewrite chunk system
++            }
          }
-@@ -1214,6 +1268,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         profiler.popPush("moonrise:run_all_chunk");
+         // Paper start - rewrite chunk system
+@@ -1214,6 +1270,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          profiler.pop(); // moonrise:run_all_chunk
          profiler.pop(); // moonrise:run_all_tasks
  
