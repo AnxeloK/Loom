@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 3 Nov 2026 14:49:07 +0200
+Subject: [PATCH] Test waypoint receiver index lifecycle
+
+
+diff --git a/src/test/java/net/minecraft/server/waypoints/ServerWaypointReceiverIndexTest.java b/src/test/java/net/minecraft/server/waypoints/ServerWaypointReceiverIndexTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ed3695b3fb8fa66ca73200a31e0901ba61de524d
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/waypoints/ServerWaypointReceiverIndexTest.java
+@@ -0,0 +1,144 @@
++package net.minecraft.server.waypoints;
++
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Optional;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.world.level.gamerules.GameRules;
++import net.minecraft.world.waypoints.Waypoint;
++import net.minecraft.world.waypoints.WaypointTransmitter;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class ServerWaypointReceiverIndexTest {
++    @Test
++    void refreshingATransmitterDoesNotRecheckEveryPlayerRow() {
++        Fixture f = new Fixture();
++        Transmitter source = new Transmitter();
++        for (int i = 0; i < 100; i++) source.allow(f.addPlayer());
++        f.manager.trackWaypoint(source);
++        source.hashCalls = 0;
++        f.manager.updateWaypoint(source);
++        // A column scan hashes this transmitter for each receiver; a direct lookup is constant work.
++        assertTrue(source.hashCalls <= 8, "Repeated receiver membership checks: " + source.hashCalls);
++        for (var connection : source.desired.values()) verify(connection).update();
++    }
++
++    @Test
++    void removalStopsUpdatesAndTrackingAgainBuildsFreshConnections() {
++        Fixture f = new Fixture();ServerPlayer p = f.addPlayer();Transmitter source = new Transmitter();
++        var old = source.allow(p);f.manager.trackWaypoint(source);f.manager.untrackWaypoint(source);
++        verify(old).disconnect();f.manager.updateWaypoint(source);verify(old, never()).update();
++        var current = source.allow(p);f.manager.trackWaypoint(source);f.manager.updateWaypoint(source);
++        verify(current).connect();verify(current).update();verify(old, never()).update();
++    }
++
++    @Test
++    void departingReceiverIsRemovedFromEveryTransmitter() {
++        Fixture f = new Fixture();ServerPlayer leaving=f.addPlayer(),remaining=f.addPlayer();
++        for (int i=0;i<3;i++) {
++            Transmitter source=new Transmitter();var departed=source.allow(leaving);var current=source.allow(remaining);
++            f.manager.trackWaypoint(source);f.manager.removePlayer(leaving);f.manager.updateWaypoint(source);
++            verify(departed).disconnect();verify(departed,never()).update();verify(current).update();
++            if(i<2)f.manager.addPlayer(leaving);
++        }
++    }
++
++    @Test
++    void brokenConnectionReplacementReachesBothUpdateDirections() {
++        Fixture f=new Fixture();ServerPlayer p=f.addPlayer();Transmitter source=new Transmitter();
++        var old=source.allow(p);f.manager.trackWaypoint(source);when(old.isBroken()).thenReturn(true);
++        var replacement=source.allow(p);f.manager.updateWaypoint(source);f.manager.updatePlayer(p);
++        verify(replacement).connect();verify(replacement).update();verify(old,never()).update();
++        f.manager.updateWaypoint(source);verify(replacement,times(2)).update();
++    }
++
++    @Test
++    void failedReplacementCanBeCreatedAgainAfterEligibilityReturns() {
++        Fixture f=new Fixture();ServerPlayer p=f.addPlayer();Transmitter source=new Transmitter();
++        var old=source.allow(p);f.manager.trackWaypoint(source);when(old.isBroken()).thenReturn(true);
++        source.desired.clear();f.manager.updateWaypoint(source);verify(old).disconnect();
++        var replacement=source.allow(p);f.manager.updateWaypoint(source);verify(replacement).connect();
++        f.manager.updateWaypoint(source);verify(replacement).update();
++    }
++
++    @Test
++    void resetRetiresOldConnectionsAndRebuildsTrackedSources() {
++        Fixture f=new Fixture();ServerPlayer p=f.addPlayer();Transmitter source=new Transmitter();
++        var old=source.allow(p);f.manager.trackWaypoint(source);f.manager.breakAllConnections();verify(old).disconnect();
++        var replacement=source.allow(p);f.manager.updateWaypoint(source);verify(replacement).connect();
++        f.manager.updatePlayer(p);verify(replacement).update();verify(old,never()).update();
++    }
++
++    @Test
++    void playerTransmitterDoesNotConnectToItself() {
++        Fixture f=new Fixture();ServerPlayer source=f.addPlayer(),receiver=f.addPlayer();
++        var connection=mock(WaypointTransmitter.Connection.class);
++        when(source.makeWaypointConnectionWith(receiver)).thenReturn(Optional.of(connection));
++        f.manager.trackWaypoint(source);f.manager.updateWaypoint(source);verify(connection).update();
++        verify(source,never()).makeWaypointConnectionWith(source);
++    }
++
++    @Test
++    void lateReceiverAndInitiallyRejectedConnectionsRemainDiscoverable() {
++        Fixture f=new Fixture();ServerPlayer first=f.addPlayer();Transmitter source=new Transmitter();
++        f.manager.trackWaypoint(source);var a=source.allow(first);f.manager.updateWaypoint(source);verify(a).connect();
++        ServerPlayer second=mock(ServerPlayer.class);var b=source.allow(second);f.manager.addPlayer(second);verify(b).connect();
++        f.manager.updateWaypoint(source);verify(a).update();verify(b).update();
++    }
++
++    @Test
++    void receiverSideRemovalIsVisibleToLaterTransmitterRefreshes() {
++        Fixture f=new Fixture();ServerPlayer p=f.addPlayer();Transmitter source=new Transmitter();
++        var old=source.allow(p);f.manager.trackWaypoint(source);when(old.isBroken()).thenReturn(true);
++        source.desired.clear();f.manager.updatePlayer(p);verify(old).disconnect();
++        var replacement=source.allow(p);f.manager.updateWaypoint(source);verify(replacement).connect();
++        f.manager.updatePlayer(p);verify(replacement).update();
++    }
++
++    @Test
++    void explicitRemakeReplacesTheConnectionUsedBySourceUpdates() {
++        Fixture f=new Fixture();ServerPlayer p=f.addPlayer();Transmitter source=new Transmitter();
++        var old=source.allow(p);f.manager.trackWaypoint(source);var replacement=source.allow(p);
++        f.manager.remakeConnections(source);f.manager.updateWaypoint(source);
++        verify(replacement).connect();verify(replacement).update();verify(old,never()).update();
++    }
++
++    @Test
++    void nestedConnectionCreationIsVisibleToTheRemainingReceiverScan() {
++        Fixture f = new Fixture();
++        ServerPlayer first = f.addPlayer();
++        ServerPlayer second = f.addPlayer();
++        Transmitter source = new Transmitter();
++        var a = source.allow(first);
++        var b = source.allow(second);
++        var entered = new java.util.concurrent.atomic.AtomicBoolean();
++        doAnswer(call -> { if (entered.compareAndSet(false, true)) f.manager.updatePlayer(second); return null; }).when(a).connect();
++        doAnswer(call -> { if (entered.compareAndSet(false, true)) f.manager.updatePlayer(first); return null; }).when(b).connect();
++        f.manager.trackWaypoint(source);
++        f.manager.breakAllConnections();
++        entered.set(false);
++        clearInvocations(a, b);
++        f.manager.updateWaypoint(source);
++        verify(a).connect();
++        verify(b).connect();
++    }
++
++    private static class Fixture {
++        final ServerWaypointManager manager;
++        Fixture(){ServerLevel level=mock(ServerLevel.class);GameRules rules=mock(GameRules.class);when(level.getGameRules()).thenReturn(rules);when(rules.get(GameRules.LOCATOR_BAR)).thenReturn(true);manager=new ServerWaypointManager(level);}
++        ServerPlayer addPlayer(){ServerPlayer p=mock(ServerPlayer.class);manager.addPlayer(p);return p;}
++    }
++    private static final class Transmitter implements WaypointTransmitter {
++        final Map<ServerPlayer,Connection> desired=new HashMap<>();int hashCalls;
++        Connection allow(ServerPlayer p){Connection c=mock(Connection.class);desired.put(p,c);return c;}
++        public int hashCode(){hashCalls++;return System.identityHashCode(this);}
++        public boolean isTransmittingWaypoint(){return true;}
++        public Optional<Connection> makeWaypointConnectionWith(ServerPlayer p){return Optional.ofNullable(desired.get(p));}
++        public Waypoint.Icon waypointIcon(){return Waypoint.Icon.NULL;}
++    }
++}

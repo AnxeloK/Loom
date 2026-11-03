@@ -1,0 +1,146 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 3 Nov 2026 14:49:07 +0200
+Subject: [PATCH] Index waypoint receivers for direct refresh
+
+
+diff --git a/net/minecraft/server/waypoints/ServerWaypointManager.java b/net/minecraft/server/waypoints/ServerWaypointManager.java
+index fb859a35f5267ed00828f2df2d5b8f57a27e8368..4c2a292ce16aec16da53e774fafb712b7fcdd99e 100644
+--- a/net/minecraft/server/waypoints/ServerWaypointManager.java
++++ b/net/minecraft/server/waypoints/ServerWaypointManager.java
+@@ -15,11 +15,15 @@ import net.minecraft.server.level.ServerPlayer;
+ import net.minecraft.world.level.gamerules.GameRules;
+ import net.minecraft.world.waypoints.WaypointManager;
+ import net.minecraft.world.waypoints.WaypointTransmitter;
++import org.jspecify.annotations.Nullable;
+ 
+ public class ServerWaypointManager implements WaypointManager<WaypointTransmitter> {
+     private final Set<WaypointTransmitter> waypoints = new HashSet<>();
+     private final Set<ServerPlayer> players = new HashSet<>();
+     private final Table<ServerPlayer, WaypointTransmitter, WaypointTransmitter.Connection> connections = HashBasedTable.create();
++    // The table remains authoritative. This derived column index avoids scanning every player row
++    // on each transmitter movement; lifecycle mutations below keep both views together.
++    private final Map<WaypointTransmitter, Map<ServerPlayer, WaypointTransmitter.Connection>> receiversByWaypoint = new java.util.HashMap<>();
+     // Paper start - optimize ServerWaypointManager with locator bar disabled
+     public boolean locatorBarEnabled; // Avoid a gamerule lookup for each player
+ 
+@@ -42,7 +46,7 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     public void updateWaypoint(final WaypointTransmitter waypoint) {
+         if (!this.locatorBarEnabled) return; // Paper - optimize ServerWaypointManager with locator bar disabled
+         if (this.waypoints.contains(waypoint)) {
+-            Map<ServerPlayer, WaypointTransmitter.Connection> playerConnection = this.connections.column(waypoint);
++            Map<ServerPlayer, WaypointTransmitter.Connection> playerConnection = new ReceiverColumn(waypoint);
+ 
+             List<BrokenPlayerConnection> brokenConnections = null;
+             for (Entry<ServerPlayer, WaypointTransmitter.Connection> waypointConnection : playerConnection.entrySet()) {
+@@ -83,6 +87,10 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     public void untrackWaypoint(final WaypointTransmitter waypoint) {
+         this.connections.column(waypoint).forEach((player, connection) -> connection.disconnect());
+         Tables.transpose(this.connections).row(waypoint).clear();
++        Map<ServerPlayer, WaypointTransmitter.Connection> removed = this.receiversByWaypoint.remove(waypoint);
++        if (removed != null) {
++            removed.clear();
++        }
+         this.waypoints.remove(waypoint);
+     }
+ 
+@@ -139,8 +147,9 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     }
+ 
+     public void removePlayer(final ServerPlayer player) {
+-        this.connections.row(player).values().removeIf(connection -> {
+-            connection.disconnect();
++        this.connections.row(player).entrySet().removeIf(entry -> {
++            entry.getValue().disconnect();
++            this.removeReceiverIndex(player, entry.getKey());
+             return true;
+         });
+         this.untrackWaypoint(player);
+@@ -150,6 +159,8 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     public void breakAllConnections() {
+         this.connections.values().forEach(WaypointTransmitter.Connection::disconnect);
+         this.connections.clear();
++        this.receiversByWaypoint.values().forEach(Map::clear);
++        this.receiversByWaypoint.clear();
+     }
+ 
+     public void remakeConnections(final WaypointTransmitter waypoint) {
+@@ -170,14 +181,63 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     // Paper end - optimize ServerWaypointManager with locator bar disabled
+     }
+ 
++    // A live view also observes a column removed and recreated by a connection callback.
++    private final class ReceiverColumn extends java.util.AbstractMap<ServerPlayer, WaypointTransmitter.Connection> {
++        private final WaypointTransmitter waypoint;
++
++        private ReceiverColumn(final WaypointTransmitter waypoint) {
++            this.waypoint = waypoint;
++        }
++
++        @Override
++        public Set<Entry<ServerPlayer, WaypointTransmitter.Connection>> entrySet() {
++            Map<ServerPlayer, WaypointTransmitter.Connection> receivers = receiversByWaypoint.get(this.waypoint);
++            return receivers == null ? Set.of() : receivers.entrySet();
++        }
++
++        @Override
++        public int size() {
++            Map<ServerPlayer, WaypointTransmitter.Connection> receivers = receiversByWaypoint.get(this.waypoint);
++            return receivers == null ? 0 : receivers.size();
++        }
++
++        @Override
++        public boolean containsKey(final Object player) {
++            Map<ServerPlayer, WaypointTransmitter.Connection> receivers = receiversByWaypoint.get(this.waypoint);
++            return receivers != null && receivers.containsKey(player);
++        }
++    }
++
++    private void putConnection(final ServerPlayer player, final WaypointTransmitter waypoint, final WaypointTransmitter.Connection connection) {
++        this.connections.put(player, waypoint, connection);
++        this.receiversByWaypoint.computeIfAbsent(waypoint, ignored -> new java.util.HashMap<>()).put(player, connection);
++    }
++
++    private WaypointTransmitter.@Nullable Connection removeConnection(final ServerPlayer player, final WaypointTransmitter waypoint) {
++        WaypointTransmitter.Connection removed = this.connections.remove(player, waypoint);
++        this.removeReceiverIndex(player, waypoint);
++        return removed;
++    }
++
++    private void removeReceiverIndex(final ServerPlayer player, final WaypointTransmitter waypoint) {
++        Map<ServerPlayer, WaypointTransmitter.Connection> receivers = this.receiversByWaypoint.get(waypoint);
++        if (receivers == null) {
++            return;
++        }
++        receivers.remove(player);
++        if (receivers.isEmpty()) {
++            this.receiversByWaypoint.remove(waypoint);
++        }
++    }
++
+     private void createConnection(final ServerPlayer player, final WaypointTransmitter waypoint) {
+         if (player != waypoint) {
+             if (isLocatorBarEnabledFor(player)) {
+                 waypoint.makeWaypointConnectionWith(player).ifPresentOrElse(connection -> {
+-                    this.connections.put(player, waypoint, connection);
++                    this.putConnection(player, waypoint, connection);
+                     connection.connect();
+                 }, () -> {
+-                    WaypointTransmitter.Connection connection = this.connections.remove(player, waypoint);
++                    WaypointTransmitter.Connection connection = this.removeConnection(player, waypoint);
+                     if (connection != null) {
+                         connection.disconnect();
+                     }
+@@ -201,10 +261,10 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     private void replaceBrokenConnection(final ServerPlayer player, final WaypointTransmitter waypoint, final WaypointTransmitter.Connection connection) {
+         waypoint.makeWaypointConnectionWith(player).ifPresentOrElse(newConnection -> {
+             newConnection.connect();
+-            this.connections.put(player, waypoint, newConnection);
++            this.putConnection(player, waypoint, newConnection);
+         }, () -> {
+             connection.disconnect();
+-            this.connections.remove(player, waypoint);
++            this.removeConnection(player, waypoint);
+         });
+     }
+ 
