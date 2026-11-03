@@ -1,0 +1,202 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 00:34:39 +0200
+Subject: [PATCH] Test world tick packet flush boundaries
+
+
+diff --git a/src/test/java/net/minecraft/server/network/WorldTickPacketFlushTest.java b/src/test/java/net/minecraft/server/network/WorldTickPacketFlushTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..52bf14eab048d84f0f25faa73aed4ce9a6e601ec
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/network/WorldTickPacketFlushTest.java
+@@ -0,0 +1,190 @@
++package net.minecraft.server.network;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import io.netty.channel.ChannelHandlerContext;
++import io.netty.channel.ChannelOutboundHandlerAdapter;
++import io.netty.channel.ChannelPromise;
++import io.netty.channel.embedded.EmbeddedChannel;
++import java.lang.reflect.Field;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.network.Connection;
++import net.minecraft.network.protocol.Packet;
++import net.minecraft.network.protocol.PacketFlow;
++import net.minecraft.network.protocol.common.ClientboundKeepAlivePacket;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.level.Level;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class WorldTickPacketFlushTest {
++    @BeforeAll
++    static void prepareTypes() {
++        mock(MinecraftServer.class);
++        mock(ServerLevel.class);
++        mock(Connection.class);
++        mock(ServerCommonPacketListenerImpl.class);
++    }
++
++    @Test
++    void globalPacketsWaitForTheExistingResumeBoundary() throws Exception {
++        Fixture f = new Fixture();
++        f.global(() -> f.listener.send(f.packet));
++        verify(f.connection).send(f.packet, null, false);
++        f.listener.resumeFlushing();
++        verify(f.connection).flushChannel();
++    }
++
++    @Test
++    void singleWorldPacketsShareTheServerTickFlushBoundary() throws Exception {
++        Fixture f = new Fixture();
++        f.global(() -> f.worlds(List.of(f.level), () -> f.listener.send(f.packet)));
++        verify(f.connection).send(f.packet, null, false);
++        verify(f.connection, never()).flushChannel();
++        f.listener.resumeFlushing();
++        verify(f.connection).flushChannel();
++    }
++
++    @Test
++    void parallelWorldBurstDefersEveryFlushUntilServerResume() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel second = f.level(f.server);
++        f.global(() -> f.worlds(List.of(f.level, second), () -> {
++            for (int i = 0; i < 64; ++i) f.listener.send(f.packet);
++        }));
++        verify(f.connection, times(128)).send(f.packet, null, false);
++        verify(f.connection, never()).send(f.packet, null, true);
++        f.listener.resumeFlushing();
++        verify(f.connection).flushChannel();
++    }
++
++    @Test
++    void regionWorkOutsideTheJoinedWorldPhaseStillFlushes() throws Exception {
++        Fixture f = new Fixture();
++        f.global(() -> {
++            try (var ignored = OwnerDomainExecutor.suspendCurrentOwner()) {
++                f.region(f.level, () -> f.listener.send(f.packet));
++            }
++        });
++        verify(f.connection).send(f.packet, null, true);
++    }
++
++    @Test
++    void anotherServersWorldPhaseCannotSuspendThisConnection() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel foreign = f.level(mock(MinecraftServer.class));
++        f.global(() -> f.worlds(List.of(foreign), () -> f.listener.send(f.packet)));
++        verify(f.connection).send(f.packet, null, true);
++    }
++
++    @Test
++    void worldFailureRestoresTheImmediateFlushPath() throws Exception {
++        Fixture f = new Fixture();
++        f.global(() -> {
++            assertThrows(IllegalArgumentException.class, () -> f.worlds(List.of(f.level), () -> {
++                throw new IllegalArgumentException("world failure");
++            }));
++            try (var ignored = OwnerDomainExecutor.suspendCurrentOwner()) {
++                f.region(f.level, () -> f.listener.send(f.packet));
++            }
++        });
++        verify(f.connection).send(f.packet, null, true);
++    }
++
++    @Test
++    void anUnsuspendedConnectionStillFlushesInsideTheWorldPhase() throws Exception {
++        Fixture f = new Fixture();
++        f.listener.resumeFlushing();
++        clearInvocations(f.connection);
++        f.global(() -> f.worlds(List.of(f.level), () -> f.listener.send(f.packet)));
++        verify(f.connection).send(f.packet, null, true);
++    }
++
++    @Test
++    void joinedWorldPacketsReachTheChannelInOrderAtResume() throws Exception {
++        io.papermc.paper.configuration.GlobalConfigTestingBase.setupGlobalConfigForTest(
++            net.minecraft.core.RegistryAccess.EMPTY);
++        Fixture f = new Fixture();
++        EmbeddedChannel channel = new EmbeddedChannel(new ChannelOutboundHandlerAdapter() {
++            @Override
++            public void write(ChannelHandlerContext context, Object packet, ChannelPromise promise) {
++                context.write(((ClientboundKeepAlivePacket) packet).getId(), promise);
++            }
++        });
++        try {
++            Connection connection = new Connection(PacketFlow.SERVERBOUND);
++            connection.channel = channel;
++            Field connectionField = ServerCommonPacketListenerImpl.class.getDeclaredField("connection");
++            connectionField.setAccessible(true);
++            connectionField.set(f.listener, connection);
++            f.global(() -> f.worlds(List.of(f.level), () -> {
++                for (int i = 0; i < 64; ++i) f.listener.send(new ClientboundKeepAlivePacket(i));
++            }));
++            channel.runPendingTasks();
++            assertNull(channel.readOutbound(), "suspended world packets were flushed early");
++            f.listener.resumeFlushing();
++            channel.runPendingTasks();
++            for (long i = 0; i < 64; ++i) assertEquals(i, (Long) channel.readOutbound());
++            assertNull(channel.readOutbound());
++        } finally {
++            channel.finishAndReleaseAll();
++        }
++    }
++
++    private static final class Fixture {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel level = level(server);
++        final Connection connection = mock(Connection.class);
++        final Packet<?> packet = mock(Packet.class);
++        final ServerCommonPacketListenerImpl listener = mock(ServerCommonPacketListenerImpl.class, CALLS_REAL_METHODS);
++
++        Fixture() throws Exception {
++            Field serverField = ServerCommonPacketListenerImpl.class.getDeclaredField("server");
++            serverField.setAccessible(true);
++            serverField.set(listener, server);
++            Field connectionField = ServerCommonPacketListenerImpl.class.getDeclaredField("connection");
++            connectionField.setAccessible(true);
++            connectionField.set(listener, connection);
++            listener.suspendFlushing();
++        }
++
++        ServerLevel level(MinecraftServer owner) {
++            ServerLevel result = mock(ServerLevel.class);
++            when(result.getServer()).thenReturn(owner);
++            when(result.dimension()).thenReturn(Level.OVERWORLD);
++            return result;
++        }
++
++        void worlds(List<ServerLevel> worlds, Runnable action) {
++            TickRegions.tickWorldsInParallel(worlds, world -> region(world, action));
++        }
++
++        void region(ServerLevel world, Runnable action) {
++            var context = TickRegions.pushLevelContext(world);
++            try { action.run(); }
++            finally { TickRegions.popContext(context); }
++        }
++
++        void global(Runnable action) throws Exception {
++            AtomicReference<Throwable> failure = new AtomicReference<>();
++            Thread thread = new TickThread(() -> {
++                try (var ignored = OwnerDomainExecutor.enterGlobal(server, "world-flush-test")) {
++                    action.run();
++                    assertNull(TickRegions.currentContext());
++                } catch (Throwable error) { failure.set(error); }
++            }, "world-packet-flush-test");
++            thread.setDaemon(true);
++            thread.start();
++            thread.join(10_000L);
++            assertFalse(thread.isAlive(), "world packet flush test did not finish");
++            if (failure.get() != null) throw new AssertionError(failure.get());
++        }
++    }
++}

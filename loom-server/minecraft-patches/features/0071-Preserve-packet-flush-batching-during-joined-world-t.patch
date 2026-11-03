@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 00:40:46 +0200
+Subject: [PATCH] Preserve packet flush batching during joined world ticks
+
+
+diff --git a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+index 3a40c5086415bc3aff4f23c9967406c632d0f7ed..f53df3abac01e94054d217653a94b8cf91a6412a 100644
+--- a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+@@ -337,8 +337,10 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+             this.close();
+         }
+ 
++        // Joined world tasks finish before the server resumes flushing, just like global tick work.
+         boolean flush = !this.suspendFlushingOnServerThread
+-            || !net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this.server);
++            || !(net.minecraft.server.threading.runtime.OwnerDomainExecutor.isGlobalOwner(this.server)
++                || net.minecraft.server.threading.TickRegions.isRunningWorldTick(this.server));
+ 
+         try {
+             this.connection.send(packet, listener, flush);
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index 384fa8639261749fd99445032d6a3bb19b6ad64e..c13ba6b540d595f3cf57532007666a648ec0a597 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -1647,6 +1647,14 @@ public class TickRegions {
+         return false;
+     }
+ 
++    public static boolean isRunningWorldTick(final MinecraftServer server) {
++        if (!RUNNING_WORLD_TICK.get()) {
++            return false;
++        }
++        final RegionContext context = CURRENT_CONTEXT.get();
++        return context != null && context.world().getServer() == server;
++    }
++
+     // Loom - tick independent worlds through the same cooperative batch as region shards. The server thread
+     // participates with its GLOBAL_CONTROL owner temporarily detached; nested world coordinators help ready
+     // region work but do not recursively enter another world tick. Failures remain deterministic by world
