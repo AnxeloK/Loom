@@ -1,0 +1,322 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 3 Nov 2026 02:41:25 +0200
+Subject: [PATCH] Check serial fallback after simulation bucket merging
+
+
+diff --git a/src/test/java/net/minecraft/server/level/SerialSimulationFallbackTest.java b/src/test/java/net/minecraft/server/level/SerialSimulationFallbackTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..48898449fc01488309e6350ce5b61b0f306d49b1
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/level/SerialSimulationFallbackTest.java
+@@ -0,0 +1,310 @@
++package net.minecraft.server.level;
++
++import ca.spottedleaf.moonrise.common.list.ReferenceList;
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import java.lang.reflect.Constructor;
++import java.lang.reflect.Field;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.threading.RegionTickStaging;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.world.TickRateManager;
++import net.minecraft.world.entity.Entity;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.level.chunk.LevelChunk;
++import net.minecraft.world.level.entity.EntityTickList;
++import net.minecraft.world.level.gamerules.GameRules;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class SerialSimulationFallbackTest {
++    @Test
++    void oneChunkRegionUsesSerialTicking() throws Exception {
++        final Fixture f = new Fixture();
++        assertFalse(parallel(plan(f.world, chunks(0, 1))));
++    }
++
++    @Test
++    void adjacentChunkRegionsDoNotClaimParallelism() throws Exception {
++        final Fixture f = new Fixture();
++        assertFalse(parallel(plan(f.world, chunks(-2, -1, 0, 1))));
++    }
++
++    @Test
++    void separatedChunkRegionsKeepParallelTicking() throws Exception {
++        final Fixture f = new Fixture();
++        assertEquals(TickRegions.isParallelSimulationEnabled(), parallel(plan(f.world, chunks(-2, -1, 128, 129))));
++    }
++
++    @Test
++    void chunkPlanInvalidatesOnIdentityOrOrderChange() throws Exception {
++        final Fixture f = new Fixture();
++        final LevelChunk[] chunks = chunks(-2, -1, 0, 1);
++        final Object plan = plan(f.world, chunks);
++        assertEquals(true, invoke(plan, "matches", new Class<?>[]{LevelChunk[].class, int.class}, chunks, chunks.length));
++        final LevelChunk[] reordered = {chunks[1], chunks[0], chunks[2], chunks[3]};
++        assertEquals(false, invoke(plan, "matches", new Class<?>[]{LevelChunk[].class, int.class}, reordered, reordered.length));
++        assertEquals(false, invoke(plan, "matches", new Class<?>[]{LevelChunk[].class, int.class}, chunks(-2, -1, 0, 1), 4));
++    }
++
++    @Test
++    void mergedChunkRegionsKeepFullOwnershipAndOriginalOrder() throws Exception {
++        final Fixture f = new Fixture();
++        final LevelChunk[] chunks = chunks(-1, 1, -2, 0);
++        final ReferenceList<LevelChunk> ticking = new ReferenceList<>(new LevelChunk[0]);
++        for (final LevelChunk chunk : chunks) ticking.add(chunk);
++        when(f.world.moonrise$getEntityTickingChunks()).thenReturn(ticking);
++        final GameRules rules = mock(GameRules.class);
++        when(rules.get(GameRules.RANDOM_TICK_SPEED)).thenReturn(3);
++        when(f.world.getGameRules()).thenReturn(rules);
++        final ServerChunkCache cache = mock(ServerChunkCache.class);
++        set(cache, "level", f.world);
++        final List<LevelChunk> seen = new ArrayList<>();
++        doAnswer(call -> {
++            f.assertSerialOwner();
++            seen.add(call.getArgument(0));
++            assertEquals(3, (int)call.getArgument(1));
++            return null;
++        }).when(f.world).loom$tickChunk(any(), anyInt(), any(), any());
++        f.owned(() -> invoke(cache, "iterateTickingChunksFaster", new Class<?>[0]));
++        assertEquals(List.of(chunks), seen);
++        verify(f.server).moonrise$executeMidTickTasks();
++    }
++
++    @Test
++    void separatedChunkRegionsReuseTheirPreparedLayoutAcrossTicks() throws Exception {
++        final Fixture f = new Fixture();
++        final LevelChunk[] chunks = chunks(-2, -1, 128, 129);
++        final ReferenceList<LevelChunk> ticking = new ReferenceList<>(new LevelChunk[0]);
++        for (final LevelChunk chunk : chunks) ticking.add(chunk);
++        when(f.world.moonrise$getEntityTickingChunks()).thenReturn(ticking);
++        final GameRules rules = mock(GameRules.class);
++        when(rules.get(GameRules.RANDOM_TICK_SPEED)).thenReturn(3);
++        when(f.world.getGameRules()).thenReturn(rules);
++        final ServerChunkCache cache = mock(ServerChunkCache.class);
++        set(cache, "level", f.world);
++        final List<LevelChunk> seen = Collections.synchronizedList(new ArrayList<>());
++        doAnswer(call -> {
++            final LevelChunk chunk = call.getArgument(0);
++            assertTrue(RegionTickStaging.isStaging());
++            assertTrue(TickRegions.isCurrentThreadOwnerQuiet(f.world, chunk.locX, chunk.locZ, chunk.locX, chunk.locZ));
++            seen.add(chunk);
++            return null;
++        }).when(f.world).loom$tickChunk(any(), anyInt(), any(), any());
++        f.owned(() -> {
++            invoke(cache, "iterateTickingChunksFaster", new Class<?>[0]);
++            invoke(cache, "iterateTickingChunksFaster", new Class<?>[0]);
++            f.assertSerialOwner();
++        });
++        assertEquals(8, seen.size());
++        for (final LevelChunk chunk : chunks) assertEquals(2, Collections.frequency(seen, chunk));
++        verify(f.server, never()).moonrise$executeMidTickTasks();
++    }
++
++    @Test
++    void oneEntityRegionKeepsOwnerEntitiesInOriginalOrder() throws Exception {
++        final Fixture f = new Fixture();
++        final List<Entity> entities = f.entities(0, 1);
++        f.assertEntityTicks(entities);
++    }
++
++    @Test
++    void mergedEntityRegionsKeepFullOwnershipAndOriginalOrder() throws Exception {
++        final Fixture f = new Fixture();
++        final List<Entity> entities = f.entities(-1, 0);
++        f.assertEntityTicks(entities);
++    }
++
++    @Test
++    void failingSerialEntityTickDoesNotRetainStagingOrReplaceTheOwner() throws Exception {
++        final Fixture f = new Fixture();
++        f.entities(-1, 0);
++        final IllegalStateException expected = new IllegalStateException("entity callback failed");
++        doAnswer(call -> { f.assertSerialOwner(); throw expected; }).when(f.world).guardEntityTick(any(), any());
++        f.owned(() -> {
++            assertSame(expected, assertThrows(IllegalStateException.class,
++                () -> invoke(f.world, "tickEntitiesInParallel", new Class<?>[0])));
++            f.assertSerialOwner();
++        });
++    }
++
++    @Test
++    void separatedEntityRegionsStillStageAndThenTickOwnerEntities() throws Exception {
++        final Fixture f = new Fixture();
++        final List<Entity> entities = f.entities(-1, 128);
++        final List<Entity> seen = Collections.synchronizedList(new ArrayList<>());
++        doAnswer(call -> {
++            final Entity entity = call.getArgument(1);
++            if (entity.requiresFullLevelTickOwnership()) {
++                f.assertSerialOwner();
++                assertEquals(2, seen.size());
++            } else {
++                assertTrue(RegionTickStaging.isStaging());
++                final ChunkPos pos = entity.chunkPosition();
++                assertTrue(TickRegions.isCurrentThreadOwnerQuiet(f.world, pos.x(), pos.z(), pos.x(), pos.z()));
++            }
++            seen.add(entity);
++            return null;
++        }).when(f.world).guardEntityTick(any(), any());
++        f.owned(() -> {
++            invoke(f.world, "tickEntitiesInParallel", new Class<?>[0]);
++            f.assertSerialOwner();
++        });
++        assertEquals(3, seen.size());
++        assertTrue(seen.containsAll(entities));
++        assertSame(entities.get(1), seen.getLast());
++    }
++
++    @Test
++    void parallelFailureRestoresTheWorldContext() throws Exception {
++        final Fixture f = new Fixture();
++        f.entities(-1, 128);
++        doAnswer(call -> {
++            assertTrue(RegionTickStaging.isStaging());
++            throw new IllegalStateException("parallel callback failed");
++        }).when(f.world).guardEntityTick(any(), any());
++        f.owned(() -> {
++            assertThrows(RuntimeException.class, () -> invoke(f.world, "tickEntitiesInParallel", new Class<?>[0]));
++            f.assertSerialOwner();
++        });
++    }
++
++    @Test
++    void aPreparedLayoutOwnsItsMembershipAcrossCacheReplacement() throws Exception {
++        final Fixture f = new Fixture();
++        final AtomicInteger executions = new AtomicInteger();
++        final List<TickRegions.RegionBoundTask> tasks = new ArrayList<>();
++        tasks.add(new TickRegions.RegionBoundTask(-2, 0, -2, 0, -1, 0, executions::incrementAndGet));
++        tasks.add(new TickRegions.RegionBoundTask(0, 0, 0, 0, 1, 0, executions::incrementAndGet));
++        final var original = TickRegions.prepareRegionBoundTasks(f.world, tasks, "serial-layout-test");
++        assertFalse(original.isParallel());
++        tasks.clear();
++        final var separated = TickRegions.prepareRegionBoundTasks(f.world, List.of(
++            new TickRegions.RegionBoundTask(-2, 0, -2, 0, -1, 0, () -> fail("replacement task ran")),
++            new TickRegions.RegionBoundTask(128, 0, 128, 0, 129, 0, () -> fail("replacement task ran"))
++        ), "serial-layout-test");
++        assertTrue(separated.isParallel());
++        f.owned(() -> { original.runFromCurrentContext(); original.runFromCurrentContext(); f.assertSerialOwner(); });
++        assertEquals(4, executions.get());
++    }
++
++    @Test
++    void aPreparedTaskFailureRestoresTheWorldContext() throws Exception {
++        final Fixture f = new Fixture();
++        final IllegalStateException expected = new IllegalStateException("prepared callback failed");
++        final var plan = TickRegions.prepareRegionBoundTasks(f.world, List.of(
++            new TickRegions.RegionBoundTask(-2, 0, -2, 0, -1, 0, () -> { throw expected; })
++        ), "serial-layout-failure");
++        f.owned(() -> {
++            assertSame(expected, assertThrows(IllegalStateException.class, plan::runFromCurrentContext));
++            f.assertSerialOwner();
++        });
++    }
++
++    private static final class Fixture {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel world = mock(ServerLevel.class);
++        Fixture() {
++            when(world.getServer()).thenReturn(server);
++            when(world.dimension()).thenReturn(Level.OVERWORLD);
++            when(world.tickRateManager()).thenReturn(mock(TickRateManager.class));
++        }
++        List<Entity> entities(final int firstX, final int secondX) throws Exception {
++            final Entity first = entity(firstX, false);
++            final Entity owner = entity(0, true);
++            final Entity second = entity(secondX, false);
++            final EntityTickList list = new EntityTickList();
++            final List<Entity> ordered = List.of(first, owner, second);
++            ordered.forEach(list::add);
++            set(world, "entityTickList", list);
++            return ordered;
++        }
++        void assertEntityTicks(final List<Entity> entities) throws Exception {
++            final List<Entity> seen = new ArrayList<>();
++            doAnswer(call -> { assertSerialOwner(); seen.add(call.getArgument(1)); return null; })
++                .when(world).guardEntityTick(any(), any());
++            owned(() -> invoke(world, "tickEntitiesInParallel", new Class<?>[0]));
++            assertEquals(entities, seen);
++        }
++        void assertSerialOwner() {
++            assertTrue(TickRegions.isCurrentThreadOwnerQuiet(world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE), "serial tick must retain the full world lease");
++            assertFalse(RegionTickStaging.isStaging(), "serial tick must publish effects immediately");
++        }
++        void owned(final Runnable action) throws Exception {
++            final AtomicReference<Throwable> failure = new AtomicReference<>();
++            final Thread thread = new TickThread(() -> {
++                try {
++                    final var context = TickRegions.pushLevelContext(world);
++                    try { action.run(); }
++                    finally { TickRegions.popContext(context); }
++                } catch (Throwable error) { failure.set(error); }
++            }, "serial-simulation-test");
++            thread.setDaemon(true);
++            thread.start();
++            thread.join(10_000L);
++            assertFalse(thread.isAlive(), "simulation did not finish");
++            if (failure.get() != null) {
++                if (failure.get() instanceof Error error) throw error;
++                if (failure.get() instanceof RuntimeException error) throw error;
++                throw new AssertionError(failure.get());
++            }
++        }
++    }
++    private static Entity entity(final int x, final boolean owner) {
++        final Entity entity = mock(Entity.class);
++        when(entity.chunkPosition()).thenReturn(new ChunkPos(x, 0));
++        when(entity.requiresFullLevelTickOwnership()).thenReturn(owner);
++        return entity;
++    }
++    private static LevelChunk[] chunks(final int... positions) throws Exception {
++        final LevelChunk[] chunks = new LevelChunk[positions.length];
++        for (int i = 0; i < chunks.length; ++i) {
++            chunks[i] = mock(LevelChunk.class);
++            set(chunks[i], "locX", positions[i]);
++            set(chunks[i], "locZ", 0);
++        }
++        return chunks;
++    }
++    private static Object plan(final ServerLevel world, final LevelChunk[] chunks) throws Exception {
++        final Class<?> type = Class.forName("net.minecraft.server.level.ServerChunkCache$ChunkTickPlan");
++        final Constructor<?> constructor = type.getDeclaredConstructor(ServerLevel.class, LevelChunk[].class, int.class);
++        constructor.setAccessible(true);
++        return constructor.newInstance(world, chunks, chunks.length);
++    }
++    private static boolean parallel(final Object plan) { return (boolean)invoke(plan, "isParallel", new Class<?>[0]); }
++    private static Object invoke(final Object target, final String name, final Class<?>[] parameters, final Object... args) {
++        try {
++            final Class<?> type = target instanceof ServerLevel ? ServerLevel.class
++                : target instanceof ServerChunkCache ? ServerChunkCache.class : target.getClass();
++            final Method method = type.getDeclaredMethod(name, parameters);
++            method.setAccessible(true);
++            return method.invoke(target, args);
++        } catch (InvocationTargetException error) {
++            if (error.getCause() instanceof Error cause) throw cause;
++            if (error.getCause() instanceof RuntimeException cause) throw cause;
++            throw new AssertionError(error.getCause());
++        } catch (ReflectiveOperationException error) { throw new AssertionError(error); }
++    }
++    private static void set(final Object target, final String name, final Object value) throws Exception {
++        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
++            try {
++                final Field field = type.getDeclaredField(name);
++                field.setAccessible(true);
++                field.set(target, value);
++                return;
++            } catch (NoSuchFieldException ignored) { }
++        }
++        throw new NoSuchFieldException(name);
++    }
++}

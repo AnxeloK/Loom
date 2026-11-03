@@ -1,0 +1,268 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 3 Nov 2026 02:41:25 +0200
+Subject: [PATCH] Keep merged simulation groups on their serial tick path
+
+
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index 115a84e1f89d03a97f91adee741ec84539a486d6..4e4a0ee8ff6881b03f44641e380286952a54da36 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -199,7 +199,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+     private static final class ChunkTickPlan {
+         private final ServerLevel world;
+         private final LevelChunk[] sourceChunks;
+-        private final List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks;
++        private final net.minecraft.server.threading.TickRegions.@Nullable RegionTaskPlan taskPlan;
+         private int randomTickSpeed;
+         private net.minecraft.server.threading.RegionTickStaging.@Nullable Session stagingSession;
+ 
+@@ -207,7 +207,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+             this.world = world;
+             this.sourceChunks = Arrays.copyOf(chunks, size);
+             if (size <= 1) {
+-                this.tasks = List.of();
++                this.taskPlan = null;
+                 return;
+             }
+ 
+@@ -222,7 +222,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+                 byRegion.computeIfAbsent(key, ignored -> new ArrayList<>()).add(chunk);
+             }
+             if (byRegion.size() <= 1) {
+-                this.tasks = List.of();
++                this.taskPlan = null;
+                 return;
+             }
+ 
+@@ -244,7 +244,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+                 final ChunkTickGroup group = new ChunkTickGroup(this, regionChunks.toArray(LevelChunk[]::new));
+                 tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(minX, minZ, minX, minZ, maxX, maxZ, group));
+             }
+-            this.tasks = tasks;
++            this.taskPlan = net.minecraft.server.threading.TickRegions.prepareRegionBoundTasks(world, tasks, "chunkTick");
+         }
+ 
+         private boolean matches(final LevelChunk[] chunks, final int size) {
+@@ -260,7 +260,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         }
+ 
+         private boolean isParallel() {
+-            return !this.tasks.isEmpty();
++            return this.taskPlan != null && this.taskPlan.isParallel();
+         }
+ 
+         private void tick(final int randomTickSpeed) {
+@@ -269,7 +269,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+             this.randomTickSpeed = randomTickSpeed;
+             this.stagingSession = session;
+             try {
+-                net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(this.world, this.tasks, "chunkTick");
++                java.util.Objects.requireNonNull(this.taskPlan).runFromCurrentContext();
+                 net.minecraft.server.threading.RegionTickStaging.applyAndClear(session, this.world);
+             } finally {
+                 this.stagingSession = null;
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index ad77b3e4019a7050cc7c014a1d9c8eccdd6fb121..22021f433e89009c2a2a73b9db621ed2dd096537 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1569,11 +1569,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             }
+             return;
+         }
+-        // One staging session per dispatch: workers register their buffers into THIS session only, so the
+-        // serial replay below drains only this world's buffers — never another world ticking in parallel.
+-        final net.minecraft.server.threading.RegionTickStaging.Session stagingSession =
+-            net.minecraft.server.threading.RegionTickStaging.newSession();
+         final java.util.List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks = new java.util.ArrayList<>(byRegion.size());
++        final java.util.List<EntityTickGroup> groups = new java.util.ArrayList<>(byRegion.size());
+         // Loom - gated bucket diagnostics: per-bucket entity counts and task wall times, to attribute the
+         // parallel-phase wall to imbalance (one dominant bucket) vs per-entity overhead.
+         final boolean loomBucketDebug = LOOM_DEBUG_ENTITY_BUCKETS;
+@@ -1606,25 +1603,36 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             if (loomBucketDebug) {
+                 loomBucketSizes[loomTaskIndex] = regionEntities.size();
+             }
+-            tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(dispatchX, dispatchZ, fMinX, fMinZ, fMaxX, fMaxZ, () -> {
+-                final long loomTaskStart = loomBucketDebug ? System.nanoTime() : 0L;
+-                net.minecraft.server.threading.RegionTickStaging.begin(stagingSession);
+-                try {
+-                    for (int i = 0, n = regionEntities.size(); i < n; ++i) {
+-                        this.tickOneEntity(regionEntities.get(i));
+-                    }
+-                } finally {
+-                    net.minecraft.server.threading.RegionTickStaging.end();
+-                    if (loomBucketDebug) {
+-                        loomBucketNanos.set(loomTaskIndex, System.nanoTime() - loomTaskStart);
+-                    }
+-                }
+-            }));
++            final EntityTickGroup group = new EntityTickGroup(regionEntities, loomBucketNanos, loomTaskIndex);
++            groups.add(group);
++            tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(dispatchX, dispatchZ, fMinX, fMinZ, fMaxX, fMaxZ, group));
++        }
++        final net.minecraft.server.threading.TickRegions.RegionTaskPlan taskPlan =
++            net.minecraft.server.threading.TickRegions.prepareRegionBoundTasks(this, tasks, "entityTick");
++        if (!taskPlan.isParallel()) {
++            // Adjacent region cells can merge into one safety bucket. Keep the original entity order and
++            // immediate callbacks under the full-world lease when the final layout offers no parallelism.
++            for (int i = 0; i < count; ++i) {
++                this.tickOneEntity(toTick.get(i));
++            }
++            return;
++        }
++        // Each task keeps its own staging buffer, registered only in this world's joined dispatch.
++        final net.minecraft.server.threading.RegionTickStaging.Session stagingSession =
++            net.minecraft.server.threading.RegionTickStaging.newSession();
++        for (int i = 0, len = groups.size(); i < len; ++i) {
++            groups.get(i).session = stagingSession;
+         }
+         final LoomTickSectionDiagnostics loomEntityDiagnostics = this.loomTickSectionDiagnostics;
+         final long loomParallelStart = loomEntityDiagnostics == null ? 0L : System.nanoTime();
+         final long loomPhaseStart = loomBucketDebug ? System.nanoTime() : 0L;
+-        net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(this, tasks, "entityTick");
++        try {
++            taskPlan.runFromCurrentContext();
++        } finally {
++            for (int i = 0, len = groups.size(); i < len; ++i) {
++                groups.get(i).session = null;
++            }
++        }
+         if (loomBucketDebug) {
+             final long wallMicros = (System.nanoTime() - loomPhaseStart) / 1_000L;
+             final StringBuilder line = new StringBuilder(160);
+@@ -1661,6 +1669,37 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             }
+         }
+     }
++
++    private final class EntityTickGroup implements Runnable {
++        private final java.util.List<Entity> entities;
++        private final java.util.concurrent.atomic.@Nullable AtomicLongArray timings;
++        private final int timingIndex;
++        private net.minecraft.server.threading.RegionTickStaging.@Nullable Session session;
++
++        private EntityTickGroup(final java.util.List<Entity> entities,
++                                final java.util.concurrent.atomic.@Nullable AtomicLongArray timings, final int timingIndex) {
++            this.entities = entities;
++            this.timings = timings;
++            this.timingIndex = timingIndex;
++        }
++
++        @Override
++        public void run() {
++            final var stagingSession = java.util.Objects.requireNonNull(this.session, "Entity tick group executed outside its dispatch");
++            final long start = this.timings == null ? 0L : System.nanoTime();
++            net.minecraft.server.threading.RegionTickStaging.begin(stagingSession);
++            try {
++                for (int i = 0, len = this.entities.size(); i < len; ++i) {
++                    ServerLevel.this.tickOneEntity(this.entities.get(i));
++                }
++            } finally {
++                net.minecraft.server.threading.RegionTickStaging.end();
++                if (this.timings != null) {
++                    this.timings.set(this.timingIndex, System.nanoTime() - start);
++                }
++            }
++        }
++    }
+     // Loom end
+ 
+     public void tickNonPassenger(final Entity entity) {
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index 84fc880783d55c14263eaac4abe5108b1c25b152..384fa8639261749fd99445032d6a3bb19b6ad64e 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -789,19 +789,58 @@ public class TickRegions {
+         final ServerLevel world,
+         final List<RegionBoundTask> tasks,
+         final String stageName
++    ) {
++        prepareRegionBoundTasks(world, tasks, stageName).runFromCurrentContext();
++    }
++
++    /** Prepares the actual safety-bounded layout so simulation callers can choose their serial path. */
++    public static RegionTaskPlan prepareRegionBoundTasks(
++        final ServerLevel world,
++        final List<RegionBoundTask> tasks,
++        final String stageName
+     ) {
+         Objects.requireNonNull(world, "World may not be null");
+         Objects.requireNonNull(tasks, "Tasks may not be null");
+         Objects.requireNonNull(stageName, "Stage name may not be null");
+-        if (tasks.isEmpty()) {
+-            return;
++        final List<RegionBoundTask> ownedTasks = new ArrayList<>(tasks);
++        final List<RegionBoundBucket> buckets = containsMultiChunkRegionTasks(ownedTasks)
++            ? bucketRegionBoundTasksCached(world, ownedTasks, stageName)
++            : bucketRegionBoundTasksByDispatchChunk(world, ownedTasks);
++        return new RegionTaskPlan(world, stageName, buckets);
++    }
++
++    /** Immutable membership; a cached simulation layout is reusable while its tasks remain unchanged. */
++    public static final class RegionTaskPlan {
++        private final ServerLevel world;
++        private final String stageName;
++        private final List<RegionBoundBucket> buckets;
++
++        private RegionTaskPlan(final ServerLevel world, final String stageName, final List<RegionBoundBucket> buckets) {
++            this.world = world;
++            this.stageName = stageName;
++            this.buckets = List.copyOf(buckets);
+         }
+ 
+-        final List<ContextLeaseBounds> suspended = suspendContextStackForWorld(world);
+-        try {
+-            runRegionBoundTasks(world, tasks, stageName);
+-        } finally {
+-            restoreContextStack(world, suspended);
++        public boolean isParallel() {
++            return PARALLEL_SIMULATION_ENABLED && this.buckets.size() > 1;
++        }
++
++        public void runFromCurrentContext() {
++            if (this.buckets.isEmpty()) {
++                return;
++            }
++            final List<ContextLeaseBounds> suspended = suspendContextStackForWorld(this.world);
++            try {
++                if (this.isParallel()) {
++                    dispatchBucketsParticipating(this.buckets.size(), i -> this.buckets.get(i).run(this.stageName), this.stageName);
++                } else {
++                    for (int i = 0, len = this.buckets.size(); i < len; ++i) {
++                        this.buckets.get(i).run(this.stageName);
++                    }
++                }
++            } finally {
++                restoreContextStack(this.world, suspended);
++            }
+         }
+     }
+ 
+@@ -822,26 +861,6 @@ public class TickRegions {
+         );
+     }
+ 
+-    private static void runRegionBoundTasks(
+-        final ServerLevel world,
+-        final List<RegionBoundTask> tasks,
+-        final String stageName
+-    ) {
+-        final boolean containsMultiChunkTasks = containsMultiChunkRegionTasks(tasks);
+-        final List<RegionBoundBucket> buckets = containsMultiChunkTasks
+-            ? bucketRegionBoundTasksCached(world, tasks, stageName)
+-            : bucketRegionBoundTasksByDispatchChunk(world, tasks);
+-
+-        if (PARALLEL_SIMULATION_ENABLED && buckets.size() > 1) {
+-            dispatchBucketsParticipating(buckets.size(), i -> buckets.get(i).run(stageName), stageName);
+-            return;
+-        }
+-
+-        for (int i = 0, len = buckets.size(); i < len; ++i) {
+-            buckets.get(i).run(stageName);
+-        }
+-    }
+-
+     /**
+      * Run independent buckets through a fair cooperative batch. Each executor turn claims one bucket and
+      * requeues the batch at the tail, allowing ready shards from other worlds to interleave instead of one
