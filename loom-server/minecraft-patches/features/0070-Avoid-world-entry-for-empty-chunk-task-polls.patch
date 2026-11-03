@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Tue, 3 Nov 2026 18:31:17 +0200
+Subject: [PATCH] Avoid world entry for empty chunk task polls
+
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
+index 911a2753f7090cc8d4283d3957df12dd984c7f01..9bc9d4d1d644e58d1261c37666f1afce0123ad7f 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkHolderManager.java
+@@ -1453,6 +1453,15 @@ public final class ChunkHolderManager {
+         BLOCK_TICKET_UPDATES.set(before);
+     }
+ 
++    public boolean hasPendingTicketUpdates() {
++        if (BLOCK_TICKET_UPDATES.get() == Boolean.TRUE || this.ticketLevelPropagator.hasPendingUpdates()
++            || !this.offThreadPendingFullLoadUpdate.isEmpty()) {
++            return true;
++        }
++        // Only the serial queue owner may inspect it. Other callers keep the normal owner-entry path.
++        return !canProcessPendingFullStatusUpdates(this.world) || !this.pendingFullLoadUpdate.isEmpty();
++    }
++
+     public boolean processTicketUpdates() {
+         if (BLOCK_TICKET_UPDATES.get() == Boolean.TRUE) {
+             throw new IllegalStateException("Cannot update ticket level while unloading chunks or updating entity manager");
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index 4e4a0ee8ff6881b03f44641e380286952a54da36..cc93959c7d4bf3d94893e9b33a3267df90ec8865 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -1064,8 +1064,21 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+             final long traceStarted = net.minecraft.server.threading.LoomProfileTrace.ENABLED ? System.nanoTime() : 0L;
+             boolean didWork = false;
+             final ServerChunkCache serverChunkCache = ServerChunkCache.this;
+-            final net.minecraft.server.threading.TickRegions.RegionContext chunkTaskContext =
+-                net.minecraft.server.threading.TickRegions.pushLevelContext(serverChunkCache.level);
++            final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler scheduler =
++                ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)serverChunkCache.level).moonrise$getChunkTaskScheduler();
++            if (!this.hasPendingTasks() && !scheduler.hasPendingMainThreadTasks()
++                && !scheduler.chunkHolderManager.hasPendingTicketUpdates()) {
++                net.minecraft.server.threading.LoomProfileTrace.chunkPoll(traceStarted, false);
++                return false;
++            }
++            final boolean ownsWorld =
++                net.minecraft.server.threading.runtime.OwnerDomainExecutor.currentDomain()
++                    == net.minecraft.server.threading.runtime.OwnerDomainExecutor.Domain.REGION
++                && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(
++                    serverChunkCache.level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE
++                );
++            final net.minecraft.server.threading.TickRegions.RegionContext chunkTaskContext = ownsWorld ? null
++                : net.minecraft.server.threading.TickRegions.pushLevelContext(serverChunkCache.level);
+             try {
+                 if (serverChunkCache.runDistanceManagerUpdates()) {
+                     didWork = true;
+@@ -1076,7 +1089,9 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+                 didWork = super.pollTask() | ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)serverChunkCache.level).moonrise$getChunkTaskScheduler().executeMainThreadTask(); // Paper - rewrite chunk system
+                 return didWork;
+             } finally {
+-                net.minecraft.server.threading.TickRegions.popContext(chunkTaskContext);
++                if (chunkTaskContext != null) {
++                    net.minecraft.server.threading.TickRegions.popContext(chunkTaskContext);
++                }
+                 net.minecraft.server.threading.LoomProfileTrace.chunkPoll(traceStarted, didWork);
+             }
+         }
+diff --git a/net/minecraft/util/thread/BlockableEventLoop.java b/net/minecraft/util/thread/BlockableEventLoop.java
+index 96411b3cebe995171ac2d9e47aeec52cfbe8e343..172d843d525a0c9c7546c09c7b2421cd82bad46e 100644
+--- a/net/minecraft/util/thread/BlockableEventLoop.java
++++ b/net/minecraft/util/thread/BlockableEventLoop.java
+@@ -148,6 +148,10 @@ public abstract class BlockableEventLoop<R extends Runnable> implements Executor
+         return !this.isSameThread();
+     }
+ 
++    public boolean hasPendingTasks() {
++        return !this.pendingRunnables.isEmpty();
++    }
++
+     public int getPendingTasksCount() {
+         return this.pendingRunnables.size();
+     }
