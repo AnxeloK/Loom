@@ -21,7 +21,7 @@ index fff7a796a61542213bdaa417d44e25cd05f7e774..e61747c3d17fb422ea83479c3812a49c
          final TrackedPlayer[] newTrackers = new TrackedPlayer[TOTAL_MAP_TYPES];
          if (this.players.putIfAbsent(player, newTrackers) != null) {
 diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
-index 38c46eaed79def0e5287b4f4a13d29c244982a8d..8b69e0772042e9d3f948ca52976e2feb0d42db52 100644
+index 38c46eaed79def0e5287b4f4a13d29c244982a8d..b3d968097d7e2f552906d84051a81271f1772f10 100644
 --- a/net/minecraft/server/level/ChunkMap.java
 +++ b/net/minecraft/server/level/ChunkMap.java
 @@ -11,6 +11,7 @@ import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
@@ -50,7 +50,7 @@ index 38c46eaed79def0e5287b4f4a13d29c244982a8d..8b69e0772042e9d3f948ca52976e2feb
  
          private SpawningChunkFilterPlan(final ChunkMap chunkMap, final LevelChunk[] chunks, final int size) {
              this.chunkMap = chunkMap;
-@@ -871,6 +876,76 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+@@ -871,6 +876,99 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
              return this.tasks.size() > 1;
          }
  
@@ -63,6 +63,30 @@ index 38c46eaed79def0e5287b4f4a13d29c244982a8d..8b69e0772042e9d3f948ca52976e2feb
 +                    Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
 +                return false;
 +            }
++            final ServerPlayer[] players = this.chunkMap.level.moonrise$getNearbyPlayers().getTrackedPlayersSnapshot();
++            // Overlapping players can revisit more coordinates than the indexed chunk scan examines.
++            // Keep that scan when enumerating the eligible neighborhoods would do more work.
++            long estimatedVisits = 0L;
++            for (final ServerPlayer player : players) {
++                final var event = player.playerNaturallySpawnedEvent;
++                if (event == null || event.isCancelled() || player.isSpectator()) {
++                    continue;
++                }
++                final int radius = Math.abs((int)event.getSpawnRadius());
++                if (radius > PLAYER_RADIUS_CHUNKS) {
++                    estimatedVisits += this.sourceChunks.length;
++                } else if (radius != 0) {
++                    final Vec3 position = player.position();
++                    if (!Double.isFinite(position.x) || !Double.isFinite(position.z)) {
++                        continue;
++                    }
++                    final int diameter = radius * 2 + 1;
++                    estimatedVisits += (long)diameter * diameter;
++                }
++                if (estimatedVisits > this.sourceChunks.length) {
++                    return false;
++                }
++            }
 +            if (this.chunkIndices == null) {
 +                this.chunkIndices = new Long2IntOpenHashMap(this.sourceChunks.length);
 +                this.chunkIndices.defaultReturnValue(-1);
@@ -72,7 +96,6 @@ index 38c46eaed79def0e5287b4f4a13d29c244982a8d..8b69e0772042e9d3f948ca52976e2feb
 +                }
 +            }
 +            java.util.Arrays.fill(this.included, false);
-+            final ServerPlayer[] players = this.chunkMap.level.moonrise$getNearbyPlayers().getTrackedPlayersSnapshot();
 +            for (final ServerPlayer player : players) {
 +                final var event = player.playerNaturallySpawnedEvent;
 +                if (event == null || event.isCancelled() || player.isSpectator()) {

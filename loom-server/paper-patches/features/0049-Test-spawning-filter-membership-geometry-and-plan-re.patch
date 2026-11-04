@@ -6,10 +6,10 @@ Subject: [PATCH] Test spawning filter membership geometry and plan reuse
 
 diff --git a/src/test/java/net/minecraft/server/level/SpawningChunkTraversalTest.java b/src/test/java/net/minecraft/server/level/SpawningChunkTraversalTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..97a7420dd1b32aa9fd3fe46c24933d8f5fc75be5
+index 0000000000000000000000000000000000000000..5e91f88cba627cd9a0f1e5845d6b643d8a8c4cf7
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/level/SpawningChunkTraversalTest.java
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,256 @@
 +package net.minecraft.server.level;
 +
 +import ca.spottedleaf.moonrise.common.PlatformHooks;
@@ -47,9 +47,19 @@ index 0000000000000000000000000000000000000000..97a7420dd1b32aa9fd3fe46c24933d8f
 +    }
 +
 +    @Test
-+    void denseTraversalKeepsMembershipAndSourceOrderWithoutRepeatedPositionReads() throws Exception {
++    void crowdedPlayersKeepMembershipAndSourceOrder() throws Exception {
 +        try (Fixture f = new Fixture()) {
 +            for (int n=0;n<69;n++) f.player((n%8)*32+3, (n/8)*32+5, 8);
++            f.grid(-10, 28);
++            f.shuffle(17);
++            assertEquals(f.expected(),f.collect());
++        }
++    }
++
++    @Test
++    void smallerPlayerNeighborhoodsKeepPositionReadsBounded() throws Exception {
++        try (Fixture f = new Fixture()) {
++            for (int n=0;n<3;n++) f.player(n*32+3, n*32+5, 8);
 +            f.grid(-10, 28);
 +            f.shuffle(17);
 +            for (State state:f.states) clearInvocations(state.player);
@@ -57,7 +67,25 @@ index 0000000000000000000000000000000000000000..97a7420dd1b32aa9fd3fe46c24933d8f
 +            long reads=f.states.stream().flatMap(s->mockingDetails(s.player).getInvocations().stream())
 +                .filter(i->i.getMethod().getName().equals("position")).count();
 +            assertEquals(f.expected(),actual);
-+            assertTrue(reads<=f.states.size()*2L,"Dense filtering repeatedly reads player positions: "+reads);
++            assertTrue(reads<=f.states.size()*2L,"Player traversal repeatedly reads positions: "+reads);
++        }
++    }
++
++    @Test
++    void inactivePlayersDoNotForceTheChunkScan() throws Exception {
++        try (Fixture f = new Fixture()) {
++            for (int n=0;n<69;n++) {
++                State state=f.player((n%8)*32+3, (n/8)*32+5, 8);
++                if ((n&1)==0) state.event.setCancelled(true);
++                else state.spectator=true;
++            }
++            State active=f.player(3,5,8);
++            f.grid(-10,28);
++            clearInvocations(active.player);
++            assertEquals(f.expected(),f.collect());
++            long reads=mockingDetails(active.player).getInvocations().stream()
++                .filter(i->i.getMethod().getName().equals("position")).count();
++            assertTrue(reads<=2,"Inactive players caused repeated active-player reads: "+reads);
 +        }
 +    }
 +
