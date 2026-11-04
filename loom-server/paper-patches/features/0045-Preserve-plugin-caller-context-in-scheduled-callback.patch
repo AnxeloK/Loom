@@ -1,0 +1,303 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 02:00:19 +0200
+Subject: [PATCH] Preserve plugin caller context in scheduled callbacks
+
+
+diff --git a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaEntityScheduler.java b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaEntityScheduler.java
+index 811b8efd155540beac19b70afa1885bff570cd3e..02e82f3f4e889d01241f49bdb3163c5b666f8e8c 100644
+--- a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaEntityScheduler.java
++++ b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaEntityScheduler.java
+@@ -1,5 +1,7 @@
+ package io.papermc.paper.threadedregions.scheduler;
+ 
++import io.papermc.paper.plugin.manager.compat.CompatibilityRuntimeContext;
++
+ import ca.spottedleaf.concurrentutil.util.ConcurrentUtil;
+ import net.minecraft.world.entity.Entity;
+ import org.bukkit.craftbukkit.entity.CraftEntity;
+@@ -28,7 +30,9 @@ public final class FoliaEntityScheduler implements EntityScheduler {
+                 // don't execute if the plugin is disabled
+                 return;
+             }
+-            try {
++            try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(
++                plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false, "scheduler:entity-task"
++            )) {
+                 runnable.run();
+             } catch (final Throwable throwable) {
+                 plugin.getLogger().log(Level.WARNING, "Entity task for " + plugin.getDescription().getFullName() + " generated an exception", throwable);
+@@ -162,7 +166,9 @@ public final class FoliaEntityScheduler implements EntityScheduler {
+ 
+             final boolean retired = entity.isRemoved();
+ 
+-            try {
++            try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(
++                this.plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false, "scheduler:entity-task"
++            )) {
+                 if (!retired) {
+                     this.run.accept(this);
+                 } else {
+diff --git a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaGlobalRegionScheduler.java b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaGlobalRegionScheduler.java
+index 14ffbcb66006878eacf310547dad53718f8308eb..e6d38e5a0b456b43dd6c38cd90ee3163204a49e5 100644
+--- a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaGlobalRegionScheduler.java
++++ b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaGlobalRegionScheduler.java
+@@ -1,5 +1,7 @@
+ package io.papermc.paper.threadedregions.scheduler;
+ 
++import io.papermc.paper.plugin.manager.compat.CompatibilityRuntimeContext;
++
+ import ca.spottedleaf.concurrentutil.util.ConcurrentUtil;
+ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+ import org.bukkit.plugin.IllegalPluginAccessException;
+@@ -174,7 +176,9 @@ public class FoliaGlobalRegionScheduler implements GlobalRegionScheduler {
+                 return;
+             }
+ 
+-            try {
++            try (CompatibilityRuntimeContext.Scope ignored = CompatibilityRuntimeContext.enter(
++                this.plugin, CompatibilityRuntimeContext.syntheticTransactionId(), false, "scheduler:global-task"
++            )) {
+                 this.run.accept(this);
+             } catch (final Throwable throwable) {
+                 this.plugin.getLogger().log(Level.WARNING, "Global task for " + this.plugin.getDescription().getFullName() + " generated an exception", throwable);
+diff --git a/src/test/java/io/papermc/paper/threadedregions/scheduler/SchedulerPluginContextTest.java b/src/test/java/io/papermc/paper/threadedregions/scheduler/SchedulerPluginContextTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ebd74d71b8b16eb9afd5487024b853de1bca6c35
+--- /dev/null
++++ b/src/test/java/io/papermc/paper/threadedregions/scheduler/SchedulerPluginContextTest.java
+@@ -0,0 +1,234 @@
++package io.papermc.paper.threadedregions.scheduler;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import io.papermc.paper.plugin.manager.compat.CompatibilityKernel;
++import io.papermc.paper.plugin.manager.compat.CompatibilityRuntimeContext;
++import io.papermc.paper.plugin.manager.compat.CompatibilityServicesManager;
++import io.papermc.paper.util.StackWalkerUtil;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.function.Consumer;
++import java.util.logging.Logger;
++import net.minecraft.world.entity.Entity;
++import org.bukkit.craftbukkit.entity.CraftEntity;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.PluginDescriptionFile;
++import org.bukkit.plugin.ServicePriority;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.ValueSource;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class SchedulerPluginContextTest {
++
++    @ParameterizedTest
++    @ValueSource(booleans = {false, true})
++    void globalCallbacksUseTheirPluginAndRestoreTheEnclosingCaller(boolean execute) {
++        Plugin plugin = plugin("TaskOwner");
++        Plugin parent = plugin("EnclosingCaller");
++        FoliaGlobalRegionScheduler scheduler = new FoliaGlobalRegionScheduler();
++        AtomicReference<Plugin> observed = new AtomicReference<>();
++        Runnable callback = () -> observed.set(CompatibilityRuntimeContext.currentPlugin());
++        if (execute) scheduler.execute(plugin, callback);
++        else scheduler.run(plugin, task -> callback.run());
++
++        try (var ignored = CompatibilityRuntimeContext.enter(parent, -123L, false)) {
++            scheduler.tick();
++            assertSame(plugin, observed.get());
++            assertSame(parent, CompatibilityRuntimeContext.currentPlugin());
++            assertEquals(-123L, CompatibilityRuntimeContext.currentTransactionId());
++        }
++        assertNull(CompatibilityRuntimeContext.currentPlugin());
++    }
++
++    @Test
++    void repeatedGlobalCallbacksHaveSeparateTransactionsAndCancellationStillStopsThem() {
++        Plugin plugin = plugin("RepeatingOwner");
++        FoliaGlobalRegionScheduler scheduler = new FoliaGlobalRegionScheduler();
++        List<Plugin> callers = new ArrayList<>();
++        List<Long> transactions = new ArrayList<>();
++        ScheduledTask task = scheduler.runAtFixedRate(plugin, current -> {
++            callers.add(CompatibilityRuntimeContext.currentPlugin());
++            transactions.add(CompatibilityRuntimeContext.currentTransactionId());
++        }, 1L, 1L);
++        scheduler.tick();
++        scheduler.tick();
++        task.cancel();
++        scheduler.tick();
++        assertEquals(List.of(plugin, plugin), callers);
++        assertEquals(2, transactions.size());
++        assertNotEquals(transactions.get(0), transactions.get(1));
++        assertNull(CompatibilityRuntimeContext.currentPlugin());
++    }
++
++    @Test
++    void globalFailureRestoresTheCallerBeforeTheNextTask() {
++        Plugin first = plugin("FailingOwner");
++        Plugin second = plugin("FollowingOwner");
++        FoliaGlobalRegionScheduler scheduler = new FoliaGlobalRegionScheduler();
++        List<Plugin> callers = new ArrayList<>();
++        scheduler.run(first, task -> {
++            callers.add(CompatibilityRuntimeContext.currentPlugin());
++            throw new IllegalStateException("expected task failure");
++        });
++        scheduler.run(second, task -> callers.add(CompatibilityRuntimeContext.currentPlugin()));
++        scheduler.tick();
++        assertEquals(List.of(first, second), callers);
++        assertNull(CompatibilityRuntimeContext.currentPlugin());
++    }
++
++    @Test
++    void scheduledServiceCallsUseTheKnownCallerWithoutWalkingTheStack() {
++        Plugin plugin = plugin("ServiceCaller");
++        Plugin provider = plugin("ServiceProvider");
++        CompatibilityServicesManager services = new CompatibilityServicesManager(new CompatibilityKernel());
++        services.register(EchoService.class, () -> "called", provider, ServicePriority.Normal);
++        FoliaGlobalRegionScheduler scheduler = new FoliaGlobalRegionScheduler();
++        AtomicReference<String> result = new AtomicReference<>();
++        AtomicReference<Plugin> restored = new AtomicReference<>();
++        try (var stackWalker = mockStatic(StackWalkerUtil.class)) {
++            scheduler.run(plugin, task -> {
++                result.set(services.load(EchoService.class).call());
++                restored.set(CompatibilityRuntimeContext.currentPlugin());
++            });
++            scheduler.tick();
++            assertEquals("called", result.get());
++            assertSame(plugin, restored.get());
++            stackWalker.verifyNoInteractions();
++        }
++        assertNull(CompatibilityRuntimeContext.currentPlugin());
++    }
++
++    @ParameterizedTest
++    @ValueSource(booleans = {false, true})
++    void cancelledGlobalTasksDoNotEnterOrLeakAPluginContext(boolean cancel) {
++        Plugin plugin = plugin("DisabledOwner");
++        FoliaGlobalRegionScheduler scheduler = new FoliaGlobalRegionScheduler();
++        AtomicInteger calls = new AtomicInteger();
++        ScheduledTask task = scheduler.run(plugin, current -> calls.incrementAndGet());
++        if (cancel) task.cancel();
++        else scheduler.cancelTasks(plugin);
++        scheduler.tick();
++        assertEquals(0, calls.get());
++        assertNull(CompatibilityRuntimeContext.currentPlugin());
++    }
++
++    @ParameterizedTest
++    @ValueSource(strings = {"execute", "run", "repeat"})
++    void entityCallbacksUseTheirPluginAndRestoreTheEnclosingCaller(String shape) throws Exception {
++        EntityFixture f = new EntityFixture();
++        Plugin parent = plugin("EnclosingCaller");
++        AtomicReference<Plugin> observed = new AtomicReference<>();
++        f.submit(shape, () -> observed.set(CompatibilityRuntimeContext.currentPlugin()), () -> fail("Unexpected retirement"));
++        try (var ignored = CompatibilityRuntimeContext.enter(parent, -123L, false)) {
++            f.run(false);
++            assertSame(f.plugin, observed.get());
++            assertSame(parent, CompatibilityRuntimeContext.currentPlugin());
++            assertEquals(-123L, CompatibilityRuntimeContext.currentTransactionId());
++        }
++        assertNull(CompatibilityRuntimeContext.currentPlugin());
++    }
++
++    @ParameterizedTest
++    @ValueSource(strings = {"execute", "run", "repeat"})
++    void entityRetirementUsesThePluginAndDoesNotRunTheLiveCallback(String shape) throws Exception {
++        EntityFixture f = new EntityFixture();
++        AtomicInteger calls = new AtomicInteger();
++        AtomicReference<Plugin> retiredCaller = new AtomicReference<>();
++        f.submit(shape, calls::incrementAndGet, () -> retiredCaller.set(CompatibilityRuntimeContext.currentPlugin()));
++        f.run(true);
++        assertEquals(0, calls.get());
++        assertSame(f.plugin, retiredCaller.get());
++        assertNull(CompatibilityRuntimeContext.currentPlugin());
++    }
++
++    @ParameterizedTest
++    @ValueSource(strings = {"execute", "run", "repeat"})
++    void entityFailureStillClosesTheScope(String shape) throws Exception {
++        EntityFixture f = new EntityFixture();
++        AtomicReference<Plugin> observed = new AtomicReference<>();
++        f.submit(shape, () -> {
++            observed.set(CompatibilityRuntimeContext.currentPlugin());
++            throw new IllegalStateException("expected task failure");
++        }, null);
++        f.run(false);
++        assertSame(f.plugin, observed.get());
++        assertNull(CompatibilityRuntimeContext.currentPlugin());
++    }
++
++    @Test
++    void cancelledEntityTaskDoesNotRunOrEnterThePlugin() throws Exception {
++        EntityFixture f = new EntityFixture();
++        AtomicInteger calls = new AtomicInteger();
++        ScheduledTask task = f.scheduler.run(f.plugin, current -> calls.incrementAndGet(), null);
++        assertNotNull(task);
++        task.cancel();
++        f.run(false);
++        assertEquals(0, calls.get());
++        assertNull(CompatibilityRuntimeContext.currentPlugin());
++    }
++
++    private static final class EntityFixture {
++        final Plugin plugin = plugin("EntityOwner");
++        final CraftEntity entity = mock(CraftEntity.class);
++        final Entity handle = mock(Entity.class);
++        final FoliaEntityScheduler scheduler = new FoliaEntityScheduler(entity);
++        Consumer<Entity> live;
++        Consumer<Entity> retired;
++
++        @SuppressWarnings("unchecked")
++        EntityFixture() throws Exception {
++            var nativeScheduler = mock(io.papermc.paper.threadedregions.EntityScheduler.class);
++            // Replace the native scheduling boundary; callbacks are driven explicitly without timing.
++            var field = CraftEntity.class.getField("taskScheduler");
++            field.setAccessible(true);
++            field.set(entity, nativeScheduler);
++            when(nativeScheduler.schedule(any(), nullable(Consumer.class), anyLong())).thenAnswer(call -> {
++                this.live = call.getArgument(0);
++                this.retired = call.getArgument(1);
++                return true;
++            });
++        }
++
++        void submit(String shape, Runnable live, Runnable retired) {
++            switch (shape) {
++                case "execute" -> assertTrue(scheduler.execute(plugin, live, retired, 1L));
++                case "run" -> assertNotNull(scheduler.run(plugin, task -> live.run(), retired));
++                case "repeat" -> assertNotNull(scheduler.runAtFixedRate(plugin, task -> live.run(), retired, 1L, 1L));
++                default -> throw new IllegalArgumentException(shape);
++            }
++        }
++
++        void run(boolean retire) {
++            when(handle.isRemoved()).thenReturn(retire);
++            (retire ? retired : live).accept(handle);
++        }
++    }
++
++    private static Plugin plugin(String name) {
++        PluginMeta meta = mock(PluginMeta.class);
++        when(meta.getName()).thenReturn(name);
++        when(meta.getMainClass()).thenReturn("test." + name);
++        when(meta.getPluginDependencies()).thenReturn(List.of());
++        when(meta.getPluginSoftDependencies()).thenReturn(List.of());
++        when(meta.getVersion()).thenReturn("1.0");
++        Plugin plugin = mock(Plugin.class);
++        when(plugin.getPluginMeta()).thenReturn(meta);
++        when(plugin.getDescription()).thenReturn(new PluginDescriptionFile(name, "1.0", "test." + name));
++        when(plugin.getLogger()).thenReturn(mock(Logger.class));
++        when(plugin.isEnabled()).thenReturn(true);
++        return plugin;
++    }
++
++    @FunctionalInterface
++    public interface EchoService {
++        String call();
++    }
++}
