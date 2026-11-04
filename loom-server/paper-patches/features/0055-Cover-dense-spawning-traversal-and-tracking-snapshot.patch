@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 20:59:29 +0200
+Subject: [PATCH] Cover dense spawning traversal and tracking snapshots
+
+
+diff --git a/src/test/java/net/minecraft/server/level/SpawningChunkTraversalTest.java b/src/test/java/net/minecraft/server/level/SpawningChunkTraversalTest.java
+index 5e91f88cba627cd9a0f1e5845d6b643d8a8c4cf7..b9ff9847c2770960e0cc6447f2390198ec8b8887 100644
+--- a/src/test/java/net/minecraft/server/level/SpawningChunkTraversalTest.java
++++ b/src/test/java/net/minecraft/server/level/SpawningChunkTraversalTest.java
+@@ -44,6 +44,53 @@ class SpawningChunkTraversalTest {
+         }
+     }
+ 
++    @Test
++    void crowdedPlayersReadPositionsOncePerPass() throws Exception {
++        try (Fixture f = new Fixture()) {
++            for (int n = 0; n < 69; ++n) f.player((n % 8) * 32 + 3, (n / 8) * 32 + 5, 8);
++            f.grid(-10, 28);
++            f.shuffle(17);
++            final List<LevelChunk> expected = f.expected();
++            for (State state : f.states) clearInvocations(state.player);
++            assertEquals(expected, f.collect());
++            final long reads = f.states.stream().flatMap(s -> mockingDetails(s.player).getInvocations().stream())
++                .filter(i -> i.getMethod().getName().equals("position")).count();
++            assertTrue(reads <= f.states.size(), "Dense filtering repeated player position reads: " + reads);
++        }
++    }
++
++    @Test
++    void denseFilteringUsesTrackingBoundsBeforeMovementCatchesUp() throws Exception {
++        try (Fixture f = new Fixture()) {
++            for (int n = 0; n < 8; ++n) f.player(n * 16, n * 16, 8);
++            f.grid(-16, 24);
++            for (State state : f.states) {
++                state.position = state.position.add(256, 0, -128);
++                state.event.setSpawnRadius((byte)32);
++            }
++            assertEquals(f.expected(), f.collect());
++        }
++    }
++
++    @Test
++    void spawnRangeSnapshotsRetainTheirOriginalBounds() throws Exception {
++        try (Fixture f = new Fixture()) {
++            State state = f.player(0, 0, 8);
++            final NearbyPlayers.SpawnRange original = f.nearby.getSpawnRangesSnapshot()[0];
++            state.position = new Vec3(256, 64, -128);
++            f.nearby.tickPlayer(state.player);
++            final NearbyPlayers.SpawnRange updated = f.nearby.getSpawnRangesSnapshot()[0];
++            assertSame(state.player, original.player());
++            assertEquals(0, original.chunkX());
++            assertEquals(0, original.chunkZ());
++            assertEquals(16, updated.chunkX());
++            assertEquals(-8, updated.chunkZ());
++            assertEquals(8, updated.radius());
++            f.nearby.removePlayer(state.player);
++            assertEquals(0, f.nearby.getSpawnRangesSnapshot().length);
++        }
++    }
++
+     @Test
+     void smallerPlayerNeighborhoodsKeepPositionReadsBounded() throws Exception {
+         try (Fixture f = new Fixture()) {

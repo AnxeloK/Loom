@@ -1,0 +1,173 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 20:59:28 +0200
+Subject: [PATCH] Index dense spawning chunks by tracked player bounds
+
+
+diff --git a/ca/spottedleaf/moonrise/common/misc/NearbyPlayers.java b/ca/spottedleaf/moonrise/common/misc/NearbyPlayers.java
+index e61747c3d17fb422ea83479c3812a49c164a3807..bb1709065b156589b697ddee4056253eec48eb4d 100644
+--- a/ca/spottedleaf/moonrise/common/misc/NearbyPlayers.java
++++ b/ca/spottedleaf/moonrise/common/misc/NearbyPlayers.java
+@@ -77,6 +77,21 @@ public final class NearbyPlayers {
+         return this.players.keySet().toArray(new ServerPlayer[0]);
+     }
+ 
++    /** Detached bounds from the same trackers that maintain SPAWN_RANGE membership. Requires the world owner. */
++    public SpawnRange[] getSpawnRangesSnapshot() {
++        final ArrayList<SpawnRange> ranges = new ArrayList<>(this.players.size());
++        for (final TrackedPlayer[] trackers : this.players.values()) {
++            final TrackedPlayer tracker = trackers[NearbyMapType.SPAWN_RANGE.ordinal()];
++            if (tracker != null && tracker.getLastDistance() != SingleUserAreaMap.NOT_SET) {
++                ranges.add(new SpawnRange(tracker.getParameter(), tracker.getLastChunkX(), tracker.getLastChunkZ(), tracker.getLastDistance()));
++            }
++        }
++        return ranges.toArray(new SpawnRange[0]);
++    }
++
++    public record SpawnRange(ServerPlayer player, int chunkX, int chunkZ, int radius) {
++    }
++
+     public void addPlayer(final ServerPlayer player) {
+         final TrackedPlayer[] newTrackers = new TrackedPlayer[TOTAL_MAP_TYPES];
+         if (this.players.putIfAbsent(player, newTrackers) != null) {
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+index b3d968097d7e2f552906d84051a81271f1772f10..07beca9816209bbc7bf8fecffb7c8ea443200d60 100644
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -761,6 +761,9 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+         if (plan == null || !plan.matches(raw, size)) {
+             this.spawningChunkFilterPlan = plan = new SpawningChunkFilterPlan(this, raw, size);
+         }
++        if (plan.collectDense(output)) {
++            return;
++        }
+         if (plan.isParallel()) {
+             plan.collect(output);
+             return;
+@@ -792,11 +795,13 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+         private final boolean[] included;
+         private final List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks;
+         private @Nullable Long2IntOpenHashMap chunkIndices;
++        private final @Nullable DenseSpawningChunks denseChunks;
+ 
+         private SpawningChunkFilterPlan(final ChunkMap chunkMap, final LevelChunk[] chunks, final int size) {
+             this.chunkMap = chunkMap;
+             this.sourceChunks = java.util.Arrays.copyOf(chunks, size);
+             this.included = new boolean[size];
++            this.denseChunks = DenseSpawningChunks.create(this.sourceChunks);
+             if (size <= 1) {
+                 this.tasks = List.of();
+                 return;
+@@ -876,6 +881,112 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+             return this.tasks.size() > 1;
+         }
+ 
++        private boolean collectDense(final List<LevelChunk> output) {
++            if (this.denseChunks == null
++                || !net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(this.chunkMap.level,
++                    Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)
++                || !net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(this.chunkMap.level,
++                    Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
++                return false;
++            }
++            java.util.Arrays.fill(this.included, false);
++            for (final var tracked : this.chunkMap.level.moonrise$getNearbyPlayers().getSpawnRangesSnapshot()) {
++                final ServerPlayer player = tracked.player();
++                final var event = player.playerNaturallySpawnedEvent;
++                if (event == null || event.isCancelled() || player.isSpectator()) {
++                    continue;
++                }
++                final Vec3 position = player.position();
++                if (!Double.isFinite(position.x) || !Double.isFinite(position.z)) {
++                    continue;
++                }
++                final int blocks = event.getSpawnRadius() << 4;
++                this.denseChunks.include(tracked, position, (double)(blocks * blocks), this.included);
++            }
++            for (int index = 0; index < this.sourceChunks.length; ++index) {
++                if (this.included[index]) {
++                    output.add(this.sourceChunks[index]);
++                }
++            }
++            return true;
++        }
++
++        private static final class DenseSpawningChunks {
++            private static final int MAX_CELLS = 65_536;
++            private final int minX;
++            private final int minZ;
++            private final int width;
++            private final int height;
++            private final int[] sourceIndices;
++
++            private DenseSpawningChunks(final int minX, final int minZ, final int width, final int height) {
++                this.minX = minX;
++                this.minZ = minZ;
++                this.width = width;
++                this.height = height;
++                this.sourceIndices = new int[width * height];
++                java.util.Arrays.fill(this.sourceIndices, -1);
++            }
++
++            private static @Nullable DenseSpawningChunks create(final LevelChunk[] chunks) {
++                if (chunks.length < 578) {
++                    return null;
++                }
++                int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
++                int maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
++                for (final LevelChunk chunk : chunks) {
++                    minX = Math.min(minX, chunk.locX);
++                    minZ = Math.min(minZ, chunk.locZ);
++                    maxX = Math.max(maxX, chunk.locX);
++                    maxZ = Math.max(maxZ, chunk.locZ);
++                }
++                final long width = (long)maxX - minX + 1L;
++                final long height = (long)maxZ - minZ + 1L;
++                if (width > MAX_CELLS || height > MAX_CELLS || width * height > MAX_CELLS
++                    || width * height > chunks.length * 2L) {
++                    return null;
++                }
++                final DenseSpawningChunks grid = new DenseSpawningChunks(minX, minZ, (int)width, (int)height);
++                for (int index = 0; index < chunks.length; ++index) {
++                    final LevelChunk chunk = chunks[index];
++                    final int cell = (chunk.locZ - minZ) * grid.width + chunk.locX - minX;
++                    if (grid.sourceIndices[cell] != -1) {
++                        return null;
++                    }
++                    grid.sourceIndices[cell] = index;
++                }
++                return grid;
++            }
++
++            private void include(
++                final ca.spottedleaf.moonrise.common.misc.NearbyPlayers.SpawnRange tracked,
++                final Vec3 position, final double range, final boolean[] included
++            ) {
++                // Membership follows the last tracking update, while distance uses the current position.
++                // Those centres can differ during movement or transfer; neither can replace the other.
++                final long minX = Math.max(this.minX, (long)tracked.chunkX() - tracked.radius());
++                final long maxX = Math.min((long)this.minX + this.width - 1L, (long)tracked.chunkX() + tracked.radius());
++                final long minZ = Math.max(this.minZ, (long)tracked.chunkZ() - tracked.radius());
++                final long maxZ = Math.min((long)this.minZ + this.height - 1L, (long)tracked.chunkZ() + tracked.radius());
++                for (long z = minZ; z <= maxZ; ++z) {
++                    final double dz = (double)((int)z << 4) + 8.0 - position.z;
++                    if (dz * dz >= range) {
++                        continue;
++                    }
++                    final int row = (int)(z - this.minZ) * this.width;
++                    for (long x = minX; x <= maxX; ++x) {
++                        final int index = this.sourceIndices[row + (int)(x - this.minX)];
++                        if (index >= 0 && !included[index]) {
++                            final double dx = (double)((int)x << 4) + 8.0 - position.x;
++                            if (dx * dx + dz * dz < range) {
++                                included[index] = true;
++                            }
++                        }
++                    }
++                }
++            }
++        }
++
+         private boolean collectByPlayer(final List<LevelChunk> output) {
+             final int width = PLAYER_RADIUS_CHUNKS * 2 + 1;
+             if (this.sourceChunks.length < width * width * 2
