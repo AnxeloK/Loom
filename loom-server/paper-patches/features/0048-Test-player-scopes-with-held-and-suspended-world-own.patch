@@ -1,0 +1,192 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 04:43:54 +0200
+Subject: [PATCH] Test player scopes with held and suspended world owners
+
+
+diff --git a/src/test/java/net/minecraft/server/threading/runtime/PlayerWorldOwnerContextTest.java b/src/test/java/net/minecraft/server/threading/runtime/PlayerWorldOwnerContextTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a60ddc472299a46367a1683972307a9100a02afa
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/runtime/PlayerWorldOwnerContextTest.java
+@@ -0,0 +1,180 @@
++package net.minecraft.server.threading.runtime;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import java.lang.reflect.Field;
++import java.util.UUID;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.core.BlockPos;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import org.spigotmc.AsyncCatcher;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class PlayerWorldOwnerContextTest {
++    @BeforeAll
++    static void initializeTypes() {
++        mock(MinecraftServer.class);
++        mock(ServerLevel.class);
++        mock(ServerPlayer.class);
++    }
++
++    @Test
++    void nestedPlayerRetainsItsActivelyHeldFullWorldOwner() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> f.full(() -> f.player(() -> {
++            assertEquals(OwnerDomainExecutor.Domain.PLAYER, OwnerDomainExecutor.currentDomain());
++            assertFalse(OwnerDomainExecutor.isGlobalOwner(f.server));
++            assertTrue(OwnerDomainExecutor.isCurrentRegionOwnerForLevel(f.world));
++        })));
++    }
++
++    @Test
++    void worldEntityAccessUsesTheHeldOwnerInsidePlayerSimulation() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> f.full(() -> f.player(() ->
++            AsyncCatcher.catchOp("Chunk getEntities call", f.world)
++        )));
++    }
++
++    @Test
++    void boundedPlayerOwnsItsPositionButNotTheWholeWorld() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            var context = TickRegions.pushRegionContext(f.world, -1, -1, 1, 1);
++            try {
++                f.player(() -> {
++                    f.assertRejected(f.world);
++                    AsyncCatcher.catchOp("bounded player position", f.world, BlockPos.ZERO);
++                });
++            } finally { TickRegions.popContext(context); }
++        });
++    }
++
++    @Test
++    void heldWorldDoesNotGrantAnotherWorld() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> f.full(() -> f.player(() -> f.assertRejected(f.other))));
++    }
++
++    @Test
++    void playerTokenAloneDoesNotGrantWorldAccess() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            try (var ignored = OwnerDomainExecutor.enter(OwnerDomainExecutor.player(f.actor, "bare-player-test"))) {
++                assertNull(TickRegions.currentContext());
++                f.assertRejected(f.world);
++            }
++        });
++    }
++
++    @Test
++    void declaredRegionWithoutItsPhysicalLeaseDoesNotGrantNestedPlayerAccess() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            try (var ignored = OwnerDomainExecutor.enterRegion(f.world, Integer.MIN_VALUE, Integer.MIN_VALUE,
++                    Integer.MAX_VALUE, Integer.MAX_VALUE, "declared-world-test")) {
++                assertTrue(OwnerDomainExecutor.isCurrentRegionOwnerForLevel(f.world));
++                f.player(() -> f.assertRejected(f.world));
++            }
++        });
++    }
++
++    @Test
++    void suspendedOwnerDoesNotUseTheRetainedContextStack() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> f.full(() -> f.player(() -> {
++            try (var ignored = OwnerDomainExecutor.suspendCurrentOwner()) {
++                assertNotNull(TickRegions.currentContext());
++                f.assertRejected(f.world);
++            }
++        })));
++    }
++
++    @Test
++    void aPlayerInAnotherWorldDoesNotInheritAnEarlierWorldToken() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> f.full(() -> {
++            var other = TickRegions.pushLevelContext(f.other);
++            try {
++                try (var ignored = OwnerDomainExecutor.enter(OwnerDomainExecutor.player(f.otherActor, "foreign-player-test"))) {
++                    f.assertRejected(f.world);
++                }
++            } finally { TickRegions.popContext(other); }
++        }));
++    }
++
++    private static final class Fixture {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel world = world(), other = world();
++        final ServerPlayer actor = actor(world), otherActor = actor(other);
++
++        ServerLevel world() {
++            ServerLevel result = mock(ServerLevel.class);
++            when(result.getServer()).thenReturn(server);
++            when(result.dimension()).thenReturn(Level.OVERWORLD);
++            return result;
++        }
++
++        ServerPlayer actor(ServerLevel level) {
++            ServerPlayer result = mock(ServerPlayer.class);
++            when(result.level()).thenReturn(level);
++            when(result.chunkPosition()).thenReturn(new ChunkPos(0, 0));
++            when(result.getUUID()).thenReturn(UUID.randomUUID());
++            return result;
++        }
++
++        void full(Runnable action) {
++            var context = TickRegions.pushLevelContext(world);
++            try { action.run(); }
++            finally { TickRegions.popContext(context); }
++        }
++
++        void player(Runnable action) {
++            OwnerDomainExecutor.runPlayerNow(actor, "nested-world-test", action);
++        }
++
++        void assertRejected(ServerLevel level) {
++            assertFalse(OwnerDomainExecutor.isCurrentRegionOwnerForLevel(level));
++            assertFalse(OwnerDomainExecutor.isCurrentFullLevelOwnerOrGlobal(level));
++            assertThrows(IllegalStateException.class, () -> AsyncCatcher.catchOp("unowned world access", level));
++        }
++
++        void run(Runnable action) throws Exception {
++            Field singleton = MinecraftServer.class.getDeclaredField("SERVER");
++            singleton.setAccessible(true);
++            Object previous = singleton.get(null);
++            singleton.set(null, server);
++            AtomicReference<Throwable> failure = new AtomicReference<>();
++            Thread thread = new TickThread(() -> {
++                try {
++                    action.run();
++                    assertNull(TickRegions.currentContext());
++                    assertEquals(OwnerDomainExecutor.Domain.ASYNC_IO, OwnerDomainExecutor.currentDomain());
++                } catch (Throwable error) { failure.set(error); }
++            }, "player-world-owner-test");
++            thread.setDaemon(true);
++            try {
++                thread.start();
++                thread.join(10_000);
++                assertFalse(thread.isAlive(), "Player owner check did not finish");
++                if (failure.get() instanceof Error error) throw error;
++                if (failure.get() instanceof RuntimeException error) throw error;
++                if (failure.get() != null) throw new AssertionError(failure.get());
++            } finally {
++                singleton.set(null, previous);
++                TickRegions.clearWorldState(world);
++                TickRegions.clearWorldState(other);
++            }
++        }
++    }
++}

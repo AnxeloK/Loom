@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 04:47:00 +0200
+Subject: [PATCH] Recognize held world ownership inside player scopes
+
+
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index f31d307312d051c664f47eb0aa263e02a835c9f6..f809c308a4c270e9cc4675636f60506b24530943 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -265,7 +265,17 @@ public final class OwnerDomainExecutor {
+ 
+     public static boolean isCurrentRegionOwnerForLevel(final ServerLevel level) {
+         final Owner owner = currentOwner();
+-        return owner != null && owner.domain() == Domain.REGION && owner.level() == level;
++        if (owner == null) {
++            return false;
++        }
++        if (owner.domain() == Domain.REGION) {
++            return owner.level() == level;
++        }
++        // A nested player scope retains its enclosing world lease. A token or suspended context
++        // alone cannot authorize world-wide work; require both the region token and active lease.
++        return owner.domain() == Domain.PLAYER && owner.level() == level
++            && isRegionOwner(level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)
++            && TickRegions.isCurrentThreadOwnerQuiet(level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE);
+     }
+ 
+     // Allocation-free fast predicate for hot loops: true when the current context trivially covers any
