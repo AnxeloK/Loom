@@ -1,0 +1,280 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 00:15:30 +0200
+Subject: [PATCH] Drain ordered movement through joined world owners
+
+
+diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
+index 64871cd87c5b385aa1809fb8c245274315c22198..fdf0a9b700b14e4a5ab2c575a8bc629dfd5fd631 100644
+--- a/net/minecraft/network/PacketProcessor.java
++++ b/net/minecraft/network/PacketProcessor.java
+@@ -1,8 +1,12 @@
+ package net.minecraft.network;
+ 
+-import com.google.common.collect.Queues;
+ import com.mojang.logging.LogUtils;
+-import java.util.Queue;
++import java.util.ArrayList;
++import java.util.Deque;
++import java.util.IdentityHashMap;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
+ import java.util.concurrent.RejectedExecutionException;
+ import net.minecraft.ReportedException;
+ import net.minecraft.network.protocol.Packet;
+@@ -11,9 +15,11 @@ import org.slf4j.Logger;
+ 
+ public class PacketProcessor implements AutoCloseable {
+     private static final Logger LOGGER = LogUtils.getLogger();
+-    private final Queue<PacketProcessor.ListenerAndPacket<?>> packetsToBeHandled = Queues.newConcurrentLinkedQueue();
++    private final Deque<PacketProcessor.ListenerAndPacket<?>> packetsToBeHandled = new java.util.concurrent.ConcurrentLinkedDeque<>();
+     private final Thread runningThread;
+-    private boolean closed;
++    private volatile boolean closed;
++    // Synchronous callbacks can poll the server, but its queued fence must wait for the whole prefix.
++    private volatile boolean worldPacketsInFlight;
+ 
+     public PacketProcessor(final Thread runningThread) {
+         this.runningThread = runningThread;
+@@ -44,13 +50,18 @@ public class PacketProcessor implements AutoCloseable {
+             if (this.closed) {
+                 throw new IllegalStateException("Packet batch is closed");
+             }
+-            if (PacketProcessor.this.closed) {
++            if (PacketProcessor.this.closed || PacketProcessor.this.worldPacketsInFlight) {
+                 return false;
+             }
+             final ListenerAndPacket<?> task = PacketProcessor.this.packetsToBeHandled.poll();
+             if (task == null) {
+                 return false;
+             }
++            this.executeTask(task);
++            return true;
++        }
++
++        private void executeTask(final ListenerAndPacket<?> task) {
+             final net.minecraft.server.level.ServerLevel level = task.listener() instanceof net.minecraft.server.network.ServerGamePacketListenerImpl listener
+                 ? listener.player.level() : null;
+             if (this.context != null && this.context.world() != level) {
+@@ -61,7 +72,107 @@ public class PacketProcessor implements AutoCloseable {
+                 this.context = net.minecraft.server.threading.TickRegions.pushLevelContext(level);
+             }
+             task.handle();
+-            return true;
++        }
++
++        /** Movement is ordered within each world. Every other packet ends the joined prefix. */
++        public DrainResult executeWorldPackets(final net.minecraft.server.MinecraftServer server, final int limit) {
++            if (!PacketProcessor.this.isSameThread() || this.closed) {
++                throw new IllegalStateException("Packet batch used outside its packet owner or after close");
++            }
++            if (limit < 1 || limit > 256) {
++                throw new IllegalArgumentException("Packet batch size must be between 1 and 256");
++            }
++            if (PacketProcessor.this.worldPacketsInFlight) {
++                throw new IllegalStateException("Cannot recursively enter a joined packet batch");
++            }
++            this.releaseWorld();
++            if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.currentDomain()
++                != net.minecraft.server.threading.runtime.OwnerDomainExecutor.Domain.GLOBAL_CONTROL
++                || net.minecraft.server.threading.TickRegions.currentContext() != null) {
++                throw new IllegalStateException("Joined packet batches require the global owner outside a world context");
++            }
++            net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(server, "packet-world-batch");
++            if (PacketProcessor.this.closed) {
++                return new DrainResult(0, 0);
++            }
++            final ListenerAndPacket<?> first = PacketProcessor.this.packetsToBeHandled.peek();
++            if (first == null || !first.isWorldMovementPacket()
++                || !(first.listener() instanceof net.minecraft.server.network.ServerGamePacketListenerImpl)) {
++                final boolean urgent = PacketProcessor.this.hasUrgentPacketAtHead();
++                return this.executeSinglePacket() ? new DrainResult(1, urgent ? 1 : 0) : new DrainResult(0, 0);
++            }
++
++            final List<PendingWorldPacket> pending = new ArrayList<>();
++            final Map<net.minecraft.server.level.ServerLevel, List<PendingWorldPacket>> byWorld = new LinkedHashMap<>();
++            PacketProcessor.this.worldPacketsInFlight = true;
++            try {
++                for (int index = 0; index < limit; ++index) {
++                    final ListenerAndPacket<?> head = PacketProcessor.this.packetsToBeHandled.peek();
++                    if (head == null || !head.isWorldMovementPacket()
++                        || !(head.listener() instanceof net.minecraft.server.network.ServerGamePacketListenerImpl listener)) {
++                        break;
++                    }
++                    final net.minecraft.server.level.ServerPlayer player = listener.player;
++                    final net.minecraft.server.level.ServerLevel world = player.level();
++                    if (world.getServer() != server) {
++                        throw new IllegalArgumentException("Player packet belongs to another server");
++                    }
++                    PacketProcessor.this.packetsToBeHandled.remove();
++                    final PendingWorldPacket task = new PendingWorldPacket(head, player);
++                    pending.add(task);
++                    byWorld.computeIfAbsent(world, ignored -> new ArrayList<>()).add(task);
++                }
++                net.minecraft.server.threading.TickRegions.runJoinedWorldPhase(
++                    server, new ArrayList<>(byWorld.keySet()), world -> {
++                        final var context = net.minecraft.server.threading.TickRegions.pushLevelContext(world);
++                        try {
++                            // A transfer or replacement defers this connection's remaining prefix together.
++                            final Map<PacketListener, Boolean> deferred = new IdentityHashMap<>();
++                            for (final PendingWorldPacket task : byWorld.get(world)) {
++                                if (PacketProcessor.this.closed) {
++                                    break;
++                                }
++                                final var listener = (net.minecraft.server.network.ServerGamePacketListenerImpl)task.task.listener();
++                                if (deferred.containsKey(listener) || listener.player != task.player || task.player.level() != world) {
++                                    deferred.put(listener, Boolean.TRUE);
++                                } else {
++                                    task.executed = true;
++                                    task.task.handle();
++                                }
++                            }
++                        } finally {
++                            net.minecraft.server.threading.TickRegions.popContext(context);
++                        }
++                    }, "packetMovement"
++                );
++                int packets = 0;
++                int urgentPackets = 0;
++                for (final PendingWorldPacket task : pending) {
++                    if (!task.executed && !PacketProcessor.this.closed) {
++                        task.executed = true;
++                        this.executeTask(task.task);
++                    }
++                    if (task.executed) {
++                        ++packets;
++                        if (task.task.isUrgentControlPacket()) {
++                            ++urgentPackets;
++                        }
++                    }
++                }
++                return new DrainResult(packets, urgentPackets);
++            } finally {
++                // A failing callback or close must not lose or replay the unstarted part of the prefix.
++                try {
++                    for (int index = pending.size() - 1; index >= 0; --index) {
++                        final PendingWorldPacket task = pending.get(index);
++                        if (!task.executed) {
++                            PacketProcessor.this.packetsToBeHandled.addFirst(task.task);
++                        }
++                    }
++                } finally {
++                    PacketProcessor.this.worldPacketsInFlight = false;
++                }
++            }
+         }
+ 
+         private void releaseWorld() {
+@@ -83,9 +194,23 @@ public class PacketProcessor implements AutoCloseable {
+         }
+     }
+ 
++    public record DrainResult(int packets, int urgentPackets) {
++    }
++
++    private static final class PendingWorldPacket {
++        private final ListenerAndPacket<?> task;
++        private final net.minecraft.server.level.ServerPlayer player;
++        private boolean executed;
++
++        private PendingWorldPacket(final ListenerAndPacket<?> task, final net.minecraft.server.level.ServerPlayer player) {
++            this.task = task;
++            this.player = player;
++        }
++    }
++
+     // Paper start - improve tick loop
+     public final boolean executeSinglePacket() {
+-        if (this.closed) {
++        if (this.closed || this.worldPacketsInFlight) {
+             return false;
+         }
+ 
+@@ -135,7 +260,7 @@ public class PacketProcessor implements AutoCloseable {
+     }
+ 
+     public void processQueuedPackets() {
+-        if (!this.closed) {
++        if (!this.closed && !this.worldPacketsInFlight) {
+             while (!this.packetsToBeHandled.isEmpty()) {
+                 this.packetsToBeHandled.poll().handle();
+             }
+@@ -265,6 +390,12 @@ public class PacketProcessor implements AutoCloseable {
+     }
+ 
+     private record ListenerAndPacket<T extends PacketListener>(T listener, Packet<T> packet) {
++        private boolean isWorldMovementPacket() {
++            return this.packet instanceof net.minecraft.network.protocol.game.ServerboundMovePlayerPacket
++                || this.packet instanceof net.minecraft.network.protocol.game.ServerboundPlayerInputPacket
++                || this.packet instanceof net.minecraft.network.protocol.game.ServerboundClientTickEndPacket;
++        }
++
+         private boolean isUrgentControlPacket() {
+             return this.packet instanceof net.minecraft.network.protocol.common.ServerboundKeepAlivePacket
+                 || this.packet instanceof net.minecraft.network.protocol.common.ServerboundPongPacket
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index cde940ed872cda0e3350d11c879d821a3fbd6d58..31f2bfe2a2ffa9a15bfbd9c9489115d88bed55f1 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1396,20 +1396,25 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     private boolean executeTickStartPacket(final TickStartPacketDrain drain, final PacketProcessor.@Nullable PacketBatch batch) {
+         final boolean urgent = this.packetProcessor.hasUrgentPacketAtHead();
+         final long start = Util.getNanos();
+-        final boolean executed = batch == null ? this.packetProcessor.executeSinglePacket() : batch.executeSinglePacket();
++        final PacketProcessor.DrainResult result;
++        if (batch == null) {
++            final boolean executed = this.packetProcessor.executeSinglePacket();
++            result = new PacketProcessor.DrainResult(executed ? 1 : 0, executed && urgent ? 1 : 0);
++        } else {
++            final int limit = Math.min(256, LOOM_PACKET_TICK_START_MAX_PACKETS - drain.packets);
++            result = batch.executeWorldPackets(this, limit);
++        }
+         final long elapsed = Util.getNanos() - start;
+-        if (executed) {
+-            ++drain.packets;
+-            if (urgent) {
+-                ++drain.urgentPackets;
+-            }
++        if (result.packets() > 0) {
++            drain.packets += result.packets();
++            drain.urgentPackets += result.urgentPackets();
+             drain.nanos += Math.max(0L, elapsed);
+         }
+-        return executed;
++        return result.packets() > 0;
+     }
+ 
+     private boolean shouldDrainTickStartPacket(final TickStartPacketDrain drain) {
+-        if (drain.packets < LOOM_PACKET_TICK_START_MIN_PACKETS) {
++        if (drain.packets < drain.minimumPackets) {
+             return true;
+         }
+         if (drain.packets >= LOOM_PACKET_TICK_START_MAX_PACKETS) {
+@@ -1428,9 +1433,17 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     }
+ 
+     private static final class TickStartPacketDrain {
++        private final int minimumPackets;
+         private int packets;
+         private int urgentPackets;
+         private long nanos;
++
++        private TickStartPacketDrain(final int players) {
++            // A moving client sends movement and tick-end packets, plus occasional input changes.
++            // Scale the soft-budget floor with clients while retaining the configured hard cap.
++            this.minimumPackets = (int)Math.min(LOOM_PACKET_TICK_START_MAX_PACKETS,
++                Math.max(LOOM_PACKET_TICK_START_MIN_PACKETS, Math.max(0L, players) * 3L));
++        }
+     }
+ 
+     private long loomLastTickStartDrainDiagnosticNanos;
+@@ -1522,7 +1535,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+ 
+     private void runAllTasksAtTickStart() {
+         this.startMeasuringTaskExecutionTime();
+-        final TickStartPacketDrain packetDrain = new TickStartPacketDrain();
++        final TickStartPacketDrain packetDrain = new TickStartPacketDrain(this.getPlayerCount());
+         final TickStartChunkDrain chunkDrain = LOOM_TICK_START_DRAIN_DIAGNOSTICS ? new TickStartChunkDrain() : null;
+ 
+         // note: To avoid possibly spinning forever, only execute tasks that are roughly available at the beginning

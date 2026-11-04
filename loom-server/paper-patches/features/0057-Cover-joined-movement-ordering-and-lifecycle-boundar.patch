@@ -1,0 +1,500 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 00:15:31 +0200
+Subject: [PATCH] Cover joined movement ordering and lifecycle boundaries
+
+
+diff --git a/src/test/java/net/minecraft/network/PacketProcessorWorldBatchTest.java b/src/test/java/net/minecraft/network/PacketProcessorWorldBatchTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1fa07a5fa5a470654761dc16249aea09940c3846
+--- /dev/null
++++ b/src/test/java/net/minecraft/network/PacketProcessorWorldBatchTest.java
+@@ -0,0 +1,402 @@
++package net.minecraft.network;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import ca.spottedleaf.moonrise.patches.chunk_system.player.RegionizedPlayerChunkLoader;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.UUID;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.network.protocol.Packet;
++import net.minecraft.network.protocol.game.ServerGamePacketListener;
++import net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket;
++import net.minecraft.network.protocol.game.ServerboundChatCommandPacket;
++import net.minecraft.network.protocol.game.ServerboundClientTickEndPacket;
++import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
++import net.minecraft.network.protocol.game.ServerboundPlayerInputPacket;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.network.ServerGamePacketListenerImpl;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class PacketProcessorWorldBatchTest {
++    @BeforeAll
++    static void initializeTypes() {
++        mock(MinecraftServer.class);
++        mock(ServerLevel.class);
++        mock(ServerPlayer.class);
++        mock(ServerGamePacketListenerImpl.class);
++        mock(ServerboundClientTickEndPacket.class);
++        mock(ServerboundMovePlayerPacket.class);
++        mock(ServerboundPlayerInputPacket.class);
++        mock(ServerboundAcceptTeleportationPacket.class);
++        mock(ServerboundChatCommandPacket.class);
++        mock(RegionizedPlayerChunkLoader.class);
++    }
++
++    @Test
++    void independentWorldsEnterBeforeEitherPacketFinishes() throws Exception {
++        Fixture f = new Fixture();
++        CountDownLatch entered = new CountDownLatch(2);
++        AtomicInteger completed = new AtomicInteger();
++        f.global(() -> {
++            PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            for (int index = 0; index < 2; ++index) {
++                ServerLevel world = f.world();
++                enqueue(processor, f.listener(world), ServerboundClientTickEndPacket.class, () -> {
++                    f.assertWorld(world, false);
++                    entered.countDown();
++                    await(entered);
++                    completed.incrementAndGet();
++                });
++            }
++            try (var batch = processor.beginBatch()) {
++                assertEquals(new PacketProcessor.DrainResult(2, 2), batch.executeWorldPackets(f.server, 256));
++            }
++            assertEquals(2, completed.get());
++            assertNull(TickRegions.currentContext());
++            assertEquals(OwnerDomainExecutor.Domain.GLOBAL_CONTROL, OwnerDomainExecutor.currentDomain());
++        });
++    }
++
++    @Test
++    void interleavedMovementRetainsEveryWorldsInputOrder() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel a = f.world(), b = f.world();
++        var first = f.listener(a);
++        var second = f.listener(b);
++        List<Integer> firstOrder = new ArrayList<>(), secondOrder = new ArrayList<>();
++        f.global(() -> {
++            PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, first, ServerboundPlayerInputPacket.class, () -> firstOrder.add(1));
++            enqueue(processor, second, ServerboundMovePlayerPacket.class, () -> secondOrder.add(2));
++            enqueue(processor, first, ServerboundMovePlayerPacket.class, () -> firstOrder.add(3));
++            enqueue(processor, second, ServerboundClientTickEndPacket.class, () -> secondOrder.add(4));
++            enqueue(processor, first, ServerboundClientTickEndPacket.class, () -> firstOrder.add(5));
++            try (var batch = processor.beginBatch()) {
++                assertEquals(new PacketProcessor.DrainResult(5, 2), batch.executeWorldPackets(f.server, 256));
++            }
++        });
++        assertEquals(List.of(1, 3, 5), firstOrder);
++        assertEquals(List.of(2, 4), secondOrder);
++    }
++
++    @Test
++    void teleportAcknowledgementFencesEarlierAndLaterMovement() throws Exception {
++        Fixture f = new Fixture();
++        var listener = f.listener(f.world());
++        List<Integer> order = new ArrayList<>();
++        f.global(() -> {
++            PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, listener, ServerboundClientTickEndPacket.class, () -> order.add(1));
++            enqueue(processor, listener, ServerboundAcceptTeleportationPacket.class, () -> {
++                assertTrue(OwnerDomainExecutor.isGlobalOwner(f.server));
++                order.add(2);
++            });
++            enqueue(processor, listener, ServerboundMovePlayerPacket.class, () -> order.add(3));
++            try (var batch = processor.beginBatch()) {
++                assertEquals(new PacketProcessor.DrainResult(1, 1), batch.executeWorldPackets(f.server, 256));
++                assertEquals(List.of(1), order);
++                assertEquals(new PacketProcessor.DrainResult(1, 1), batch.executeWorldPackets(f.server, 256));
++                assertEquals(List.of(1, 2), order);
++                assertEquals(new PacketProcessor.DrainResult(1, 0), batch.executeWorldPackets(f.server, 256));
++            }
++        });
++        assertEquals(List.of(1, 2, 3), order);
++    }
++
++    @Test
++    @SuppressWarnings("unchecked")
++    void aCommandOrProtocolListenerRemainsUnderTheGlobalOwner() throws Exception {
++        Fixture f = new Fixture();
++        var player = f.listener(f.world());
++        PacketListener login = mock(PacketListener.class);
++        Packet<PacketListener> command = mock(Packet.class);
++        when(login.shouldHandleMessage(command)).thenReturn(true);
++        doAnswer(ignored -> {
++            assertNull(TickRegions.currentContext());
++            assertEquals(OwnerDomainExecutor.Domain.GLOBAL_CONTROL, OwnerDomainExecutor.currentDomain());
++            return null;
++        }).when(command).handle(login);
++        f.global(() -> {
++            PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, player, ServerboundClientTickEndPacket.class, () -> {});
++            processor.scheduleIfPossible(login, command);
++            enqueue(processor, player, ServerboundClientTickEndPacket.class, () -> {});
++            try (var batch = processor.beginBatch()) {
++                assertEquals(1, batch.executeWorldPackets(f.server, 256).packets());
++                verify(command, never()).handle(login);
++                assertEquals(1, batch.executeWorldPackets(f.server, 256).packets());
++                verify(command).handle(login);
++                assertEquals(1, batch.executeWorldPackets(f.server, 256).packets());
++            }
++        });
++    }
++
++    @Test
++    void aTransferDefersTheConnectionsRemainingPacketsUntilEveryWorldFinishes() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel source = f.world(), target = f.world(), other = f.world();
++        var listener = f.listener(source);
++        AtomicReference<ServerLevel> current = new AtomicReference<>(source);
++        when(listener.player.level()).thenAnswer(ignored -> current.get());
++        AtomicInteger otherFinished = new AtomicInteger();
++        List<Integer> order = new ArrayList<>();
++        f.global(() -> {
++            PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, listener, ServerboundMovePlayerPacket.class, () -> { order.add(1); current.set(target); });
++            enqueue(processor, listener, ServerboundPlayerInputPacket.class, () -> {
++                f.assertWorld(target, true);
++                assertEquals(1, otherFinished.get());
++                assertFalse(processor.executeSinglePacket(), "The deferred prefix still owns its fence");
++                processor.processQueuedPackets();
++                order.add(2);
++            });
++            enqueue(processor, f.listener(other), ServerboundClientTickEndPacket.class, otherFinished::incrementAndGet);
++            enqueue(processor, listener, ServerboundClientTickEndPacket.class, () -> { f.assertWorld(target, true); order.add(3); });
++            enqueue(processor, listener, ServerboundAcceptTeleportationPacket.class, () -> assertEquals(List.of(1, 2, 3), order));
++            try (var batch = processor.beginBatch()) {
++                assertEquals(new PacketProcessor.DrainResult(4, 2), batch.executeWorldPackets(f.server, 256));
++                assertEquals(1, batch.executeWorldPackets(f.server, 256).packets());
++            }
++        });
++        assertEquals(List.of(1, 2, 3), order);
++    }
++
++    @Test
++    void aReplacementPlayerIsResolvedAgainAfterTheJoinedPrefix() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel source = f.world(), target = f.world();
++        var listener = f.listener(source);
++        ServerPlayer replacement = f.listener(target).player;
++        AtomicInteger calls = new AtomicInteger();
++        f.global(() -> {
++            PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, listener, ServerboundMovePlayerPacket.class, () -> listener.player = replacement);
++            enqueue(processor, listener, ServerboundClientTickEndPacket.class, () -> {
++                f.assertWorld(target, true);
++                calls.incrementAndGet();
++            });
++            try (var batch = processor.beginBatch()) {
++                assertEquals(2, batch.executeWorldPackets(f.server, 256).packets());
++            }
++        });
++        assertEquals(1, calls.get());
++    }
++
++    @Test
++    void gameCommandsStaySerialAndDoNotAdmitLaterMovement() throws Exception {
++        Fixture f = new Fixture();
++        var listener = f.listener(f.world());
++        AtomicInteger calls = new AtomicInteger();
++        f.global(() -> {
++            PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, listener, ServerboundChatCommandPacket.class, () -> {
++                assertTrue(OwnerDomainExecutor.isGlobalOwner(f.server));
++                calls.incrementAndGet();
++            });
++            enqueue(processor, listener, ServerboundClientTickEndPacket.class, calls::incrementAndGet);
++            try (var batch = processor.beginBatch()) {
++                assertEquals(new PacketProcessor.DrainResult(1, 0), batch.executeWorldPackets(f.server, 256));
++                assertEquals(1, calls.get());
++                assertTrue(processor.hasPendingPackets());
++            }
++        });
++    }
++
++    @Test
++    void disconnectedListenersKeepTheirExistingMessageGuard() throws Exception {
++        Fixture f = new Fixture();
++        var listener = f.listener(f.world());
++        ServerboundClientTickEndPacket packet = mock(ServerboundClientTickEndPacket.class);
++        when(listener.shouldHandleMessage(packet)).thenReturn(false);
++        f.global(() -> {
++            PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            processor.scheduleIfPossible(listener, packet);
++            try (var batch = processor.beginBatch()) {
++                assertEquals(new PacketProcessor.DrainResult(1, 1), batch.executeWorldPackets(f.server, 256));
++            }
++        });
++        verify(packet, never()).handle(listener);
++    }
++
++    @Test
++    void reentrantDrainsCannotOvertakeTheUnfinishedPrefix() throws Exception {
++        Fixture f = new Fixture();
++        var listener = f.listener(f.world());
++        List<Integer> order = new ArrayList<>();
++        AtomicReference<PacketProcessor.PacketBatch> active = new AtomicReference<>();
++        f.global(() -> {
++            PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, listener, ServerboundMovePlayerPacket.class, () -> {
++                order.add(1);
++                assertFalse(processor.executeSinglePacket(), "A nested drain crossed the movement fence");
++                assertFalse(active.get().executeSinglePacket());
++                assertThrows(IllegalStateException.class, () -> active.get().executeWorldPackets(f.server, 256));
++                processor.processQueuedPackets();
++                assertEquals(List.of(1), order);
++            });
++            enqueue(processor, listener, ServerboundClientTickEndPacket.class, () -> order.add(2));
++            enqueue(processor, listener, ServerboundAcceptTeleportationPacket.class, () -> {
++                assertEquals(List.of(1, 2), order);
++                order.add(3);
++            });
++            try (var batch = processor.beginBatch()) {
++                active.set(batch);
++                assertEquals(2, batch.executeWorldPackets(f.server, 256).packets());
++                assertEquals(1, batch.executeWorldPackets(f.server, 256).packets());
++            }
++        });
++        assertEquals(List.of(1, 2, 3), order);
++    }
++
++    @Test
++    void aFailingPacketRetainsUnstartedPacketsWithoutReplayingTheFailure() throws Exception {
++        Fixture f = new Fixture();
++        var listener = f.listener(f.world());
++        AtomicInteger failures = new AtomicInteger(), remaining = new AtomicInteger();
++        f.global(() -> {
++            PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, listener, ServerboundMovePlayerPacket.class, () -> {
++                failures.incrementAndGet();
++                throw new AssertionError("packet failed");
++            });
++            enqueue(processor, listener, ServerboundClientTickEndPacket.class, remaining::incrementAndGet);
++            try (var batch = processor.beginBatch()) {
++                assertThrows(AssertionError.class, () -> batch.executeWorldPackets(f.server, 256));
++                assertNull(TickRegions.currentContext());
++                assertEquals(1, batch.executeWorldPackets(f.server, 256).packets());
++                assertFalse(processor.hasPendingPackets());
++            }
++            assertTrue(PacketProcessor.getCurrentPacketProcessors().isEmpty());
++        });
++        assertEquals(1, failures.get());
++        assertEquals(1, remaining.get());
++    }
++
++    @Test
++    void closeDoesNotStartTheRestOfThePrefix() throws Exception {
++        Fixture f = new Fixture();
++        var listener = f.listener(f.world());
++        f.global(() -> {
++            PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, listener, ServerboundMovePlayerPacket.class, processor::close);
++            enqueue(processor, listener, ServerboundClientTickEndPacket.class, () -> fail("Packet ran after close"));
++            try (var batch = processor.beginBatch()) {
++                assertEquals(1, batch.executeWorldPackets(f.server, 256).packets());
++                assertEquals(0, batch.executeWorldPackets(f.server, 256).packets());
++            }
++            assertTrue(processor.hasPendingPackets());
++            assertTrue(PacketProcessor.getCurrentPacketProcessors().isEmpty());
++        });
++    }
++
++    @Test
++    void thePrefixLimitLeavesLaterPacketsQueuedAndRejectsInvalidSizes() throws Exception {
++        Fixture f = new Fixture();
++        var listener = f.listener(f.world());
++        AtomicInteger calls = new AtomicInteger();
++        f.global(() -> {
++            PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            for (int index = 0; index < 3; ++index) enqueue(processor, listener, ServerboundClientTickEndPacket.class, calls::incrementAndGet);
++            try (var batch = processor.beginBatch()) {
++                assertThrows(IllegalArgumentException.class, () -> batch.executeWorldPackets(f.server, 0));
++                assertThrows(IllegalArgumentException.class, () -> batch.executeWorldPackets(f.server, 257));
++                assertEquals(2, batch.executeWorldPackets(f.server, 2).packets());
++                assertEquals(2, calls.get());
++                assertTrue(processor.hasPendingPackets());
++                assertEquals(1, batch.executeWorldPackets(f.server, 2).packets());
++                assertEquals(0, batch.executeWorldPackets(f.server, 2).packets());
++            }
++        });
++    }
++
++    @Test
++    void aForeignWorldRestoresTheEarlierUnstartedPrefix() throws Exception {
++        Fixture f = new Fixture(), foreign = new Fixture();
++        AtomicInteger calls = new AtomicInteger();
++        f.global(() -> {
++            PacketProcessor processor = new PacketProcessor(Thread.currentThread());
++            enqueue(processor, f.listener(f.world()), ServerboundClientTickEndPacket.class, calls::incrementAndGet);
++            enqueue(processor, foreign.listener(foreign.world()), ServerboundClientTickEndPacket.class, () -> fail("Foreign packet ran"));
++            try (var batch = processor.beginBatch()) {
++                assertThrows(IllegalArgumentException.class, () -> batch.executeWorldPackets(f.server, 256));
++                assertEquals(0, calls.get());
++                assertEquals(1, batch.executeWorldPackets(f.server, 1).packets());
++            }
++        });
++        assertEquals(1, calls.get());
++    }
++
++    private static <P extends Packet<ServerGamePacketListener>> void enqueue(
++        PacketProcessor processor, ServerGamePacketListenerImpl listener, Class<P> type, Runnable action
++    ) {
++        P packet = mock(type);
++        when(listener.shouldHandleMessage(packet)).thenReturn(true);
++        doAnswer(ignored -> { action.run(); return null; }).when(packet).handle(listener);
++        processor.scheduleIfPossible(listener, packet);
++    }
++
++    private static void await(CountDownLatch latch) {
++        try { assertTrue(latch.await(5, TimeUnit.SECONDS), "Independent world packet was serialized"); }
++        catch (InterruptedException error) { throw new AssertionError(error); }
++    }
++
++    private static final class Fixture {
++        final MinecraftServer server = mock(MinecraftServer.class);
++
++        ServerLevel world() {
++            ServerLevel world = mock(ServerLevel.class);
++            when(world.getServer()).thenReturn(server);
++            when(world.dimension()).thenReturn(Level.OVERWORLD);
++            RegionizedPlayerChunkLoader loader = mock(RegionizedPlayerChunkLoader.class);
++            when(loader.getAPIViewDistance()).thenReturn(10);
++            when(loader.getAPITickDistance()).thenReturn(10);
++            when(world.moonrise$getPlayerChunkLoader()).thenReturn(loader);
++            return world;
++        }
++
++        ServerGamePacketListenerImpl listener(ServerLevel world) {
++            ServerPlayer player = mock(ServerPlayer.class);
++            when(player.level()).thenReturn(world);
++            when(player.chunkPosition()).thenReturn(new ChunkPos(0, 0));
++            when(player.getUUID()).thenReturn(UUID.randomUUID());
++            ServerGamePacketListenerImpl listener = mock(ServerGamePacketListenerImpl.class);
++            listener.player = player;
++            return listener;
++        }
++
++        void assertWorld(ServerLevel world, boolean global) {
++            assertEquals(OwnerDomainExecutor.Domain.PLAYER, OwnerDomainExecutor.currentDomain());
++            assertEquals(global, OwnerDomainExecutor.isGlobalOwner(server));
++            assertTrue(OwnerDomainExecutor.isRegionOwner(world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE));
++            assertTrue(TickRegions.isCurrentThreadOwnerQuiet(world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE));
++        }
++
++        void global(Runnable action) throws Exception {
++            AtomicReference<Throwable> failure = new AtomicReference<>();
++            Thread thread = new TickThread(() -> {
++                try (var owner = OwnerDomainExecutor.enterGlobal(server, "world-packet-test")) { action.run(); }
++                catch (Throwable error) { failure.set(error); }
++            }, "world-packet-owner-test");
++            thread.setDaemon(true);
++            thread.start();
++            thread.join(12_000);
++            assertFalse(thread.isAlive(), "Packet batch stranded its owner");
++            if (failure.get() != null) throw new AssertionError(failure.get());
++        }
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/PlayerPacketDrainBudgetTest.java b/src/test/java/net/minecraft/server/PlayerPacketDrainBudgetTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..66429f12f095b01e9017f980abf5d1b102d3892c
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/PlayerPacketDrainBudgetTest.java
+@@ -0,0 +1,80 @@
++package net.minecraft.server;
++
++import java.lang.reflect.Constructor;
++import java.lang.reflect.Field;
++import java.lang.reflect.Method;
++import java.util.Arrays;
++import net.minecraft.network.PacketProcessor;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class PlayerPacketDrainBudgetTest {
++    @Test
++    void aBusyLargeServerStillServicesANormalClientFramesPackets() throws Exception {
++        Fixture f = new Fixture(100);
++        f.packets(299);
++        assertTrue(f.shouldDrain(), "The expired soft budget must not leave a normal client frame queued");
++        f.packets(300);
++        assertFalse(f.shouldDrain(), "The normal frame floor must not remove the soft budget");
++    }
++
++    @Test
++    void smallServersRetainTheirExistingMinimumAndTimeBudget() throws Exception {
++        for (int players : new int[]{0, 1, 10}) {
++            Fixture f = new Fixture(players);
++            f.packets(31);
++            assertTrue(f.shouldDrain());
++            f.packets(32);
++            assertFalse(f.shouldDrain());
++            f.nanos.setLong(f.drain, 0L);
++            assertTrue(f.shouldDrain(), "Available time still permits more queued work");
++        }
++    }
++
++    @Test
++    void theConfiguredMaximumStillBoundsAnOverloadedLargePopulation() throws Exception {
++        Fixture f = new Fixture(Integer.MAX_VALUE);
++        f.packets(2047);
++        assertTrue(f.shouldDrain());
++        f.packets(2048);
++        assertFalse(f.shouldDrain());
++    }
++
++    private static final class Fixture {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final Object drain;
++        final Method shouldDrain;
++        final Field packets;
++        final Field nanos;
++
++        Fixture(int players) throws Exception {
++            Class<?> type = Arrays.stream(MinecraftServer.class.getDeclaredClasses())
++                .filter(candidate -> candidate.getSimpleName().equals("TickStartPacketDrain")).findFirst().orElseThrow();
++            Constructor<?> constructor = type.getDeclaredConstructor(int.class);
++            constructor.setAccessible(true);
++            drain = constructor.newInstance(players);
++            packets = type.getDeclaredField("packets");
++            packets.setAccessible(true);
++            nanos = type.getDeclaredField("nanos");
++            nanos.setAccessible(true);
++            nanos.setLong(drain, Long.MAX_VALUE);
++            shouldDrain = MinecraftServer.class.getDeclaredMethod("shouldDrainTickStartPacket", type);
++            shouldDrain.setAccessible(true);
++            Field processor = MinecraftServer.class.getDeclaredField("packetProcessor");
++            processor.setAccessible(true);
++            processor.set(server, new PacketProcessor(Thread.currentThread()));
++        }
++
++        void packets(int count) throws Exception {
++            packets.setInt(drain, count);
++        }
++
++        boolean shouldDrain() throws Exception {
++            return (boolean)shouldDrain.invoke(server, drain);
++        }
++    }
++}
