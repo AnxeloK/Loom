@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 07:26:05 +0200
+Subject: [PATCH] Record entity timing around the complete joined pass
+
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 22021f433e89009c2a2a73b9db621ed2dd096537..83db93a69fd26e2116b33d5a4a088df1e4101a8f 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1541,6 +1541,18 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     private static final boolean LOOM_DEBUG_ENTITY_BUCKETS = Boolean.getBoolean("loom.debugEntityBuckets");
+ 
+     private void tickEntitiesInParallel() {
++        final LoomTickSectionDiagnostics diagnostics = this.loomTickSectionDiagnostics;
++        final long started = diagnostics == null ? 0L : System.nanoTime();
++        try {
++            this.tickEntitiesByRegion();
++        } finally {
++            if (diagnostics != null) {
++                diagnostics.record(LoomTickSectionDiagnostics.ENTITY_TICK, System.nanoTime() - started);
++            }
++        }
++    }
++
++    private void tickEntitiesByRegion() {
+         final java.util.List<Entity> toTick = new java.util.ArrayList<>();
+         this.entityTickList.forEach(toTick::add);
+         final int count = toTick.size();

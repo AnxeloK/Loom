@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 07:20:55 +0200
+Subject: [PATCH] Test entity timing across serial parallel and failure paths
+
+
+diff --git a/src/test/java/net/minecraft/server/level/SerialSimulationFallbackTest.java b/src/test/java/net/minecraft/server/level/SerialSimulationFallbackTest.java
+index 48898449fc01488309e6350ce5b61b0f306d49b1..02c303d194c99590978b06e4f52097c0f19a67fb 100644
+--- a/src/test/java/net/minecraft/server/level/SerialSimulationFallbackTest.java
++++ b/src/test/java/net/minecraft/server/level/SerialSimulationFallbackTest.java
+@@ -126,9 +126,26 @@ class SerialSimulationFallbackTest {
+         f.assertEntityTicks(entities);
+     }
+ 
++    @Test
++    void oneEntityRegionRecordsItsElapsedTime() throws Exception {
++        final Fixture f = new Fixture();
++        final LoomTickSectionDiagnostics diagnostics = f.enableTickDiagnostics();
++        f.assertEntityTicks(f.entities(0, 1));
++        verify(diagnostics).record(eq(LoomTickSectionDiagnostics.ENTITY_TICK), longThat(value -> value > 0L));
++    }
++
++    @Test
++    void mergedEntityRegionsRecordTheirElapsedTime() throws Exception {
++        final Fixture f = new Fixture();
++        final LoomTickSectionDiagnostics diagnostics = f.enableTickDiagnostics();
++        f.assertEntityTicks(f.entities(-1, 0));
++        verify(diagnostics).record(eq(LoomTickSectionDiagnostics.ENTITY_TICK), longThat(value -> value > 0L));
++    }
++
+     @Test
+     void failingSerialEntityTickDoesNotRetainStagingOrReplaceTheOwner() throws Exception {
+         final Fixture f = new Fixture();
++        final LoomTickSectionDiagnostics diagnostics = f.enableTickDiagnostics();
+         f.entities(-1, 0);
+         final IllegalStateException expected = new IllegalStateException("entity callback failed");
+         doAnswer(call -> { f.assertSerialOwner(); throw expected; }).when(f.world).guardEntityTick(any(), any());
+@@ -137,11 +154,13 @@ class SerialSimulationFallbackTest {
+                 () -> invoke(f.world, "tickEntitiesInParallel", new Class<?>[0])));
+             f.assertSerialOwner();
+         });
++        verify(diagnostics).record(eq(LoomTickSectionDiagnostics.ENTITY_TICK), longThat(value -> value > 0L));
+     }
+ 
+     @Test
+     void separatedEntityRegionsStillStageAndThenTickOwnerEntities() throws Exception {
+         final Fixture f = new Fixture();
++        final LoomTickSectionDiagnostics diagnostics = f.enableTickDiagnostics();
+         final List<Entity> entities = f.entities(-1, 128);
+         final List<Entity> seen = Collections.synchronizedList(new ArrayList<>());
+         doAnswer(call -> {
+@@ -164,11 +183,13 @@ class SerialSimulationFallbackTest {
+         assertEquals(3, seen.size());
+         assertTrue(seen.containsAll(entities));
+         assertSame(entities.get(1), seen.getLast());
++        verify(diagnostics).record(eq(LoomTickSectionDiagnostics.ENTITY_TICK), longThat(value -> value > 0L));
+     }
+ 
+     @Test
+     void parallelFailureRestoresTheWorldContext() throws Exception {
+         final Fixture f = new Fixture();
++        final LoomTickSectionDiagnostics diagnostics = f.enableTickDiagnostics();
+         f.entities(-1, 128);
+         doAnswer(call -> {
+             assertTrue(RegionTickStaging.isStaging());
+@@ -178,6 +199,7 @@ class SerialSimulationFallbackTest {
+             assertThrows(RuntimeException.class, () -> invoke(f.world, "tickEntitiesInParallel", new Class<?>[0]));
+             f.assertSerialOwner();
+         });
++        verify(diagnostics).record(eq(LoomTickSectionDiagnostics.ENTITY_TICK), longThat(value -> value > 0L));
+     }
+ 
+     @Test
+@@ -220,6 +242,11 @@ class SerialSimulationFallbackTest {
+             when(world.dimension()).thenReturn(Level.OVERWORLD);
+             when(world.tickRateManager()).thenReturn(mock(TickRateManager.class));
+         }
++        LoomTickSectionDiagnostics enableTickDiagnostics() throws Exception {
++            final LoomTickSectionDiagnostics diagnostics = mock(LoomTickSectionDiagnostics.class);
++            set(world, "loomTickSectionDiagnostics", diagnostics);
++            return diagnostics;
++        }
+         List<Entity> entities(final int firstX, final int secondX) throws Exception {
+             final Entity first = entity(firstX, false);
+             final Entity owner = entity(0, true);
