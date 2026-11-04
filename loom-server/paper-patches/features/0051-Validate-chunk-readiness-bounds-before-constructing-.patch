@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 07:40:47 +0200
+Subject: [PATCH] Validate chunk readiness bounds before constructing its owner
+
+
+diff --git a/src/test/java/org/bukkit/OwnershipRouterCompatibilityTest.java b/src/test/java/org/bukkit/OwnershipRouterCompatibilityTest.java
+index d41d10dceae8c40c284bacf019d3fd0253ce1096..e06449cf1f5db4c33d7b2e2bb446e25efdca10f4 100644
+--- a/src/test/java/org/bukkit/OwnershipRouterCompatibilityTest.java
++++ b/src/test/java/org/bukkit/OwnershipRouterCompatibilityTest.java
+@@ -12,6 +12,8 @@ import net.minecraft.world.level.Level;
+ import org.bukkit.support.environment.Normal;
+ import org.junit.jupiter.api.Assertions;
+ import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.CsvSource;
+ import org.mockito.Mockito;
+ 
+ @Normal
+@@ -86,17 +88,20 @@ class OwnershipRouterCompatibilityTest {
+         }
+     }
+ 
+-    @Test
+-    void runWhenChunksReadyRejectsInvalidBounds() {
++    @ParameterizedTest
++    @CsvSource({"4,7,3,7", "4,7,4,6", "4,7,3,6"})
++    void runWhenChunksReadyRejectsInvalidBounds(final int minX, final int minZ, final int maxX, final int maxZ) {
+         final ServerLevel level = Mockito.mock(ServerLevel.class);
+ 
+         final IllegalArgumentException exception = Assertions.assertThrows(
+             IllegalArgumentException.class,
+-            () -> OwnershipRouter.runWhenChunksReady(level, 4, 7, 3, 7, Priority.HIGHER, "invalid-bounds", chunks -> {
++            () -> OwnershipRouter.runWhenChunksReady(level, minX, minZ, maxX, maxZ, Priority.HIGHER, "invalid-bounds", chunks -> {
++                Assertions.fail("Invalid bounds must not dispatch a callback");
+             })
+         );
+ 
+         Assertions.assertTrue(exception.getMessage().contains("Invalid chunk bounds"));
++        Mockito.verifyNoInteractions(level);
+     }
+ 
+     @Test

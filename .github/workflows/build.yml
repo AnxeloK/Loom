@@ -29,20 +29,11 @@ jobs:
         run: |
           echo "build_number=${GITHUB_RUN_NUMBER}" >> "${GITHUB_OUTPUT}"
           echo "build_started_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "${GITHUB_OUTPUT}"
-      - name: Apply Patches
-        run: ./gradlew applyAllPatches --stacktrace --no-daemon --max-workers=2
-      - name: Prepare Paper ABI Baseline
-        run: git clone --shared .gradle/caches/paperweight/upstreams/paper "${RUNNER_TEMP}/paper-abi-baseline"
-      - name: Build Paper ABI Baseline
-        working-directory: ${{ runner.temp }}/paper-abi-baseline
-        run: |
-          ./gradlew :paper-server:applyPatches --stacktrace --no-daemon --max-workers=2
-          ./gradlew :paper-api:jar :paper-server:jar --stacktrace --no-daemon --max-workers=2
-      - name: Build
+      - name: Verify and Build
         env:
           BUILD_NUMBER: ${{ steps.metadata.outputs.build_number }}
           BUILD_STARTED_AT: ${{ steps.metadata.outputs.build_started_at }}
-        run: ./gradlew build :loom-server:createPaperclipJar -PpaperAbiBaselineDir="${RUNNER_TEMP}/paper-abi-baseline" --stacktrace --no-daemon --max-workers=2
+        run: ./scripts/verify-ci.sh
       - name: Package Build
         id: package
         shell: bash

@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 07:40:46 +0200
+Subject: [PATCH] Validate chunk readiness bounds before constructing its owner
+
+
+diff --git a/net/minecraft/server/threading/runtime/OwnershipRouter.java b/net/minecraft/server/threading/runtime/OwnershipRouter.java
+index 96e4a82a5d62a8b025c7889f710cf405e97c3557..bf1a99f1a1fb1ab3126d9a00a13c340187583c9c 100644
+--- a/net/minecraft/server/threading/runtime/OwnershipRouter.java
++++ b/net/minecraft/server/threading/runtime/OwnershipRouter.java
+@@ -113,6 +113,7 @@ public final class OwnershipRouter {
+         final Consumer<List<ChunkAccess>> onReady
+     ) {
+         Objects.requireNonNull(operation, "operation");
++        validateChunkBounds(minChunkX, minChunkZ, maxChunkX, maxChunkZ);
+         return runWhenChunksReady(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, chunkStatus, priority,
+             OwnerDomainExecutor.region(level, minChunkX, minChunkZ, maxChunkX, maxChunkZ, operation), onReady);
+     }
+@@ -133,14 +134,12 @@ public final class OwnershipRouter {
+         Objects.requireNonNull(priority, "priority");
+         Objects.requireNonNull(owner, "owner");
+         Objects.requireNonNull(onReady, "onReady");
++        validateChunkBounds(minChunkX, minChunkZ, maxChunkX, maxChunkZ);
+         if (owner.domain() != OwnerDomainExecutor.Domain.REGION || owner.level() != level
+             || owner.minChunkX() > minChunkX || owner.minChunkZ() > minChunkZ
+             || owner.maxChunkX() < maxChunkX || owner.maxChunkZ() < maxChunkZ) {
+             throw new IllegalArgumentException("Chunk callback owner must contain the requested level and chunks");
+         }
+-        if (maxChunkX < minChunkX || maxChunkZ < minChunkZ) {
+-            throw new IllegalArgumentException("Invalid chunk bounds for runWhenChunksReady");
+-        }
+ 
+         final CompletableFuture<Void> future = new CompletableFuture<>();
+         loadAndDispatch(
+@@ -182,6 +181,12 @@ public final class OwnershipRouter {
+         return result;
+     }
+ 
++    private static void validateChunkBounds(final int minChunkX, final int minChunkZ, final int maxChunkX, final int maxChunkZ) {
++        if (maxChunkX < minChunkX || maxChunkZ < minChunkZ) {
++            throw new IllegalArgumentException("Invalid chunk bounds for runWhenChunksReady");
++        }
++    }
++
+     private static void loadAndDispatch(
+         final CompletableFuture<Void> future,
+         final ServerLevel level,

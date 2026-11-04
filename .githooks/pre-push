@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+head_commit="$(git rev-parse HEAD)"
+needs_verification=false
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [[ "$local_sha" =~ ^0+$ ]] && continue
+  if [[ "$(git rev-parse "${local_sha}^{commit}")" != "$head_commit" ]]; then
+    echo "Check out the commit being pushed so its full build can be verified." >&2
+    exit 1
+  fi
+  needs_verification=true
+done
+[[ "$needs_verification" == true ]] || exit 0
+
+if ! git diff --quiet HEAD --; then
+  echo "Commit tracked changes before verifying the source being pushed." >&2
+  exit 1
+fi
+# The build uses other Git repositories; do not pass this hook's repository environment to them.
+mapfile -t git_local_env < <(git rev-parse --local-env-vars)
+unset "${git_local_env[@]}"
+cd -- "$repo_root"
+exec "$repo_root/scripts/verify-ci.sh"

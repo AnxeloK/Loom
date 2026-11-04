@@ -54,11 +54,20 @@ Then exercise the real paths your server depends on: joins, teleports, commands,
 ./gradlew :loom-server:createPaperclipJar --no-daemon
 ```
 
-Before publishing a runtime change, also verify that a clean generated tree can be recreated:
+Before pushing a runtime change, run the same verification used by GitHub:
 
 ```bash
-./gradlew applyAllPatches --no-daemon
-./gradlew :loom-server:compileJava --no-daemon
+./scripts/verify-ci.sh
+```
+
+This applies the patches, builds the pinned Paper ABI baseline, runs the full checks and packages the runtime.
+Set `PAPER_ABI_BASELINE_DIR` to choose a different baseline workspace.
+
+To run this check automatically before each push from the current checkout:
+
+```bash
+git config extensions.worktreeConfig true
+git config --worktree core.hooksPath .githooks
 ```
 
 ## License
