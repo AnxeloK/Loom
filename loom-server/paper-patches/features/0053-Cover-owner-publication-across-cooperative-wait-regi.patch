@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 08:34:41 +0200
+Subject: [PATCH] Cover owner publication across cooperative wait registration
+
+
+diff --git a/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
+index 94d461f412547f4852f1f7993aaea08cde5b26dc..530ce12f418c9cf130bc71a78da867b1c810b342 100644
+--- a/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
++++ b/src/test/java/net/minecraft/server/threading/runtime/OwnerDomainExecutorCooperativeWaitTest.java
+@@ -158,6 +158,70 @@ class OwnerDomainExecutorCooperativeWaitTest {
+         Assertions.assertNull(queuedOwnerTask.get());
+     }
+ 
++    @Test
++    void ownerTaskQueuedAcrossWaitRegistrationWakesUnrelatedWait() throws InterruptedException {
++        final MinecraftServer server = Mockito.mock(MinecraftServer.class);
++        final AtomicReference<Runnable> queuedOwnerTask = new AtomicReference<>();
++        final CountDownLatch enqueueEntered = new CountDownLatch(1);
++        final CountDownLatch releaseEnqueue = new CountDownLatch(1);
++        Mockito.when(server.enqueueGlobalOwnerTask(Mockito.any(Runnable.class))).thenAnswer(invocation -> {
++            enqueueEntered.countDown();
++            Assertions.assertTrue(releaseEnqueue.await(5L, TimeUnit.SECONDS));
++            queuedOwnerTask.set(invocation.getArgument(0));
++            return true;
++        });
++        Mockito.when(server.runQueuedGlobalOwnerTask(Mockito.any())).thenAnswer(invocation -> {
++            final java.util.function.Predicate<Runnable> predicate = invocation.getArgument(0);
++            final Runnable candidate = queuedOwnerTask.get();
++            if (candidate == null || !predicate.test(candidate) || !queuedOwnerTask.compareAndSet(candidate, null)) {
++                return false;
++            }
++            candidate.run();
++            return true;
++        });
++        final OwnerDomainExecutor.Owner owner = OwnerDomainExecutor.global(server, "registration-race");
++        final CompletableFuture<Void> leaseReleased = new CompletableFuture<>();
++        final CountDownLatch callbackStarted = new CountDownLatch(1);
++        final AtomicReference<Throwable> failure = new AtomicReference<>();
++        final Thread submitter = new Thread(() -> OwnerDomainExecutor.supply(owner, () -> {
++            callbackStarted.countDown();
++            return null;
++        }), "registration-race-submitter");
++        final Thread ownerThread = new Thread(() -> {
++            try (OwnerDomainExecutor.Scope ignored = OwnerDomainExecutor.enter(owner)) {
++                OwnerDomainExecutor.awaitCooperatively(leaseReleased, "unrelated-lease-wait");
++            } catch (final Throwable throwable) {
++                failure.set(throwable);
++            }
++        }, "registration-race-owner");
++        submitter.setDaemon(true);
++        ownerThread.setDaemon(true);
++        boolean callbackDelivered = false;
++        try {
++            // Dispatch misses the cooperative wait, then pauses before publishing to the owner queue.
++            submitter.start();
++            Assertions.assertTrue(enqueueEntered.await(5L, TimeUnit.SECONDS));
++            ownerThread.start();
++            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
++            while (ownerThread.getState() != Thread.State.WAITING && System.nanoTime() < deadline) {
++                Thread.sleep(1L);
++            }
++            Assertions.assertEquals(Thread.State.WAITING, ownerThread.getState());
++            releaseEnqueue.countDown();
++            callbackDelivered = callbackStarted.await(5L, TimeUnit.SECONDS);
++        } finally {
++            releaseEnqueue.countDown();
++            submitter.join(5_000L);
++            leaseReleased.complete(null);
++            ownerThread.join(5_000L);
++        }
++        Assertions.assertFalse(submitter.isAlive());
++        Assertions.assertFalse(ownerThread.isAlive());
++        Assertions.assertNull(failure.get());
++        Assertions.assertTrue(callbackDelivered, "queued owner work did not wake an unrelated cooperative wait");
++        Assertions.assertEquals(0, OwnerDomainExecutor.activeCooperativeWaits());
++    }
++
+     @Test
+     void cooperativeWaitPreservesEarlierSameOwnerTask() throws InterruptedException {
+         final MinecraftServer server = Mockito.mock(MinecraftServer.class);

@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 08:26:05 +0200
+Subject: [PATCH] Include runtime packages in the default CI suites
+
+
+diff --git a/src/test/java/org/bukkit/support/suite/NormalTestSuite.java b/src/test/java/org/bukkit/support/suite/NormalTestSuite.java
+index 1292c4595bf0acc5b149e17f4c93da3f8ffbc3f3..0bcd35c6ecf9e242172908af156b21e5b191f9ab 100644
+--- a/src/test/java/org/bukkit/support/suite/NormalTestSuite.java
++++ b/src/test/java/org/bukkit/support/suite/NormalTestSuite.java
+@@ -11,7 +11,10 @@ import org.junit.platform.suite.api.SuiteDisplayName;
+ @SuiteDisplayName("Test suite for standalone tests, which don't need any registry values present")
+ @IncludeTags("Normal")
+ @ExcludePackages("io.papermc.paper.plugin.manager.compat")
+-@SelectPackages({"org.bukkit", "io.papermc.paper", "com.destroystokyo.paper"})
++@SelectPackages({
++    "org.bukkit", "io.papermc.paper", "com.destroystokyo.paper",
++    "net.minecraft", "ca.spottedleaf", "org.spigotmc"
++})
+ @ConfigurationParameter(key = "TestSuite", value = "Normal")
+ public class NormalTestSuite {
+ }
+diff --git a/src/test/java/org/bukkit/support/suite/VanillaFeatureTestSuite.java b/src/test/java/org/bukkit/support/suite/VanillaFeatureTestSuite.java
+index d06cf4b8131ad01b3ab8b4b87c269b5e6461e263..3401322327a4a791ae48ed46465686a31f928bef 100644
+--- a/src/test/java/org/bukkit/support/suite/VanillaFeatureTestSuite.java
++++ b/src/test/java/org/bukkit/support/suite/VanillaFeatureTestSuite.java
+@@ -9,7 +9,10 @@ import org.junit.platform.suite.api.SuiteDisplayName;
+ @Suite(failIfNoTests = false)
+ @SuiteDisplayName("Test suite for test which need vanilla registry values present")
+ @IncludeTags("VanillaFeature")
+-@SelectPackages({"org.bukkit", "io.papermc.paper", "com.destroystokyo.paper"})
++@SelectPackages({
++    "org.bukkit", "io.papermc.paper", "com.destroystokyo.paper",
++    "net.minecraft", "ca.spottedleaf", "org.spigotmc"
++})
+ @ConfigurationParameter(key = "TestSuite", value = "VanillaFeature")
+ public class VanillaFeatureTestSuite {
+ }

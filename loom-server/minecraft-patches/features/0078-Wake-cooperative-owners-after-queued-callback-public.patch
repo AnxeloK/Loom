@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 08:37:03 +0200
+Subject: [PATCH] Wake cooperative owners after queued callback publication
+
+
+diff --git a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+index f809c308a4c270e9cc4675636f60506b24530943..b524d8e8f54f599fbc15dcc19eb0dc00eda50ea1 100644
+--- a/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
++++ b/net/minecraft/server/threading/runtime/OwnerDomainExecutor.java
+@@ -395,7 +395,7 @@ public final class OwnerDomainExecutor {
+             case ASYNC_IO -> Util.nonCriticalIoPool().execute(wrap(owner, task, completion));
+         }
+         if (completion != null) {
+-            signalCooperativeWaiters(completion);
++            signalCooperativeWaiters(owner, completion);
+         }
+     }
+ 
+@@ -620,6 +620,16 @@ public final class OwnerDomainExecutor {
+         }
+     }
+ 
++    private static void signalCooperativeWaiters(final Owner owner, final CompletableFuture<?> completion) {
++        // A wait can register after direct dispatch misses it but before the owner task is queued.
++        // Wake that owner even when its current wait is for an unrelated future, such as a plugin lease.
++        for (final CooperativeWait wait : cooperativeWaits) {
++            if (wait.accepts(owner) || wait.awaits(completion)) {
++                wait.signal();
++            }
++        }
++    }
++
+     private static void signalCooperativeWaiters(final CompletableFuture<?> completion) {
+         for (final CooperativeWait wait : cooperativeWaits) {
+             if (wait.awaits(completion)) {
