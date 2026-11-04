@@ -1,0 +1,274 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 04:11:19 +0200
+Subject: [PATCH] Tick player connection listeners through joined world owners
+
+
+diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
+index 0b97163d12040aabd7c9e9ebad0a963c2da90f46..1a2f9f2078f2140c037fd25b9fd86d1c952e3549 100644
+--- a/net/minecraft/network/Connection.java
++++ b/net/minecraft/network/Connection.java
+@@ -733,30 +733,42 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+     }
+ 
+     public void tick() {
++        this.tickPreparedListener(this.prepareTick());
++        this.finishTick();
++    }
++
++    // Preparation and transport finalization belong to the global connection phase.
++    public @Nullable TickablePacketListener prepareTick() {
+         this.flushQueue();
+-        // Paper start - Buffer joins to world
+         final int currentTick = DomainClock.currentServerTick();
+         if (Connection.currTick != currentTick) {
+             Connection.currTick = currentTick;
+             Connection.joinAttemptsThisTick = 0;
+         }
+-        // Paper end - Buffer joins to world
+         final PacketListener listener = this.packetListener;
+-        if (listener instanceof TickablePacketListener tickable) {
+-            // Paper start - Buffer joins to world
+-            if (!(listener instanceof net.minecraft.server.network.ServerLoginPacketListenerImpl loginPacketListener)
++        if (listener instanceof TickablePacketListener tickable
++            && (!(listener instanceof net.minecraft.server.network.ServerLoginPacketListenerImpl loginPacketListener)
+                 || loginPacketListener.state != net.minecraft.server.network.ServerLoginPacketListenerImpl.State.VERIFYING
+-                || Connection.joinAttemptsThisTick++ < MAX_PER_TICK) {
+-            // Paper start - detailed watchdog information
+-            net.minecraft.network.PacketProcessor.packetProcessing.push(listener);
+-            try {
+-            tickListenerInOwnerContext(listener, tickable);
+-            } finally {
+-                net.minecraft.network.PacketProcessor.packetProcessing.pop();
+-            } // Paper end - detailed watchdog information
+-            } // Paper end - Buffer joins to world
++                || Connection.joinAttemptsThisTick++ < MAX_PER_TICK)) {
++            return tickable;
++        }
++        return null;
++    }
++
++    public void tickPreparedListener(final @Nullable TickablePacketListener listener) {
++        if (listener == null) {
++            return;
+         }
++        net.minecraft.network.PacketProcessor.packetProcessing.push(listener);
++        try {
++            this.tickListenerInOwnerContext(listener, listener);
++        } finally {
++            // Other worlds may finish their listeners in a different order.
++            net.minecraft.network.PacketProcessor.packetProcessing.removeFirstOccurrence(listener);
++        }
++    }
+ 
++    public void finishTick() {
+         if (!this.isConnected() && !this.disconnectionHandled) {
+             this.handleDisconnectionInOwnerContext();
+         }
+diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
+index aa9ddb78e23e3e4638b944792799ce99732f9fe9..64871cd87c5b385aa1809fb8c245274315c22198 100644
+--- a/net/minecraft/network/PacketProcessor.java
++++ b/net/minecraft/network/PacketProcessor.java
+@@ -300,7 +300,7 @@ public class PacketProcessor implements AutoCloseable {
+             // Paper start - detailed watchdog information
+             } finally {
+                 totalMainThreadPacketsProcessed.getAndIncrement();
+-                packetProcessing.pop();
++                packetProcessing.removeFirstOccurrence(this.listener);
+             }
+             // Paper end - detailed watchdog information
+         }
+diff --git a/net/minecraft/server/network/ServerConnectionListener.java b/net/minecraft/server/network/ServerConnectionListener.java
+index c6ddb7f47d5003a0a782b1d4edf0dd48ce270121..c8e550c178ea84e43c7c9683d173b3a8b8d2dcfb 100644
+--- a/net/minecraft/server/network/ServerConnectionListener.java
++++ b/net/minecraft/server/network/ServerConnectionListener.java
+@@ -21,9 +21,12 @@ import io.netty.util.Timer;
+ import java.io.IOException;
+ import java.net.InetAddress;
+ import java.net.SocketAddress;
++import java.util.ArrayList;
+ import java.util.Collections;
+ import java.util.Iterator;
++import java.util.LinkedHashMap;
+ import java.util.List;
++import java.util.Map;
+ import java.util.Queue;
+ import java.util.UUID;
+ import java.util.concurrent.ConcurrentLinkedQueue;
+@@ -35,10 +38,13 @@ import net.minecraft.network.Connection;
+ import net.minecraft.network.HandlerNames;
+ import net.minecraft.network.PacketSendListener;
+ import net.minecraft.network.RateKickingConnection;
++import net.minecraft.network.TickablePacketListener;
+ import net.minecraft.network.chat.Component;
+ import net.minecraft.network.protocol.PacketFlow;
+ import net.minecraft.network.protocol.common.ClientboundDisconnectPacket;
+ import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.TickRegions;
+ import net.minecraft.server.threading.runtime.DomainClock;
+ import org.jspecify.annotations.Nullable;
+ import org.slf4j.Logger;
+@@ -250,6 +256,7 @@ public class ServerConnectionListener {
+     }
+ 
+     public void tick() {
++        final List<PendingConnectionTick> playerTicks = new ArrayList<>();
+         synchronized (this.connections) {
+             this.addPendingConnections();
+             // Spigot start
+@@ -265,16 +272,15 @@ public class ServerConnectionListener {
+                 if (!connection.isConnecting()) {
+                     if (connection.isConnected()) {
+                         try {
+-                            connection.tick();
+-                        } catch (Exception e) {
+-                            if (connection.isMemoryConnection()) {
+-                                throw new ReportedException(CrashReport.forThrowable(e, "Ticking memory connection"));
++                            final TickablePacketListener listener = connection.prepareTick();
++                            if (listener instanceof ServerGamePacketListenerImpl gameListener) {
++                                playerTicks.add(new PendingConnectionTick(connection, gameListener));
++                            } else {
++                                connection.tickPreparedListener(listener);
++                                connection.finishTick();
+                             }
+-
+-                            LOGGER.warn("Failed to handle packet for {}", connection.getLoggableAddress(this.server.logIPs()), e);
+-                            Component component = Component.literal("Internal server error");
+-                            connection.send(new ClientboundDisconnectPacket(component), PacketSendListener.thenRun(() -> connection.disconnect(component)));
+-                            connection.setReadOnly();
++                        } catch (Exception e) {
++                            this.handleTickFailure(connection, e);
+                         }
+                     } else {
+                         if (connection.preparing) continue; // Spigot - Fix a race condition where a Connection could be unregistered just before connection
+@@ -284,6 +290,12 @@ public class ServerConnectionListener {
+                 }
+             }
+ 
++        }
++
++        // Callbacks can inspect the synchronized registry. Do not hold its monitor across a join.
++        this.tickPlayerConnections(playerTicks);
++
++        synchronized (this.connections) {
+             if (this.connections.isEmpty()) {
+                 synchronized (this) {
+                     this.sessionId = null;
+@@ -291,6 +303,87 @@ public class ServerConnectionListener {
+             }
+         }
+     }
++
++    private void tickPlayerConnections(final List<PendingConnectionTick> ticks) {
++        final Map<ServerLevel, List<PendingConnectionTick>> byWorld = new LinkedHashMap<>();
++        for (final PendingConnectionTick tick : ticks) {
++            final ServerLevel world = tick.listener.player.level();
++            if (world.getServer() != this.server) {
++                throw new IllegalArgumentException("Player connection belongs to another server");
++            }
++            byWorld.computeIfAbsent(world, ignored -> new ArrayList<>()).add(tick);
++        }
++        if (!byWorld.isEmpty()) {
++            TickRegions.runJoinedWorldPhase(
++                this.server, new ArrayList<>(byWorld.keySet()), world -> {
++                    final TickRegions.RegionContext context = TickRegions.pushLevelContext(world);
++                    try {
++                        for (final PendingConnectionTick tick : byWorld.get(world)) {
++                            if (tick.listener.player.level() == world) {
++                                tick.executeListener();
++                            }
++                        }
++                    } finally {
++                        TickRegions.popContext(context);
++                    }
++                }, "connectionListener"
++            );
++        }
++        // Transfers wait for every world to finish. Connection removal and transport accounting
++        // retain the global owner and the original connection order.
++        for (final PendingConnectionTick tick : ticks) {
++            if (!tick.executed) {
++                tick.executeListener();
++            }
++            if (tick.failure != null) {
++                this.handleTickFailure(tick.connection, tick.failure);
++            } else {
++                try {
++                    tick.connection.finishTick();
++                } catch (Exception error) {
++                    this.handleTickFailure(tick.connection, error);
++                }
++            }
++        }
++    }
++
++    private void handleTickFailure(final Connection connection, final Exception error) {
++        if (connection.isMemoryConnection()) {
++            throw new ReportedException(CrashReport.forThrowable(error, "Ticking memory connection"));
++        }
++        LOGGER.warn("Failed to handle packet for {}", connection.getLoggableAddress(this.server.logIPs()), error);
++        final Component reason = Component.literal("Internal server error");
++        connection.send(new ClientboundDisconnectPacket(reason), PacketSendListener.thenRun(() -> connection.disconnect(reason)));
++        connection.setReadOnly();
++    }
++
++    private static final class PendingConnectionTick {
++        private final Connection connection;
++        private final ServerGamePacketListenerImpl listener;
++        private boolean executed;
++        private @Nullable Exception failure;
++
++        private PendingConnectionTick(final Connection connection, final ServerGamePacketListenerImpl listener) {
++            this.connection = connection;
++            this.listener = listener;
++        }
++
++        private void executeListener() {
++            this.executed = true;
++            if (this.connection.getPacketListener() != this.listener || !this.connection.isConnected()) {
++                return;
++            }
++            try {
++                this.connection.tickPreparedListener(this.listener);
++            } catch (Exception error) {
++                if (this.connection.isMemoryConnection()) {
++                    throw new ReportedException(CrashReport.forThrowable(error, "Ticking memory connection"));
++                }
++                this.failure = error;
++            }
++        }
++    }
++
+     // Paper start
+     public void handleAllDisconnections() {
+         synchronized (this.connections) {
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index d35713bbc47a7c75fbe076d1af4469a98746f83c..626a681d15bceb9c69c7d72502e4252e023bb474 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -1665,6 +1665,24 @@ public class TickRegions {
+         runWorldPhaseInParallel(worlds, worldTick, "worldTick");
+     }
+ 
++    public static void runJoinedWorldPhase(
++        final MinecraftServer server,
++        final List<ServerLevel> worlds,
++        final java.util.function.Consumer<ServerLevel> action,
++        final String phase
++    ) {
++        if (OwnerDomainExecutor.currentDomain() != OwnerDomainExecutor.Domain.GLOBAL_CONTROL || currentContext() != null) {
++            throw new IllegalStateException("Joined world phases require the global owner outside a world context");
++        }
++        OwnerDomainExecutor.assertGlobalOwner(server, phase);
++        for (final ServerLevel world : worlds) {
++            if (world.getServer() != server) {
++                throw new IllegalArgumentException("World phase contains a world from another server");
++            }
++        }
++        runWorldPhaseInParallel(worlds, action, phase);
++    }
++
+     // Keep the scheduler snapshot order within each world. Transfers are revalidated before execution;
+     // schedulers that moved to another world wait for the joined batch, then tick under the global owner.
+     public static void tickEntitySchedulersInParallel(

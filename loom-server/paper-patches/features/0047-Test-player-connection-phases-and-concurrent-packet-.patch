@@ -1,0 +1,408 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 04:03:24 +0200
+Subject: [PATCH] Test player connection phases and concurrent packet scopes
+
+
+diff --git a/src/test/java/net/minecraft/network/PacketProcessorConcurrentScopeTest.java b/src/test/java/net/minecraft/network/PacketProcessorConcurrentScopeTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..9131cf18f0adfaf770ba249b32ed2512d29f2e2d
+--- /dev/null
++++ b/src/test/java/net/minecraft/network/PacketProcessorConcurrentScopeTest.java
+@@ -0,0 +1,57 @@
++package net.minecraft.network;
++
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.network.protocol.Packet;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class PacketProcessorConcurrentScopeTest {
++    @Test
++    @SuppressWarnings("unchecked")
++    void anEarlierFinishingPacketRemovesItsOwnWatchdogEntry() throws Exception {
++        PacketListener first = mock(PacketListener.class), second = mock(PacketListener.class);
++        Packet<PacketListener> firstPacket = mock(Packet.class), secondPacket = mock(Packet.class);
++        when(first.shouldHandleMessage(firstPacket)).thenReturn(true);
++        when(second.shouldHandleMessage(secondPacket)).thenReturn(true);
++        CountDownLatch firstEntered = new CountDownLatch(1), secondEntered = new CountDownLatch(1), firstFinished = new CountDownLatch(1);
++        doAnswer(ignored -> {
++            firstEntered.countDown();
++            assertTrue(secondEntered.await(5, TimeUnit.SECONDS));
++            return null;
++        }).when(firstPacket).handle(first);
++        doAnswer(ignored -> {
++            secondEntered.countDown();
++            assertTrue(firstFinished.await(5, TimeUnit.SECONDS));
++            assertEquals(java.util.List.of(second), PacketProcessor.getCurrentPacketProcessors());
++            return null;
++        }).when(secondPacket).handle(second);
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        Thread firstThread = new Thread(() -> {
++            try { PacketProcessor.handlePacketOnCurrentThread(first, firstPacket); }
++            catch (Throwable error) { failure.compareAndSet(null, error); }
++            finally { firstFinished.countDown(); }
++        }, "packet-scope-first");
++        Thread secondThread = new Thread(() -> {
++            try {
++                assertTrue(firstEntered.await(5, TimeUnit.SECONDS));
++                PacketProcessor.handlePacketOnCurrentThread(second, secondPacket);
++            } catch (Throwable error) { failure.compareAndSet(null, error); }
++        }, "packet-scope-second");
++        firstThread.setDaemon(true);
++        secondThread.setDaemon(true);
++        firstThread.start();
++        secondThread.start();
++        firstThread.join(10_000);
++        secondThread.join(10_000);
++        assertFalse(firstThread.isAlive());
++        assertFalse(secondThread.isAlive());
++        if (failure.get() != null) throw new AssertionError(failure.get());
++        assertTrue(PacketProcessor.getCurrentPacketProcessors().isEmpty());
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/network/ConnectionWorldBatchTest.java b/src/test/java/net/minecraft/server/network/ConnectionWorldBatchTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..01eb1caa80f13eaae42e1c4f79fee09f627cc77c
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/network/ConnectionWorldBatchTest.java
+@@ -0,0 +1,333 @@
++package net.minecraft.server.network;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import ca.spottedleaf.moonrise.patches.chunk_system.player.RegionizedPlayerChunkLoader;
++import io.netty.channel.Channel;
++import io.netty.channel.ChannelConfig;
++import io.netty.channel.EventLoop;
++import io.netty.channel.local.LocalChannel;
++import java.lang.reflect.Field;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.UUID;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.ReportedException;
++import net.minecraft.core.BlockPos;
++import net.minecraft.network.Connection;
++import net.minecraft.network.PacketProcessor;
++import net.minecraft.network.TickablePacketListener;
++import net.minecraft.network.protocol.PacketFlow;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class ConnectionWorldBatchTest {
++    @BeforeAll
++    static void initializeTypes() {
++        mock(MinecraftServer.class);
++        mock(ServerLevel.class);
++        mock(ServerPlayer.class);
++        mock(ServerGamePacketListenerImpl.class);
++        mock(RegionizedPlayerChunkLoader.class);
++    }
++
++    @Test
++    void independentWorldsProgressBeforeEitherPlayerTickFinishes() throws Exception {
++        Fixture f = new Fixture();
++        CountDownLatch entered = new CountDownLatch(2);
++        AtomicInteger finished = new AtomicInteger();
++        for (int index = 0; index < 2; ++index) {
++            ServerLevel world = f.world();
++            f.player(world, () -> {
++                entered.countDown();
++                await(entered);
++                f.assertWorld(world);
++                finished.incrementAndGet();
++            });
++        }
++        f.global(() -> {
++            f.network.tick();
++            assertEquals(2, finished.get());
++            assertTrue(PacketProcessor.getCurrentPacketProcessors().isEmpty());
++        });
++        assertEquals(2, f.finalized.get());
++    }
++
++    @Test
++    void playerCallbacksDoNotHoldTheConnectionRegistryMonitor() throws Exception {
++        Fixture f = new Fixture();
++        f.player(f.world(), () -> assertFalse(Thread.holdsLock(f.network.getConnections())));
++        f.global(f.network::tick);
++    }
++
++    @Test
++    void eachWorldRetainsConnectionOrder() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel a = f.world(), b = f.world();
++        List<Integer> first = new ArrayList<>(), second = new ArrayList<>();
++        f.player(a, () -> first.add(1));
++        f.player(b, () -> second.add(2));
++        f.player(a, () -> first.add(3));
++        f.player(b, () -> second.add(4));
++        f.global(f.network::tick);
++        assertEquals(List.of(1, 3), first);
++        assertEquals(List.of(2, 4), second);
++        assertEquals(4, f.finalized.get());
++    }
++
++    @Test
++    void transferBeforeThePlayersTurnTicksOnceAfterTheJoin() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel source = f.world(), target = f.world();
++        AtomicReference<ServerPlayer> moved = new AtomicReference<>();
++        AtomicInteger calls = new AtomicInteger();
++        f.player(source, () -> setUnchecked(moved.get(), "level", target));
++        moved.set(f.player(source, () -> {
++            assertTrue(OwnerDomainExecutor.isGlobalOwner(f.server));
++            assertTrue(OwnerDomainExecutor.isRegionOwner(target, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE));
++            calls.incrementAndGet();
++        }));
++        f.global(f.network::tick);
++        assertEquals(1, calls.get());
++        assertEquals(2, f.finalized.get());
++    }
++
++    @Test
++    void transferDuringTheTickDoesNotTickThePlayerAgain() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel source = f.world(), target = f.world();
++        AtomicReference<ServerPlayer> moved = new AtomicReference<>();
++        AtomicInteger calls = new AtomicInteger();
++        moved.set(f.player(source, () -> {
++            calls.incrementAndGet();
++            setUnchecked(moved.get(), "level", target);
++        }));
++        f.global(f.network::tick);
++        assertEquals(1, calls.get());
++    }
++
++    @Test
++    void aReplacedListenerDoesNotRunItsRetiredPlayerTick() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel world = f.world();
++        AtomicReference<Connection> replaced = new AtomicReference<>();
++        f.player(world, () -> setUnchecked(replaced.get(), "packetListener", mock(TickablePacketListener.class)));
++        ServerPlayer player = f.player(world, () -> fail("Replaced listener ran"));
++        replaced.set(f.network.getConnections().get(1));
++        f.global(f.network::tick);
++        verify(player.connection, never()).tick();
++        assertEquals(2, f.finalized.get());
++    }
++
++    @Test
++    void oneListenerFailureDoesNotSkipOtherPlayersOrRetainWatchdogEntries() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel world = f.world();
++        f.player(world, () -> { throw new IllegalArgumentException("expected listener failure"); });
++        AtomicInteger later = new AtomicInteger();
++        f.player(world, later::incrementAndGet);
++        f.global(f.network::tick);
++        assertEquals(1, later.get());
++        assertEquals(1, f.finalized.get());
++        assertTrue(PacketProcessor.getCurrentPacketProcessors().isEmpty());
++    }
++
++    @Test
++    void aMemoryConnectionFailureStopsItsWorldAndJoinsOtherWorlds() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel world = f.world();
++        f.player(world, () -> { throw new IllegalArgumentException("expected memory connection failure"); });
++        LocalChannel channel = mock(LocalChannel.class);
++        when(channel.isOpen()).thenReturn(true);
++        f.network.getConnections().get(0).channel = channel;
++        f.player(world, () -> fail("Callback after a fatal memory connection ran"));
++        AtomicBoolean other = new AtomicBoolean();
++        f.player(f.world(), () -> other.set(true));
++        f.global(() -> {
++            ReportedException error = assertThrows(ReportedException.class, f.network::tick);
++            assertInstanceOf(IllegalArgumentException.class, error.getCause());
++            assertTrue(other.get());
++        });
++        assertTrue(PacketProcessor.getCurrentPacketProcessors().isEmpty());
++    }
++
++    @Test
++    void anErrorJoinsOtherWorldsAndRestoresTheGlobalOwner() throws Exception {
++        Fixture f = new Fixture();
++        f.player(f.world(), () -> { throw new AssertionError("expected fatal listener"); });
++        AtomicBoolean other = new AtomicBoolean();
++        f.player(f.world(), () -> other.set(true));
++        f.global(() -> {
++            assertThrows(AssertionError.class, f.network::tick);
++            assertTrue(other.get());
++            assertTrue(OwnerDomainExecutor.isGlobalOwner(f.server));
++            assertNull(TickRegions.currentContext());
++        });
++        assertTrue(PacketProcessor.getCurrentPacketProcessors().isEmpty());
++    }
++
++    @Test
++    void nonPlayerListenersAndTheirFinalizationKeepTheGlobalOwner() throws Exception {
++        Fixture f = new Fixture();
++        TickablePacketListener login = mock(TickablePacketListener.class);
++        doAnswer(ignored -> {
++            assertEquals(OwnerDomainExecutor.Domain.GLOBAL_CONTROL, OwnerDomainExecutor.currentDomain());
++            assertNull(TickRegions.currentContext());
++            return null;
++        }).when(login).tick();
++        f.connection(login);
++        f.global(f.network::tick);
++        verify(login).tick();
++        assertEquals(1, f.finalized.get());
++    }
++
++    @Test
++    void verifyingLoginsStillShareTheGlobalJoinLimit() throws Exception {
++        Fixture f = new Fixture();
++        int limit = io.papermc.paper.configuration.GlobalConfiguration.get().misc.maxJoinsPerTick;
++        assertTrue(limit > 0 && limit < 64);
++        List<ServerLoginPacketListenerImpl> logins = new ArrayList<>();
++        for (int index = 0; index < limit + 2; ++index) {
++            ServerLoginPacketListenerImpl login = mock(ServerLoginPacketListenerImpl.class);
++            login.state = ServerLoginPacketListenerImpl.State.VERIFYING;
++            f.connection(login);
++            logins.add(login);
++        }
++        when(f.server.getTickCount()).thenReturn(54_321);
++        f.global(f.network::tick);
++        for (int index = 0; index < logins.size(); ++index) {
++            verify(logins.get(index), times(index < limit ? 1 : 0)).tick();
++        }
++        assertEquals(limit + 2, f.finalized.get());
++    }
++
++    @Test
++    void anEmptyConnectionListRetainsTheGlobalOwner() throws Exception {
++        Fixture f = new Fixture();
++        f.global(f.network::tick);
++        assertEquals(0, f.finalized.get());
++    }
++
++    private static void await(CountDownLatch latch) {
++        try {
++            assertTrue(latch.await(5, TimeUnit.SECONDS), "Independent player worlds did not enter together");
++        } catch (InterruptedException error) {
++            Thread.currentThread().interrupt();
++            throw new AssertionError(error);
++        }
++    }
++
++    private static final class Fixture {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerConnectionListener network = new ServerConnectionListener(server);
++        final List<ServerLevel> worlds = new ArrayList<>();
++        final AtomicInteger finalized = new AtomicInteger();
++
++        ServerLevel world() {
++            ServerLevel world = mock(ServerLevel.class);
++            when(world.getServer()).thenReturn(server);
++            when(world.dimension()).thenReturn(Level.OVERWORLD);
++            when(world.moonrise$getPlayerChunkLoader()).thenReturn(mock(RegionizedPlayerChunkLoader.class));
++            worlds.add(world);
++            return world;
++        }
++
++        ServerPlayer player(ServerLevel world, Runnable callback) throws Exception {
++            ServerPlayer player = mock(ServerPlayer.class, CALLS_REAL_METHODS);
++            set(player, "level", world);
++            set(player, "blockPosition", BlockPos.ZERO);
++            set(player, "chunkPosition", new ChunkPos(0, 0));
++            when(player.getUUID()).thenReturn(UUID.randomUUID());
++            ServerGamePacketListenerImpl listener = mock(ServerGamePacketListenerImpl.class);
++            listener.player = player;
++            player.connection = listener;
++            doAnswer(ignored -> { callback.run(); return null; }).when(listener).tick();
++            connection(listener);
++            return player;
++        }
++
++        void connection(TickablePacketListener listener) throws Exception {
++            Connection connection = new Connection(PacketFlow.SERVERBOUND) {
++                @Override
++                protected void tickSecond() {
++                    assertEquals(OwnerDomainExecutor.Domain.GLOBAL_CONTROL, OwnerDomainExecutor.currentDomain());
++                    assertNull(TickRegions.currentContext());
++                    finalized.incrementAndGet();
++                    super.tickSecond();
++                }
++            };
++            set(connection, "packetListener", listener);
++            Channel channel = mock(Channel.class);
++            when(channel.isOpen()).thenReturn(true);
++            when(channel.config()).thenReturn(mock(ChannelConfig.class));
++            when(channel.eventLoop()).thenReturn(mock(EventLoop.class));
++            connection.channel = channel;
++            network.getConnections().add(connection);
++        }
++
++        void assertWorld(ServerLevel world) {
++            assertEquals(OwnerDomainExecutor.Domain.PLAYER, OwnerDomainExecutor.currentDomain());
++            assertTrue(OwnerDomainExecutor.isRegionOwner(world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE));
++            assertFalse(OwnerDomainExecutor.isGlobalOwner(server));
++        }
++
++        void global(Runnable action) throws Exception {
++            Field singleton = MinecraftServer.class.getDeclaredField("SERVER");
++            singleton.setAccessible(true);
++            Object previous = singleton.get(null);
++            singleton.set(null, server);
++            AtomicReference<Throwable> failure = new AtomicReference<>();
++            Thread thread = new TickThread(() -> {
++                try (var ignored = OwnerDomainExecutor.enterGlobal(server, "connection-world-test")) {
++                    action.run();
++                    assertTrue(OwnerDomainExecutor.isGlobalOwner(server));
++                    assertNull(TickRegions.currentContext());
++                } catch (Throwable error) { failure.set(error); }
++            }, "connection-world-test");
++            thread.setDaemon(true);
++            try {
++                thread.start();
++                thread.join(10_000L);
++                assertFalse(thread.isAlive(), "Connection phase did not finish");
++                if (failure.get() instanceof Error error) throw error;
++                if (failure.get() instanceof RuntimeException error) throw error;
++                if (failure.get() != null) throw new AssertionError(failure.get());
++            } finally {
++                singleton.set(null, previous);
++                for (ServerLevel world : worlds) TickRegions.clearWorldState(world);
++            }
++        }
++    }
++
++    private static void setUnchecked(Object target, String name, Object value) {
++        try { set(target, name, value); }
++        catch (Exception error) { throw new AssertionError(error); }
++    }
++
++    private static void set(Object target, String name, Object value) throws Exception {
++        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
++            try {
++                Field field = type.getDeclaredField(name);
++                field.setAccessible(true);
++                field.set(target, value);
++                return;
++            } catch (NoSuchFieldException ignored) { }
++        }
++        throw new NoSuchFieldException(name);
++    }
++}
