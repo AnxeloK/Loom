@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 22:32:43 +0200
+Subject: [PATCH] Complete empty chunk post-processing without loading
+ neighbors
+
+
+diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
+index 1b69574c832edf30f8d87929a445adc5197f5da4..68135ed0c0cb668f6b503fcb67cd268b01fb5fb4 100644
+--- a/net/minecraft/world/level/chunk/LevelChunk.java
++++ b/net/minecraft/world/level/chunk/LevelChunk.java
+@@ -160,6 +160,22 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+             return true;
+         }
+ 
++        // Loaded chunks commonly have no serialized work left. They need no neighbour tickets,
++        // but completion must still belong to this live chunk's owner.
++        if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(level, pos.x(), pos.z())
++            && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(level, pos.x(), pos.z())
++            && level.getChunkSource().getChunkAtIfLoadedImmediately(pos.x(), pos.z()) == this
++            && !this.moonrise$hasPostProcessingWork()) {
++            this.postProcessingDone = true;
++            POST_PROCESSING_SCHEDULED.set(this, 0);
++            this.postProcessingCompletion.complete(null);
++            final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder holder = this.chunkAndHolder;
++            if (holder != null) {
++                holder.moonrise$requeueFullStatusChange();
++            }
++            return true;
++        }
++
+         try {
+             net.minecraft.server.threading.runtime.OwnershipRouter.runWhenChunksReady(
+                 level,
+@@ -185,6 +201,19 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+         return this.postProcessingDone;
+     }
+ 
++    private boolean moonrise$hasPostProcessingWork() {
++        // isEmpty() does not account for UpgradeData's relocated neighbour tick lists.
++        if (this.upgradeData != UpgradeData.EMPTY || !this.pendingBlockEntities.isEmpty()) {
++            return true;
++        }
++        for (final ShortList section : this.postProcessing) {
++            if (section != null && !section.isEmpty()) {
++                return true;
++            }
++        }
++        return false;
++    }
++
+     private boolean moonrise$isPostProcessingHaloReady(
+         final ServerLevel level,
+         final int minChunkX,
