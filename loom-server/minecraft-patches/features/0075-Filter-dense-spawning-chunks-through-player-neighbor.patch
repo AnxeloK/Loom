@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 05:42:40 +0200
+Subject: [PATCH] Filter dense spawning chunks through player neighborhoods
+
+
+diff --git a/ca/spottedleaf/moonrise/common/misc/NearbyPlayers.java b/ca/spottedleaf/moonrise/common/misc/NearbyPlayers.java
+index fff7a796a61542213bdaa417d44e25cd05f7e774..e61747c3d17fb422ea83479c3812a49c164a3807 100644
+--- a/ca/spottedleaf/moonrise/common/misc/NearbyPlayers.java
++++ b/ca/spottedleaf/moonrise/common/misc/NearbyPlayers.java
+@@ -72,6 +72,11 @@ public final class NearbyPlayers {
+         this.world = world;
+     }
+ 
++    /** Returns a detached snapshot while the caller owns this world's tracking state. */
++    public ServerPlayer[] getTrackedPlayersSnapshot() {
++        return this.players.keySet().toArray(new ServerPlayer[0]);
++    }
++
+     public void addPlayer(final ServerPlayer player) {
+         final TrackedPlayer[] newTrackers = new TrackedPlayer[TOTAL_MAP_TYPES];
+         if (this.players.putIfAbsent(player, newTrackers) != null) {
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+index 38c46eaed79def0e5287b4f4a13d29c244982a8d..8b69e0772042e9d3f948ca52976e2feb0d42db52 100644
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -11,6 +11,7 @@ import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+ import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
+ import it.unimi.dsi.fastutil.longs.Long2ByteMap;
+ import it.unimi.dsi.fastutil.longs.Long2ByteOpenHashMap;
++import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
+ import it.unimi.dsi.fastutil.longs.Long2LongMap;
+ import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
+ import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
+@@ -764,6 +765,9 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+             plan.collect(output);
+             return;
+         }
++        if (plan.collectByPlayer(output)) {
++            return;
++        }
+         // Loom end
+         for (int i = 0; i < size; ++i) {
+             final LevelChunk levelChunk = raw[i];
+@@ -787,6 +791,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+         private final LevelChunk[] sourceChunks;
+         private final boolean[] included;
+         private final List<net.minecraft.server.threading.TickRegions.RegionBoundTask> tasks;
++        private @Nullable Long2IntOpenHashMap chunkIndices;
+ 
+         private SpawningChunkFilterPlan(final ChunkMap chunkMap, final LevelChunk[] chunks, final int size) {
+             this.chunkMap = chunkMap;
+@@ -871,6 +876,76 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+             return this.tasks.size() > 1;
+         }
+ 
++        private boolean collectByPlayer(final List<LevelChunk> output) {
++            final int width = PLAYER_RADIUS_CHUNKS * 2 + 1;
++            if (this.sourceChunks.length < width * width * 2
++                || !net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(this.chunkMap.level,
++                    Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)
++                || !net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(this.chunkMap.level,
++                    Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
++                return false;
++            }
++            if (this.chunkIndices == null) {
++                this.chunkIndices = new Long2IntOpenHashMap(this.sourceChunks.length);
++                this.chunkIndices.defaultReturnValue(-1);
++                for (int index = 0; index < this.sourceChunks.length; ++index) {
++                    final LevelChunk chunk = this.sourceChunks[index];
++                    this.chunkIndices.put(ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkKey(chunk.locX, chunk.locZ), index);
++                }
++            }
++            java.util.Arrays.fill(this.included, false);
++            final ServerPlayer[] players = this.chunkMap.level.moonrise$getNearbyPlayers().getTrackedPlayersSnapshot();
++            for (final ServerPlayer player : players) {
++                final var event = player.playerNaturallySpawnedEvent;
++                if (event == null || event.isCancelled() || player.isSpectator()) {
++                    continue;
++                }
++                final int radius = Math.abs((int)event.getSpawnRadius());
++                final int blockRadius = event.getSpawnRadius() << 4;
++                final double range = (double)(blockRadius * blockRadius);
++                final Vec3 position = player.position();
++                if (radius > PLAYER_RADIUS_CHUNKS) {
++                    // Custom radii still use the tracked membership, including a lagging tracking centre.
++                    for (int index = 0; index < this.sourceChunks.length; ++index) {
++                        this.includeForPlayer(index, player, position, range);
++                    }
++                } else if (radius != 0 && Double.isFinite(position.x) && Double.isFinite(position.z)) {
++                    final int centreX = net.minecraft.util.Mth.floor(position.x) >> 4;
++                    final int centreZ = net.minecraft.util.Mth.floor(position.z) >> 4;
++                    for (int z = centreZ - radius; z <= centreZ + radius; ++z) {
++                        for (int x = centreX - radius; x <= centreX + radius; ++x) {
++                            final int index = this.chunkIndices.get(ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkKey(x, z));
++                            if (index >= 0) {
++                                this.includeForPlayer(index, player, position, range);
++                            }
++                        }
++                    }
++                }
++            }
++            for (int index = 0; index < this.sourceChunks.length; ++index) {
++                if (this.included[index]) {
++                    output.add(this.sourceChunks[index]);
++                }
++            }
++            return true;
++        }
++
++        private void includeForPlayer(final int index, final ServerPlayer player, final Vec3 position, final double range) {
++            if (this.included[index]) {
++                return;
++            }
++            final LevelChunk chunk = this.sourceChunks[index];
++            if (!(euclideanDistanceSquared(chunk.locX, chunk.locZ, position) < range)) {
++                return;
++            }
++            final var nearby = chunk.moonrise$getChunkHolder().holderData.nearbyPlayers;
++            final var players = nearby == null ? null : nearby.getPlayers(
++                ca.spottedleaf.moonrise.common.misc.NearbyPlayers.NearbyMapType.SPAWN_RANGE);
++            if (players != null && players.contains(player)) {
++                this.included[index] = true;
++            }
++        }
++
+         private void collect(final List<LevelChunk> output) {
+             net.minecraft.server.threading.TickRegions.runRegionBoundTasksFromCurrentContext(
+                 this.chunkMap.level,

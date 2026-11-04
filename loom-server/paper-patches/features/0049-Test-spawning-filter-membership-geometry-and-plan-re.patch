@@ -1,0 +1,240 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 05:42:41 +0200
+Subject: [PATCH] Test spawning filter membership geometry and plan reuse
+
+
+diff --git a/src/test/java/net/minecraft/server/level/SpawningChunkTraversalTest.java b/src/test/java/net/minecraft/server/level/SpawningChunkTraversalTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..97a7420dd1b32aa9fd3fe46c24933d8f5fc75be5
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/level/SpawningChunkTraversalTest.java
+@@ -0,0 +1,228 @@
++package net.minecraft.server.level;
++
++import ca.spottedleaf.moonrise.common.PlatformHooks;
++import ca.spottedleaf.moonrise.common.list.ReferenceList;
++import ca.spottedleaf.moonrise.common.misc.NearbyPlayers;
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import ca.spottedleaf.moonrise.common.util.CoordinateUtils;
++import ca.spottedleaf.moonrise.patches.chunk_system.level.chunk.ChunkData;
++import ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder;
++import com.destroystokyo.paper.event.entity.PlayerNaturallySpawnCreaturesEvent;
++import java.lang.reflect.Field;
++import java.util.*;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.level.chunk.LevelChunk;
++import net.minecraft.world.phys.Vec3;
++import org.bukkit.entity.Player;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import org.mockito.MockedStatic;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class SpawningChunkTraversalTest {
++    @BeforeAll
++    static void initializeTypes() {
++        mock(MinecraftServer.class); mock(ServerLevel.class); mock(ServerPlayer.class);
++        mock(ChunkMap.class); mock(LevelChunk.class); mock(NewChunkHolder.class);
++    }
++
++    @Test
++    void denseTraversalKeepsMembershipAndSourceOrderWithoutRepeatedPositionReads() throws Exception {
++        try (Fixture f = new Fixture()) {
++            for (int n=0;n<69;n++) f.player((n%8)*32+3, (n/8)*32+5, 8);
++            f.grid(-10, 28);
++            f.shuffle(17);
++            for (State state:f.states) clearInvocations(state.player);
++            List<LevelChunk> actual=f.collect();
++            long reads=f.states.stream().flatMap(s->mockingDetails(s.player).getInvocations().stream())
++                .filter(i->i.getMethod().getName().equals("position")).count();
++            assertEquals(f.expected(),actual);
++            assertTrue(reads<=f.states.size()*2L,"Dense filtering repeatedly reads player positions: "+reads);
++        }
++    }
++
++    @Test
++    void missingCancelledSpectatorAndZeroRadiusSourcesStayExcluded() throws Exception {
++        try (Fixture f=new Fixture()) {
++            State missing=f.player(0,0,8);missing.player.playerNaturallySpawnedEvent=null;
++            f.player(16,16,8).event.setCancelled(true);
++            f.player(32,32,8).spectator=true;
++            f.player(48,48,0);
++            f.player(64,64,2);
++            f.grid(-12,24);
++            assertEquals(f.expected(),f.collect());
++        }
++    }
++
++    @Test
++    void customAndNegativeRadiiStillRespectTrackedMembership() throws Exception {
++        try (Fixture f=new Fixture()) {
++            f.player(0,0,9);f.player(48,32,32);f.player(96,64,127);f.player(-48,-32,-128);
++            f.grid(-20,25);
++            assertEquals(f.expected(),f.collect());
++        }
++    }
++
++    @Test
++    void movementBeforeTrackingCatchesUpUsesCurrentPositionAndOldMembership() throws Exception {
++        try (Fixture f=new Fixture()) {
++            State player=f.player(0,0,8);f.grid(-16,24);
++            player.position=new Vec3(200,64,0);
++            assertEquals(f.expected(),f.collect());
++            player.event.setSpawnRadius((byte)32);
++            assertEquals(f.expected(),f.collect());
++        }
++    }
++
++    @Test
++    void trackingRemovalAndAdditionInvalidateEligibilityWithoutReplacingChunks() throws Exception {
++        try (Fixture f=new Fixture()) {
++            State removed=f.player(0,0,8);f.player(64,64,8);f.grid(-16,24);
++            assertEquals(f.expected(),f.collect());
++            f.nearby.removePlayer(removed.player);
++            assertEquals(f.expected(),f.collect());
++            f.player(160,96,4);
++            assertEquals(f.expected(),f.collect());
++        }
++    }
++
++    @Test
++    void replacingAndReorderingTickingChunksRebuildsThePositionIndex() throws Exception {
++        try (Fixture f=new Fixture()) {
++            f.player(0,0,8);f.grid(-16,16);assertEquals(f.expected(),f.collect());
++            LevelChunk old=f.chunks.get(400);ChunkPos pos=old.getPos();
++            f.ticking.remove(old);f.chunks.remove(old);
++            LevelChunk replacement=f.chunk(pos.x(),pos.z());
++            f.shuffle(33);
++            List<LevelChunk> actual=f.collect();assertEquals(f.expected(),actual);
++            assertFalse(actual.stream().anyMatch(c->c==old));
++            assertTrue(f.chunks.contains(replacement));
++        }
++    }
++
++    @Test
++    void strictCircleBoundaryAndNegativeCoordinatesMatchTheReference() throws Exception {
++        try (Fixture f=new Fixture()) {
++            f.player(8,8,8);f.player(-8,-8,1);f.grid(-16,16);
++            List<LevelChunk> actual=f.collect();assertEquals(f.expected(),actual);
++            assertFalse(actual.stream().anyMatch(c->c.locX==8&&c.locZ==0));
++            assertTrue(actual.stream().anyMatch(c->c.locX==7&&c.locZ==0));
++        }
++    }
++
++    @Test
++    void randomizedMovementEventsAndRadiiMatchTheReferenceAcrossPlanReuse() throws Exception {
++        try (Fixture f=new Fixture()) {
++            Random random=new Random(591038);
++            for (int n=0;n<8;n++) f.player(n*8,n*8,8);
++            f.grid(-18,18);
++            for (int round=0;round<20;round++) {
++                for (State state:f.states) {
++                    state.position=new Vec3(random.nextDouble()*256-128,64,random.nextDouble()*256-128);
++                    state.spectator=random.nextInt(7)==0;
++                    state.event.setCancelled(random.nextInt(5)==0);
++                    state.event.setSpawnRadius((byte)(random.nextInt(16)-3));
++                    f.nearby.tickPlayer(state.player);
++                }
++                assertEquals(f.expected(),f.collect(),"round "+round);
++            }
++        }
++    }
++
++    @Test
++    void sparseWorldsKeepTheJoinedRegionFilterResults() throws Exception {
++        try (Fixture f=new Fixture()) {
++            f.player(0,0,8);f.player(16000,16000,8);
++            for(int z=-8;z<=8;z++) for(int x=-8;x<=8;x++) {f.chunk(x,z);f.chunk(x+1000,z+1000);}
++            assertEquals(f.expected(),f.collect());
++        }
++    }
++
++    private static final class State {
++        final ServerPlayer player=mock(ServerPlayer.class);
++        final PlayerNaturallySpawnCreaturesEvent event;
++        Vec3 position;boolean spectator;
++        State(double x,double z,int radius) {
++            position=new Vec3(x,64,z);
++            when(player.position()).thenAnswer(i->position);
++            when(player.chunkPosition()).thenAnswer(i->new ChunkPos((int)Math.floor(position.x)>>4,(int)Math.floor(position.z)>>4));
++            when(player.isSpectator()).thenAnswer(i->spectator);
++            event=new PlayerNaturallySpawnCreaturesEvent(mock(Player.class),(byte)radius);
++            player.playerNaturallySpawnedEvent=event;
++        }
++    }
++
++    private static final class Fixture implements AutoCloseable {
++        final MockedStatic<PlatformHooks> platform;
++        final MinecraftServer server=mock(MinecraftServer.class);
++        final ServerLevel world=mock(ServerLevel.class);
++        final NearbyPlayers nearby;
++        final ReferenceList<LevelChunk> ticking=new ReferenceList<>(new LevelChunk[0]);
++        final Map<Long,ChunkData> data=new HashMap<>();
++        final List<State> states=new ArrayList<>();
++        final List<LevelChunk> chunks=new ArrayList<>();
++        final ChunkMap map=mock(ChunkMap.class,CALLS_REAL_METHODS);
++        Fixture() throws Exception {
++            platform=mockStatic(PlatformHooks.class);
++            try {
++            PlatformHooks hooks=mock(PlatformHooks.class);
++            when(hooks.getBrand()).thenReturn("Paper");
++            platform.when(PlatformHooks::get).thenReturn(hooks);
++            nearby=new NearbyPlayers(world);
++            when(world.getServer()).thenReturn(server);when(world.dimension()).thenReturn(Level.OVERWORLD);
++            when(world.moonrise$getNearbyPlayers()).thenReturn(nearby);
++            when(world.moonrise$getPlayerTickingChunks()).thenReturn(ticking);
++            when(world.moonrise$requestChunkData(anyLong())).thenAnswer(i->data.computeIfAbsent(i.getArgument(0),k->new ChunkData()));
++            when(world.moonrise$releaseChunkData(anyLong())).thenAnswer(i->data.get(i.getArgument(0)));
++            set(map,"level",world);
++            } catch (Exception | Error failure) {
++                platform.close();
++                throw failure;
++            }
++        }
++        State player(double x,double z,int radius) {State s=new State(x,z,radius);states.add(s);nearby.addPlayer(s.player);return s;}
++        LevelChunk chunk(int x,int z) throws Exception {
++            LevelChunk chunk=mock(LevelChunk.class);set(chunk,"locX",x);set(chunk,"locZ",z);
++            when(chunk.getPos()).thenReturn(new ChunkPos(x,z));
++            NewChunkHolder holder=mock(NewChunkHolder.class);set(holder,"holderData",data.computeIfAbsent(CoordinateUtils.getChunkKey(x,z),k->new ChunkData()));
++            when(chunk.moonrise$getChunkHolder()).thenReturn(holder);chunks.add(chunk);ticking.add(chunk);return chunk;
++        }
++        void grid(int min,int max) throws Exception {for(int z=min;z<=max;z++)for(int x=min;x<=max;x++)chunk(x,z);}
++        void shuffle(long seed) {Collections.shuffle(chunks,new Random(seed));ticking.clear();for(LevelChunk chunk:chunks)ticking.add(chunk);}
++        List<LevelChunk> expected() {
++            List<LevelChunk> out=new ArrayList<>();
++            for(LevelChunk chunk:chunks) {
++                var tracked=data.get(CoordinateUtils.getChunkKey(chunk.locX,chunk.locZ)).nearbyPlayers;
++                var players=tracked==null?null:tracked.getPlayers(NearbyPlayers.NearbyMapType.SPAWN_RANGE);
++                if(players==null)continue;
++                for(State state:states) {
++                    var event=state.player.playerNaturallySpawnedEvent;
++                    if(!players.contains(state.player)||event==null||event.isCancelled()||state.spectator)continue;
++                    int blocks=event.getSpawnRadius()<<4;
++                    double dx=(double)(chunk.locX<<4)+8-state.position.x,dz=(double)(chunk.locZ<<4)+8-state.position.z;
++                    if(dx*dx+dz*dz<(double)(blocks*blocks)) {out.add(chunk);break;}
++                }
++            }
++            return out;
++        }
++        List<LevelChunk> collect() throws Exception {
++            List<LevelChunk> out=new ArrayList<>();AtomicReference<Throwable> failure=new AtomicReference<>();
++            Thread thread=new TickThread(()->{var context=TickRegions.pushLevelContext(world);try{map.collectSpawningChunks(out);}catch(Throwable error){failure.set(error);}finally{TickRegions.popContext(context);}},"spawning-filter-test");
++            thread.setDaemon(true);thread.start();thread.join(10_000);assertFalse(thread.isAlive(),"Spawn filter did not finish");
++            if(failure.get() instanceof Error error)throw error;if(failure.get() instanceof RuntimeException error)throw error;if(failure.get()!=null)throw new AssertionError(failure.get());return out;
++        }
++        public void close() {platform.close();TickRegions.clearWorldState(world);}
++    }
++    private static void set(Object target,String name,Object value) throws Exception {
++        for(Class<?> type=target.getClass();type!=null;type=type.getSuperclass())try{Field f=type.getDeclaredField(name);f.setAccessible(true);f.set(target,value);return;}catch(NoSuchFieldException ignored){}
++        throw new NoSuchFieldException(name);
++    }
++}
