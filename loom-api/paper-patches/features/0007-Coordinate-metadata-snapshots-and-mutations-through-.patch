@@ -1,0 +1,242 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 06:38:05 +0200
+Subject: [PATCH] Coordinate metadata snapshots and mutations through the store
+ monitor
+
+
+diff --git a/src/main/java/org/bukkit/metadata/MetadataStoreBase.java b/src/main/java/org/bukkit/metadata/MetadataStoreBase.java
+index b39ed62bec45f7671a268d51bc34a0269e360533..fddc53ba103cb94ef6ae0262abdc0b813761ec52 100644
+--- a/src/main/java/org/bukkit/metadata/MetadataStoreBase.java
++++ b/src/main/java/org/bukkit/metadata/MetadataStoreBase.java
+@@ -29,13 +29,8 @@ public abstract class MetadataStoreBase<T> {
+      * newMetadataValue}. Multiple plugins can set independent values for the
+      * same {@code metadataKey} without conflict.
+      * <p>
+-     * Implementation note: I considered using a {@link
+-     * java.util.concurrent.locks.ReadWriteLock} for controlling access to
+-     * {@code metadataMap}, but decided that the added overhead wasn't worth
+-     * the finer grained access control.
+-     * <p>
+-     * Bukkit is almost entirely single threaded so locking overhead shouldn't
+-     * pose a problem.
++     * Mutations and snapshots share the store monitor. Metadata invalidation
++     * callbacks run after that monitor has been released.
+      *
+      * @param subject The object receiving the metadata.
+      * @param metadataKey A unique key to identify this metadata.
+@@ -54,9 +49,7 @@ public abstract class MetadataStoreBase<T> {
+             entry = new WeakHashMap<Plugin, MetadataValue>(1);
+             metadataMap.put(key, entry);
+         }
+-        synchronized (entry) {
+-            entry.put(owningPlugin, newMetadataValue);
+-        }
++        entry.put(owningPlugin, newMetadataValue);
+     }
+ 
+     /**
+@@ -70,7 +63,7 @@ public abstract class MetadataStoreBase<T> {
+      * @see MetadataStore#getMetadata(Object, String)
+      */
+     @NotNull
+-    public List<MetadataValue> getMetadata(@NotNull T subject, @NotNull String metadataKey) { // Paper
++    public synchronized List<MetadataValue> getMetadata(@NotNull T subject, @NotNull String metadataKey) { // Paper
+         String key = disambiguate(subject, metadataKey);
+         Map<Plugin, MetadataValue> entry = metadataMap.get(key);
+         if (entry != null) {
+@@ -105,18 +98,16 @@ public abstract class MetadataStoreBase<T> {
+      * @see MetadataStore#removeMetadata(Object, String,
+      *     org.bukkit.plugin.Plugin)
+      */
+-    public void removeMetadata(@NotNull T subject, @NotNull String metadataKey, @NotNull Plugin owningPlugin) { // Paper
++    public synchronized void removeMetadata(@NotNull T subject, @NotNull String metadataKey, @NotNull Plugin owningPlugin) { // Paper
+         Preconditions.checkArgument(owningPlugin != null, "Plugin cannot be null");
+         String key = disambiguate(subject, metadataKey);
+         Map<Plugin, MetadataValue> entry = metadataMap.get(key);
+         if (entry == null) {
+             return;
+         }
+-        synchronized (entry) {
+-            entry.remove(owningPlugin);
+-            if (entry.isEmpty()) {
+-                metadataMap.remove(key);
+-            }
++        entry.remove(owningPlugin);
++        if (entry.isEmpty()) {
++            metadataMap.remove(key);
+         }
+     }
+ 
+@@ -131,11 +122,18 @@ public abstract class MetadataStoreBase<T> {
+      */
+     public void invalidateAll(@NotNull Plugin owningPlugin) { // Paper
+         Preconditions.checkArgument(owningPlugin != null, "Plugin cannot be null");
+-        for (Map<Plugin, MetadataValue> values : metadataMap.values()) {
+-            if (values.containsKey(owningPlugin)) {
+-                values.get(owningPlugin).invalidate();
++        List<MetadataValue> invalidated = new ArrayList<>();
++        synchronized (this) {
++            for (Map<Plugin, MetadataValue> values : metadataMap.values()) {
++                MetadataValue value = values.get(owningPlugin);
++                if (value != null) {
++                    invalidated.add(value);
++                }
+             }
+         }
++        for (MetadataValue value : invalidated) {
++            value.invalidate();
++        }
+     }
+ 
+     /**
+@@ -145,7 +143,7 @@ public abstract class MetadataStoreBase<T> {
+      * @param owningPlugin the plugin requesting the invalidation.
+      * @throws IllegalArgumentException If plugin is null
+      */
+-    public void removeAll(@NotNull Plugin owningPlugin) {
++    public synchronized void removeAll(@NotNull Plugin owningPlugin) {
+         Preconditions.checkNotNull(owningPlugin, "Plugin cannot be null");
+         for (Iterator<Map<Plugin, MetadataValue>> iterator = metadataMap.values().iterator(); iterator.hasNext(); ) {
+             Map<Plugin, MetadataValue> values = iterator.next();
+diff --git a/src/test/java/org/bukkit/metadata/MetadataStoreConcurrencyTest.java b/src/test/java/org/bukkit/metadata/MetadataStoreConcurrencyTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7d19af0e21c2c3f2071905abff8ca97186f5570
+--- /dev/null
++++ b/src/test/java/org/bukkit/metadata/MetadataStoreConcurrencyTest.java
+@@ -0,0 +1,135 @@
++package org.bukkit.metadata;
++
++import static org.junit.jupiter.api.Assertions.*;
++
++import io.papermc.paper.plugin.configuration.PluginMeta;
++import java.lang.management.ManagementFactory;
++import java.util.List;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.concurrent.locks.LockSupport;
++import org.bukkit.plugin.BukkitTestPlugin;
++import org.junit.jupiter.api.Test;
++
++class MetadataStoreConcurrencyTest {
++    @Test
++    void replacingLastEntryDuringRemovalDoesNotLoseTheNewValue() throws Exception {
++        Store store = new Store();
++        BlockingPlugin removedPlugin = new BlockingPlugin();
++        BukkitTestPlugin retainedPlugin = new BukkitTestPlugin("retained");
++        MetadataValue retained = new FixedMetadataValue(retainedPlugin, 2);
++        store.setMetadata("subject", "key", new FixedMetadataValue(removedPlugin, 1));
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        Thread removal = Thread.ofPlatform().unstarted(() -> run(failure,
++            () -> store.removeMetadata("subject", "key", removedPlugin)));
++        Thread replacement = Thread.ofPlatform().unstarted(() -> run(failure,
++            () -> store.setMetadata("subject", "key", retained)));
++        removedPlugin.blockedThread = removal;
++        try {
++            removal.start();
++            assertTrue(removedPlugin.entered.await(5, TimeUnit.SECONDS));
++            replacement.start();
++            awaitBlockedOn(replacement, removal);
++        } finally {
++            removedPlugin.release.countDown();
++            removal.join(5000);
++            replacement.join(5000);
++        }
++        assertFalse(removal.isAlive());
++        assertFalse(replacement.isAlive());
++        assertNull(failure.get(), () -> String.valueOf(failure.get()));
++        assertTrue(store.hasMetadata("subject", "key"));
++        assertEquals(List.of(retained), store.getMetadata("subject", "key"));
++    }
++
++    @Test
++    void snapshotsRemainImmutableAndDetachedAcrossPluginChanges() {
++        Store store = new Store();
++        BukkitTestPlugin first = new BukkitTestPlugin("first");
++        BukkitTestPlugin second = new BukkitTestPlugin("second");
++        MetadataValue original = new FixedMetadataValue(first, 1);
++        MetadataValue replacement = new FixedMetadataValue(second, 2);
++        store.setMetadata("subject", "key", original);
++        List<MetadataValue> snapshot = store.getMetadata("subject", "key");
++        store.removeAll(first);
++        store.setMetadata("subject", "key", replacement);
++        assertEquals(List.of(original), snapshot);
++        assertThrows(UnsupportedOperationException.class, () -> snapshot.add(replacement));
++        assertEquals(List.of(replacement), store.getMetadata("subject", "key"));
++    }
++
++    @Test
++    void invalidationCallbacksRunAfterReleasingTheStoreMonitor() {
++        Store store = new Store();
++        BukkitTestPlugin plugin = new BukkitTestPlugin("callback");
++        MetadataValue value = new FixedMetadataValue(plugin, 1) {
++            @Override
++            public void invalidate() {
++                assertFalse(Thread.holdsLock(store));
++                store.removeAll(plugin);
++            }
++        };
++        store.setMetadata("subject", "first", value);
++        store.setMetadata("subject", "second", value);
++        store.invalidateAll(plugin);
++        assertFalse(store.hasMetadata("subject", "first"));
++        assertFalse(store.hasMetadata("subject", "second"));
++    }
++
++    private static void run(AtomicReference<Throwable> failure, Runnable action) {
++        try {
++            action.run();
++        } catch (Throwable error) {
++            failure.compareAndSet(null, error);
++        }
++    }
++
++    private static void awaitBlockedOn(Thread waiting, Thread owner) {
++        var threads = ManagementFactory.getThreadMXBean();
++        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
++        while (System.nanoTime() < deadline) {
++            var info = threads.getThreadInfo(waiting.threadId());
++            if (info != null && info.getThreadState() == Thread.State.BLOCKED
++                && info.getLockOwnerId() == owner.threadId()) {
++                return;
++            }
++            assertTrue(waiting.isAlive(), "Replacement finished before the removal boundary");
++            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
++        }
++        fail("Replacement did not reach the held metadata boundary");
++    }
++
++    private static final class BlockingPlugin extends BukkitTestPlugin {
++        final CountDownLatch entered = new CountDownLatch(1);
++        final CountDownLatch release = new CountDownLatch(1);
++        volatile Thread blockedThread;
++
++        BlockingPlugin() {
++            super("removed");
++        }
++
++        @Override
++        public PluginMeta getPluginMeta() {
++            if (Thread.currentThread() == blockedThread) {
++                entered.countDown();
++                try {
++                    if (!release.await(5, TimeUnit.SECONDS)) {
++                        throw new AssertionError("Removal was not released");
++                    }
++                } catch (InterruptedException error) {
++                    Thread.currentThread().interrupt();
++                    throw new AssertionError(error);
++                }
++            }
++            return super.getPluginMeta();
++        }
++    }
++
++    private static final class Store extends MetadataStoreBase<String> {
++        @Override
++        protected String disambiguate(String subject, String key) {
++            return subject + ':' + key;
++        }
++    }
++}
