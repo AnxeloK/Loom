@@ -1,0 +1,161 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 03:08:10 +0200
+Subject: [PATCH] Run entity callbacks through joined world owners
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index f96fbd00c1b67810f6fc41975503807b73484980..cde940ed872cda0e3350d11c879d821a3fbd6d58 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -2163,13 +2163,9 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         this.server.getScheduler().mainThreadHeartbeat(); // CraftBukkit
+         // Paper start - optimise Folia entity scheduler
+         net.minecraft.server.threading.runtime.ThreadedRegionsCompatibility.tickGlobalRegionScheduler();
+-        for (io.papermc.paper.threadedregions.EntityScheduler scheduler : this.entitySchedulerTickList.getAllSchedulers()) {
+-            if (scheduler.isRetired()) {
+-                continue;
+-            }
+-
+-            scheduler.executeTick();
+-        }
++        net.minecraft.server.threading.TickRegions.tickEntitySchedulersInParallel(
++            this, this.entitySchedulerTickList.getAllSchedulers()
++        );
+         // Paper end - optimise Folia entity scheduler
+         // Paper end - Folia scheduler API
+         io.papermc.paper.adventure.providers.ClickCallbackProviderImpl.ADVENTURE_CLICK_MANAGER.handleQueue(this.tickCount); // Paper
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index c13ba6b540d595f3cf57532007666a648ec0a597..d35713bbc47a7c75fbe076d1af4469a98746f83c 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -2,6 +2,7 @@ package net.minecraft.server.threading;
+ 
+ import ca.spottedleaf.concurrentutil.util.ConcurrentUtil;
+ import ca.spottedleaf.moonrise.common.util.TickThread;
++import it.unimi.dsi.fastutil.ints.IntArrayList;
+ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerLevel;
+@@ -20,6 +21,7 @@ import java.util.Comparator;
+ import java.util.EnumMap;
+ import java.util.HashMap;
+ import java.util.Iterator;
++import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Objects;
+@@ -1660,12 +1662,87 @@ public class TickRegions {
+     // region work but do not recursively enter another world tick. Failures remain deterministic by world
+     // list order, with Error taking priority after every world has completed.
+     public static void tickWorldsInParallel(final List<ServerLevel> worlds, final java.util.function.Consumer<ServerLevel> worldTick) {
+-        try (var trace = LoomProfileTrace.begin("world-batch", "worldTick", "", MinecraftServer.currentTick)) {
+-            tickWorldsInParallelTraced(worlds, worldTick);
++        runWorldPhaseInParallel(worlds, worldTick, "worldTick");
++    }
++
++    // Keep the scheduler snapshot order within each world. Transfers are revalidated before execution;
++    // schedulers that moved to another world wait for the joined batch, then tick under the global owner.
++    public static void tickEntitySchedulersInParallel(
++        final MinecraftServer server,
++        final io.papermc.paper.threadedregions.EntityScheduler[] schedulers
++    ) {
++        if (OwnerDomainExecutor.currentDomain() != OwnerDomainExecutor.Domain.GLOBAL_CONTROL || currentContext() != null) {
++            throw new IllegalStateException("Entity callback phases require the global owner outside a world context");
++        }
++        OwnerDomainExecutor.assertGlobalOwner(server, "entity-scheduler-phase");
++        if (schedulers.length == 0) {
++            return;
++        }
++        final Map<ServerLevel, IntArrayList> byWorld = new LinkedHashMap<>();
++        for (int index = 0; index < schedulers.length; ++index) {
++            final io.papermc.paper.threadedregions.EntityScheduler scheduler = schedulers[index];
++            if (!scheduler.isRetired()) {
++                byWorld.computeIfAbsent(entitySchedulerWorld(server, scheduler), ignored -> new IntArrayList()).add(index);
++            }
++        }
++        if (byWorld.isEmpty()) {
++            return;
++        }
++
++        final boolean[] ticked = new boolean[schedulers.length];
++        runWorldPhaseInParallel(new ArrayList<>(byWorld.keySet()), world -> {
++            final RegionContext context = pushLevelContext(world);
++            try {
++                final IntArrayList indices = byWorld.get(world);
++                for (int offset = 0; offset < indices.size(); ++offset) {
++                    final int index = indices.getInt(offset);
++                    final io.papermc.paper.threadedregions.EntityScheduler scheduler = schedulers[index];
++                    if (scheduler.isRetired()) {
++                        ticked[index] = true;
++                    } else if (scheduler.entity.getHandleRaw().level() == world) {
++                        scheduler.executeTick();
++                        ticked[index] = true;
++                    }
++                }
++            } finally {
++                popContext(context);
++            }
++        }, "entityScheduler");
++
++        for (int index = 0; index < schedulers.length; ++index) {
++            final io.papermc.paper.threadedregions.EntityScheduler scheduler = schedulers[index];
++            if (!ticked[index] && !scheduler.isRetired()) {
++                entitySchedulerWorld(server, scheduler);
++                scheduler.executeTick();
++            }
++        }
++    }
++
++    private static ServerLevel entitySchedulerWorld(
++        final MinecraftServer server,
++        final io.papermc.paper.threadedregions.EntityScheduler scheduler
++    ) {
++        if (!(scheduler.entity.getHandleRaw().level() instanceof ServerLevel world) || world.getServer() != server) {
++            throw new IllegalArgumentException("Entity scheduler is not owned by this server");
+         }
++        return world;
+     }
+ 
+-    private static void tickWorldsInParallelTraced(final List<ServerLevel> worlds, final java.util.function.Consumer<ServerLevel> worldTick) {
++    private static void runWorldPhaseInParallel(
++        final List<ServerLevel> worlds,
++        final java.util.function.Consumer<ServerLevel> worldTick,
++        final String phase
++    ) {
++        try (var trace = LoomProfileTrace.begin("world-batch", phase, "", MinecraftServer.currentTick)) {
++            tickWorldsInParallelTraced(worlds, worldTick, phase);
++        }
++    }
++
++    private static void tickWorldsInParallelTraced(
++        final List<ServerLevel> worlds,
++        final java.util.function.Consumer<ServerLevel> worldTick,
++        final String phase
++    ) {
+         if (RUNNING_WORLD_TICK.get()) {
+             throw new IllegalStateException("Cannot recursively enter a parallel world tick");
+         }
+@@ -1675,7 +1752,7 @@ public class TickRegions {
+                 RUNNING_WORLD_TICK.set(Boolean.TRUE);
+                 try {
+                     for (final ServerLevel world : worlds) {
+-                        try (var trace = LoomProfileTrace.begin("world", "worldTick", LoomProfileTrace.ENABLED ? world.dimension().identifier().toString() : "", MinecraftServer.currentTick)) {
++                        try (var trace = LoomProfileTrace.begin("world", phase, LoomProfileTrace.ENABLED ? world.dimension().identifier().toString() : "", MinecraftServer.currentTick)) {
+                             worldTick.accept(world);
+                         }
+                     }
+@@ -1689,11 +1766,11 @@ public class TickRegions {
+             worlds.size(),
+             i -> {
+                 final ServerLevel world = worlds.get(i);
+-                try (var trace = LoomProfileTrace.begin("world", "worldTick", LoomProfileTrace.ENABLED ? world.dimension().identifier().toString() : "", MinecraftServer.currentTick)) {
++                try (var trace = LoomProfileTrace.begin("world", phase, LoomProfileTrace.ENABLED ? world.dimension().identifier().toString() : "", MinecraftServer.currentTick)) {
+                     worldTick.accept(world);
+                 }
+             },
+-            "worldTick",
++            phase,
+             true
+         );
+         WORLD_PHASE_HELPER = Thread.currentThread();

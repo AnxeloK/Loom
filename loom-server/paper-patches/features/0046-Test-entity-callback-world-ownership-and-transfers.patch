@@ -1,0 +1,358 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 03:08:24 +0200
+Subject: [PATCH] Test entity callback world ownership and transfers
+
+
+diff --git a/src/test/java/net/minecraft/server/threading/EntitySchedulerWorldBatchTest.java b/src/test/java/net/minecraft/server/threading/EntitySchedulerWorldBatchTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..dc2825e964fc0cce3f688041343e80014db58310
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/EntitySchedulerWorldBatchTest.java
+@@ -0,0 +1,346 @@
++package net.minecraft.server.threading;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import io.papermc.paper.threadedregions.EntityScheduler;
++import java.lang.reflect.Field;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.core.BlockPos;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.entity.Entity;
++import net.minecraft.world.level.ChunkPos;
++import net.minecraft.world.level.Level;
++import org.bukkit.craftbukkit.entity.CraftEntity;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class EntitySchedulerWorldBatchTest {
++    @BeforeAll
++    static void initializeTypes() {
++        mock(MinecraftServer.class);
++        mock(ServerLevel.class);
++        mock(Entity.class);
++        mock(CraftEntity.class);
++        mock(EntityScheduler.class);
++    }
++
++    @Test
++    void callbacksHoldTheirWorldOwnerAndRetainSnapshotOrder() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel world = f.world();
++        List<Integer> order = new ArrayList<>();
++        EntityScheduler first = f.scheduler(world, () -> {
++            f.assertWorldOwner(world);
++            order.add(1);
++        });
++        EntityScheduler second = f.scheduler(world, () -> {
++            f.assertWorldOwner(world);
++            order.add(2);
++        });
++        f.global(() -> f.tick(first, second));
++        assertEquals(List.of(1, 2), order);
++        verify(first).executeTick();
++        verify(second).executeTick();
++    }
++
++    @Test
++    void independentWorldsCanEnterBeforeEitherCallbackFinishes() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel firstWorld = f.world();
++        ServerLevel secondWorld = f.world();
++        CountDownLatch entered = new CountDownLatch(2);
++        AtomicInteger completed = new AtomicInteger();
++        EntityScheduler first = f.scheduler(firstWorld, () -> {
++            f.assertWorldOwner(firstWorld);
++            entered.countDown();
++            await(entered);
++            completed.incrementAndGet();
++        });
++        EntityScheduler second = f.scheduler(secondWorld, () -> {
++            f.assertWorldOwner(secondWorld);
++            entered.countDown();
++            await(entered);
++            completed.incrementAndGet();
++        });
++        f.global(() -> {
++            f.tick(first, second);
++            assertEquals(2, completed.get(), "Every callback must finish before the phase returns");
++        });
++    }
++
++    @Test
++    void groupingRetainsEachWorldsOrderFromAnInterleavedSnapshot() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel firstWorld = f.world();
++        ServerLevel secondWorld = f.world();
++        List<Integer> firstOrder = new ArrayList<>();
++        List<Integer> secondOrder = new ArrayList<>();
++        EntityScheduler first = f.scheduler(firstWorld, () -> firstOrder.add(1));
++        EntityScheduler second = f.scheduler(secondWorld, () -> secondOrder.add(2));
++        EntityScheduler third = f.scheduler(firstWorld, () -> firstOrder.add(3));
++        EntityScheduler fourth = f.scheduler(secondWorld, () -> secondOrder.add(4));
++        f.global(() -> f.tick(first, second, third, fourth));
++        assertEquals(List.of(1, 3), firstOrder);
++        assertEquals(List.of(2, 4), secondOrder);
++    }
++
++    @Test
++    void emptyAndRetiredSnapshotsPreserveTheGlobalOwner() throws Exception {
++        Fixture f = new Fixture();
++        EntityScheduler retired = mock(EntityScheduler.class);
++        when(retired.isRetired()).thenReturn(true);
++        f.global(() -> {
++            f.tick();
++            f.tick(retired);
++        });
++        verify(retired, never()).executeTick();
++    }
++
++    @Test
++    void retirementDuringAnEarlierCallbackSkipsTheRetiredScheduler() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel world = f.world();
++        AtomicBoolean retired = new AtomicBoolean();
++        EntityScheduler second = f.scheduler(world, () -> fail("Retired scheduler ran"));
++        when(second.isRetired()).thenAnswer(ignored -> retired.get());
++        EntityScheduler first = f.scheduler(world, () -> retired.set(true));
++        f.global(() -> f.tick(first, second));
++        verify(second, never()).executeTick();
++    }
++
++    @Test
++    void aTransferBeforeExecutionTicksOnceAfterTheWorldBatchJoins() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel original = f.world();
++        ServerLevel destination = f.world();
++        AtomicReference<ServerLevel> currentWorld = new AtomicReference<>(original);
++        EntityScheduler moved = f.scheduler(original, () -> {
++            assertEquals(OwnerDomainExecutor.Domain.GLOBAL_CONTROL, OwnerDomainExecutor.currentDomain());
++            assertNull(TickRegions.currentContext());
++        });
++        when(moved.entity.getHandleRaw().level()).thenAnswer(ignored -> currentWorld.get());
++        EntityScheduler mover = f.scheduler(original, () -> currentWorld.set(destination));
++        f.global(() -> f.tick(mover, moved));
++        verify(moved).executeTick();
++    }
++
++    @Test
++    void aSchedulerThatTransfersDuringItsTickIsNotTickedTwice() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel original = f.world();
++        ServerLevel destination = f.world();
++        AtomicReference<ServerLevel> currentWorld = new AtomicReference<>(original);
++        EntityScheduler scheduler = f.scheduler(original, () -> currentWorld.set(destination));
++        when(scheduler.entity.getHandleRaw().level()).thenAnswer(ignored -> currentWorld.get());
++        f.global(() -> f.tick(scheduler));
++        verify(scheduler).executeTick();
++    }
++
++    @Test
++    void aForeignServerIsRejectedBeforeAnyCallbackRuns() throws Exception {
++        Fixture f = new Fixture();
++        EntityScheduler local = f.scheduler(f.world(), () -> fail("Local callback ran before validation"));
++        ServerLevel foreignWorld = f.world();
++        when(foreignWorld.getServer()).thenReturn(mock(MinecraftServer.class));
++        EntityScheduler foreign = f.scheduler(foreignWorld, () -> fail("Foreign callback ran"));
++        f.global(() -> assertThrows(IllegalArgumentException.class, () -> f.tick(local, foreign)));
++        verify(local, never()).executeTick();
++        verify(foreign, never()).executeTick();
++    }
++
++    @Test
++    void regionCallersCannotStartAnotherEntityPhase() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel world = f.world();
++        EntityScheduler scheduler = f.scheduler(world, () -> fail("Unexpected callback"));
++        f.global(() -> {
++            var context = TickRegions.pushLevelContext(world);
++            try {
++                assertThrows(IllegalStateException.class, () -> f.tick(scheduler));
++            } finally {
++                TickRegions.popContext(context);
++            }
++        });
++        verify(scheduler, never()).executeTick();
++    }
++
++    @Test
++    void anInnerGlobalScopeCannotRetainAWorldLeaseAcrossThePhase() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel world = f.world();
++        EntityScheduler scheduler = f.scheduler(world, () -> fail("Unexpected callback"));
++        f.global(() -> {
++            var context = TickRegions.pushLevelContext(world);
++            try (var ignored = OwnerDomainExecutor.enterGlobal(f.server, "nested-global-test")) {
++                assertThrows(IllegalStateException.class, () -> f.tick(scheduler));
++                assertThrows(IllegalStateException.class, () -> f.tick());
++            } finally {
++                TickRegions.popContext(context);
++            }
++        });
++        verify(scheduler, never()).executeTick();
++    }
++
++    @Test
++    void failureJoinsOtherWorldsAndRestoresTheOwnerBeforeReturning() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel firstWorld = f.world();
++        ServerLevel secondWorld = f.world();
++        AtomicBoolean otherFinished = new AtomicBoolean();
++        CountDownLatch entered = new CountDownLatch(2);
++        EntityScheduler failure = f.scheduler(firstWorld, () -> {
++            entered.countDown();
++            await(entered);
++            throw new IllegalArgumentException("expected callback failure");
++        });
++        EntityScheduler other = f.scheduler(secondWorld, () -> {
++            entered.countDown();
++            await(entered);
++            otherFinished.set(true);
++        });
++        f.global(() -> {
++            assertThrows(IllegalArgumentException.class, () -> f.tick(failure, other));
++            assertTrue(otherFinished.get());
++            assertTrue(OwnerDomainExecutor.isGlobalOwner(f.server));
++            assertNull(TickRegions.currentContext());
++            assertFalse(TickRegions.isRunningWorldTick(f.server));
++        });
++    }
++
++    @Test
++    void failureStillStopsTheRemainingCallbacksWithinItsWorld() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel world = f.world();
++        EntityScheduler failure = f.scheduler(world, () -> { throw new IllegalArgumentException("expected"); });
++        EntityScheduler later = f.scheduler(world, () -> fail("Callback after failure ran"));
++        f.global(() -> assertThrows(IllegalArgumentException.class, () -> f.tick(failure, later)));
++        verify(later, never()).executeTick();
++    }
++
++    @Test
++    void realSchedulerKeepsItsTickDelaysAndRetirementCallbacks() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel world = f.world();
++        CraftEntity craft = f.entity(world);
++        EntityScheduler scheduler = new EntityScheduler(craft);
++        AtomicInteger delayed = new AtomicInteger();
++        AtomicInteger retired = new AtomicInteger();
++        assertTrue(scheduler.schedule(entity -> {
++            f.assertWorldOwner(world);
++            delayed.incrementAndGet();
++        }, null, 2L));
++        f.global(() -> {
++            f.tick(scheduler);
++            assertEquals(0, delayed.get());
++            f.tick(scheduler);
++            assertEquals(1, delayed.get());
++            assertTrue(scheduler.schedule(entity -> fail("Retired callback ran live"), entity -> retired.incrementAndGet(), 1L));
++            scheduler.retire();
++            f.tick(scheduler);
++        });
++        assertEquals(1, delayed.get());
++        assertEquals(1, retired.get());
++    }
++
++    @Test
++    void additionsAfterTheSnapshotWaitForTheNextPhase() throws Exception {
++        Fixture f = new Fixture();
++        ServerLevel world = f.world();
++        EntityScheduler.EntitySchedulerTickList list = new EntityScheduler.EntitySchedulerTickList();
++        AtomicInteger newCalls = new AtomicInteger();
++        EntityScheduler added = f.scheduler(world, newCalls::incrementAndGet);
++        EntityScheduler first = f.scheduler(world, () -> list.add(added));
++        list.add(first);
++        f.global(() -> {
++            TickRegions.tickEntitySchedulersInParallel(f.server, list.getAllSchedulers());
++            assertEquals(0, newCalls.get());
++            TickRegions.tickEntitySchedulersInParallel(f.server, list.getAllSchedulers());
++            assertEquals(1, newCalls.get());
++        });
++    }
++
++    private static void await(CountDownLatch latch) {
++        try {
++            assertTrue(latch.await(5L, TimeUnit.SECONDS), "Independent worlds did not make progress");
++        } catch (InterruptedException failure) {
++            Thread.currentThread().interrupt();
++            throw new AssertionError(failure);
++        }
++    }
++
++    private static final class Fixture {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final List<ServerLevel> worlds = new ArrayList<>();
++
++        ServerLevel world() {
++            ServerLevel world = mock(ServerLevel.class);
++            when(world.getServer()).thenReturn(server);
++            when(world.dimension()).thenReturn(Level.OVERWORLD);
++            worlds.add(world);
++            return world;
++        }
++
++        CraftEntity entity(ServerLevel world) {
++            CraftEntity craft = mock(CraftEntity.class);
++            Entity entity = mock(Entity.class);
++            when(entity.level()).thenReturn(world);
++            when(entity.chunkPosition()).thenReturn(new ChunkPos(0, 0));
++            when(entity.blockPosition()).thenReturn(BlockPos.ZERO);
++            when(craft.getHandleRaw()).thenReturn(entity);
++            return craft;
++        }
++
++        EntityScheduler scheduler(ServerLevel world, Runnable callback) throws Exception {
++            EntityScheduler scheduler = mock(EntityScheduler.class);
++            Field entity = EntityScheduler.class.getField("entity");
++            entity.setAccessible(true);
++            entity.set(scheduler, entity(world));
++            doAnswer(ignored -> { callback.run(); return null; }).when(scheduler).executeTick();
++            return scheduler;
++        }
++
++        void tick(EntityScheduler... schedulers) {
++            TickRegions.tickEntitySchedulersInParallel(server, schedulers);
++        }
++
++        void assertWorldOwner(ServerLevel world) {
++            assertEquals(OwnerDomainExecutor.Domain.REGION, OwnerDomainExecutor.currentDomain());
++            assertTrue(OwnerDomainExecutor.isRegionOwner(world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE));
++            assertTrue(TickRegions.isCurrentThreadOwnerQuiet(world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE));
++            assertFalse(OwnerDomainExecutor.isGlobalOwner(server));
++        }
++
++        void global(Runnable callback) throws Exception {
++            AtomicReference<Throwable> failure = new AtomicReference<>();
++            Thread thread = new TickThread(() -> {
++                try (var ignored = OwnerDomainExecutor.enterGlobal(server, "entity-phase-test")) {
++                    callback.run();
++                    assertTrue(OwnerDomainExecutor.isGlobalOwner(server));
++                    assertNull(TickRegions.currentContext());
++                } catch (Throwable error) {
++                    failure.set(error);
++                }
++            }, "entity-phase-test");
++            thread.setDaemon(true);
++            thread.start();
++            thread.join(10_000L);
++            assertFalse(thread.isAlive(), "Entity phase did not complete");
++            for (ServerLevel world : worlds) TickRegions.clearWorldState(world);
++            if (failure.get() instanceof Error error) throw error;
++            if (failure.get() instanceof RuntimeException error) throw error;
++            if (failure.get() != null) throw new AssertionError(failure.get());
++        }
++    }
++}
