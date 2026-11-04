@@ -1,0 +1,310 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 13:50:28 +0200
+Subject: [PATCH] Invalidate waypoint visibility when player overrides change
+
+
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index 26f16adfd0ef8a9b4bd6427434ab232c8dc7287e..86436ce88614681fa88c9db2b6a80577aeed36fd 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -242,6 +242,7 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+     private boolean hasPlayedBefore = false;
+     private final ConversationTracker conversationTracker = new ConversationTracker();
+     private final Map<UUID, Set<WeakReference<Plugin>>> invertedVisibilityEntities = new HashMap<>();
++    private final java.util.concurrent.atomic.AtomicLong entityVisibilityRevision = new java.util.concurrent.atomic.AtomicLong();
+     private final Set<UUID> unlistedEntities = new HashSet<>(); // Paper - Add Listing API for Player
+     private static final WeakHashMap<Plugin, WeakReference<Plugin>> pluginWeakReferences = new WeakHashMap<>();
+     private int hash = 0;
+@@ -1892,6 +1893,7 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+         invertedPlugins = new HashSet<>();
+         invertedPlugins.add(CraftPlayer.getPluginWeakReference(plugin));
+         this.invertedVisibilityEntities.put(entity.getUniqueId(), invertedPlugins);
++        this.entityVisibilityRevision.incrementAndGet();
+ 
+         return true;
+     }
+@@ -1927,7 +1929,7 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+             return;
+         }
+ 
+-        if (this.invertedVisibilityEntities.remove(entity.getUniqueId()) == null) {
++        if (this.removeInvertedVisibilityEntity(entity.getUniqueId()) == null) {
+             this.untrackAndHideEntity(entity);
+         }
+     }
+@@ -1972,7 +1974,7 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+         if (!invertedPlugins.isEmpty()) {
+             return false; // Some other plugins still want the entity inverted
+         }
+-        this.invertedVisibilityEntities.remove(entity.getUniqueId());
++        this.removeInvertedVisibilityEntity(entity.getUniqueId());
+ 
+         return true;
+     }
+@@ -2043,7 +2045,7 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+             return;
+         }
+ 
+-        if (this.invertedVisibilityEntities.remove(entity.getUniqueId()) == null) {
++        if (this.removeInvertedVisibilityEntity(entity.getUniqueId()) == null) {
+             this.trackAndShowEntity(entity);
+         }
+     }
+@@ -2077,7 +2079,7 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+     // Paper end
+ 
+     public void onEntityRemove(Entity entity) {
+-        this.invertedVisibilityEntities.remove(entity.getUUID());
++        this.removeInvertedVisibilityEntity(entity.getUUID());
+     }
+ 
+     @Override
+@@ -2096,6 +2098,20 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+             : visibleByDefault ^ this.invertedVisibilityEntities.containsKey(entity.getUniqueId());
+     }
+ 
++    // Presence in the override map determines visibility; plugin reference changes within
++    // an existing entry do not change that decision. Keep removals on this path.
++    private @Nullable Set<WeakReference<Plugin>> removeInvertedVisibilityEntity(final UUID uuid) {
++        final Set<WeakReference<Plugin>> removed = this.invertedVisibilityEntities.remove(uuid);
++        if (removed != null) {
++            this.entityVisibilityRevision.incrementAndGet();
++        }
++        return removed;
++    }
++
++    public long getEntityVisibilityRevision() {
++        return this.entityVisibilityRevision.get();
++    }
++
+     public boolean canSeePlayer(UUID uuid) {
+         org.bukkit.entity.Entity entity = this.getServer().getPlayer(uuid);
+ 
+diff --git a/src/test/java/org/bukkit/craftbukkit/entity/CraftPlayerWaypointVisibilityTest.java b/src/test/java/org/bukkit/craftbukkit/entity/CraftPlayerWaypointVisibilityTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..74b775a1546b17f7a7f3f93e71324d6a0876868c
+--- /dev/null
++++ b/src/test/java/org/bukkit/craftbukkit/entity/CraftPlayerWaypointVisibilityTest.java
+@@ -0,0 +1,221 @@
++package org.bukkit.craftbukkit.entity;
++
++import java.lang.reflect.Method;
++import java.util.UUID;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.core.BlockPos;
++import net.minecraft.server.dedicated.DedicatedPlayerList;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.world.entity.EntityTypes;
++import net.minecraft.world.entity.ai.attributes.Attributes;
++import net.minecraft.world.waypoints.Waypoint;
++import net.minecraft.world.waypoints.WaypointTransmitter;
++import org.bukkit.GameMode;
++import org.bukkit.craftbukkit.CraftServer;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class CraftPlayerWaypointVisibilityTest {
++    @Test
++    void stableVisibilityDoesNotRepeatTheSameLookup() {
++        Fixture fixture = new Fixture(null, true);
++        for (int i = 0; i < 100; i++) {
++            assertFalse(fixture.connection.isBroken());
++        }
++        verify(fixture.viewer, times(1)).canSee((org.bukkit.entity.Entity) fixture.sourceView);
++    }
++
++    @Test
++    void everyPluginMustReleaseItsVisibilityOverride() throws Exception {
++        Fixture fixture = new Fixture();
++        Plugin first = mock(Plugin.class);
++        Plugin second = mock(Plugin.class);
++        assertFalse(fixture.connection.isBroken());
++        fixture.add(first);
++        assertTrue(fixture.connection.isBroken());
++        fixture.add(second);
++        fixture.remove(first);
++        assertTrue(fixture.connection.isBroken());
++        fixture.remove(second);
++        assertFalse(fixture.connection.isBroken());
++    }
++
++    @Test
++    void defaultVisibilityChangesAreObservedWithoutAnOverride() {
++        Fixture fixture = new Fixture();
++        assertFalse(fixture.connection.isBroken());
++        fixture.source.visibleByDefault = false;
++        assertTrue(fixture.connection.isBroken());
++        fixture.source.visibleByDefault = true;
++        assertFalse(fixture.connection.isBroken());
++    }
++
++    @Test
++    void explicitOverridesStillInvertHiddenByDefaultEntities() throws Exception {
++        Fixture fixture = new Fixture();
++        fixture.source.visibleByDefault = false;
++        assertTrue(fixture.connection.isBroken());
++        fixture.add(null);
++        assertFalse(fixture.connection.isBroken());
++        fixture.remove(null);
++        assertTrue(fixture.connection.isBroken());
++    }
++
++    @Test
++    void entityRemovalAndBothResetPathsInvalidateVisibility() throws Exception {
++        Fixture fixture = new Fixture();
++        fixture.add(null);
++        assertTrue(fixture.connection.isBroken());
++        fixture.viewer.onEntityRemove(fixture.source);
++        assertFalse(fixture.connection.isBroken());
++        fixture.add(null);
++        assertTrue(fixture.connection.isBroken());
++        fixture.viewer.resetAndHideEntity(fixture.sourceView);
++        assertFalse(fixture.connection.isBroken());
++        fixture.add(null);
++        assertTrue(fixture.connection.isBroken());
++        fixture.viewer.resetAndShowEntity(fixture.sourceView);
++        assertFalse(fixture.connection.isBroken());
++    }
++
++    @Test
++    void identityChangesDoNotReuseAnotherEntitysDecision() throws Exception {
++        Fixture fixture = new Fixture();
++        fixture.add(null);
++        assertTrue(fixture.connection.isBroken());
++        fixture.sourceId.set(UUID.randomUUID());
++        assertFalse(fixture.connection.isBroken());
++        fixture.add(null);
++        assertTrue(fixture.connection.isBroken());
++        fixture.viewerId.set(fixture.sourceId.get());
++        assertFalse(fixture.connection.isBroken());
++    }
++
++    @Test
++    void aReboundSourceWrapperUsesItsCurrentHandle() {
++        Fixture fixture = new Fixture();
++        assertFalse(fixture.connection.isBroken());
++        ServerPlayer replacement = mock(ServerPlayer.class);
++        when(replacement.getUUID()).thenReturn(fixture.sourceId.get());
++        replacement.visibleByDefault = false;
++        fixture.sourceView.setHandle(replacement);
++        assertTrue(fixture.connection.isBroken());
++    }
++
++    @Test
++    void aReboundViewerWrapperKeepsTheSelfVisibilityRule() throws Exception {
++        Fixture fixture = new Fixture();
++        fixture.add(null);
++        assertTrue(fixture.connection.isBroken());
++        ServerPlayer replacement = mock(ServerPlayer.class);
++        when(replacement.getUUID()).thenReturn(fixture.sourceId.get());
++        fixture.viewer.setHandle(replacement);
++        assertFalse(fixture.connection.isBroken());
++    }
++
++    @Test
++    void distanceAttributesAndSpectatorChangesRemainLive() {
++        Fixture fixture = new Fixture();
++        assertFalse(fixture.connection.isBroken());
++        when(fixture.source.distanceToSqr(fixture.receiver)).thenReturn(4_000_000D);
++        assertTrue(fixture.connection.isBroken());
++        when(fixture.source.distanceToSqr(fixture.receiver)).thenReturn(0D);
++        assertFalse(fixture.connection.isBroken());
++        when(fixture.receiver.getAttributeValue(Attributes.WAYPOINT_RECEIVE_RANGE)).thenReturn(0D);
++        assertTrue(fixture.connection.isBroken());
++        when(fixture.receiver.getAttributeValue(Attributes.WAYPOINT_RECEIVE_RANGE)).thenReturn(1024D);
++        when(fixture.source.isSpectator()).thenReturn(true);
++        assertTrue(fixture.connection.isBroken());
++        when(fixture.receiver.isSpectator()).thenReturn(true);
++        assertFalse(fixture.connection.isBroken());
++    }
++
++    @Test
++    void customVisibilityImplementationsAreQueriedEachTime() {
++        AtomicBoolean visible = new AtomicBoolean(true);
++        Fixture fixture = new Fixture(visible, false);
++        assertFalse(fixture.connection.isBroken());
++        visible.set(false);
++        assertTrue(fixture.connection.isBroken());
++    }
++
++    private static final class DynamicViewer extends CraftPlayer {
++        private final AtomicBoolean visible;
++
++        DynamicViewer(CraftServer server, ServerPlayer entity, AtomicBoolean visible) {
++            super(server, entity);
++            this.visible = visible;
++        }
++
++        @Override
++        public boolean canSee(org.bukkit.entity.Entity entity) {
++            return this.visible.get();
++        }
++    }
++
++    private static final class Fixture {
++        final AtomicReference<UUID> sourceId = new AtomicReference<>(UUID.randomUUID());
++        final AtomicReference<UUID> viewerId = new AtomicReference<>(UUID.randomUUID());
++        final ServerPlayer source = player(this.sourceId);
++        final ServerPlayer receiver = player(this.viewerId);
++        final CraftServer server = server();
++        final CraftPlayer sourceView = new CraftPlayer(this.server, this.source);
++        final CraftPlayer viewer;
++        final WaypointTransmitter.EntityBlockConnection connection;
++
++        Fixture() {
++            this(null, false);
++        }
++
++        Fixture(AtomicBoolean custom, boolean countLookups) {
++            assertSame(ServerPlayer.class, this.source.getClass());
++            assertSame(ServerPlayer.class, this.receiver.getClass());
++            CraftPlayer player = custom == null ? new CraftPlayer(this.server, this.receiver)
++                : new DynamicViewer(this.server, this.receiver, custom);
++            // Mockito replaces equals on spies. Keep the real wrapper for identity tests.
++            this.viewer = countLookups ? spy(player) : player;
++            when(this.source.getBukkitEntity()).thenReturn(this.sourceView);
++            when(this.receiver.getBukkitEntity()).thenReturn(this.viewer);
++            this.source.visibleByDefault = true;
++            when(this.source.blockPosition()).thenReturn(BlockPos.ZERO);
++            when(this.source.getAttributeValue(Attributes.WAYPOINT_TRANSMIT_RANGE)).thenReturn(1024D);
++            when(this.receiver.getAttributeValue(Attributes.WAYPOINT_RECEIVE_RANGE)).thenReturn(1024D);
++            this.connection = new WaypointTransmitter.EntityBlockConnection(this.source, Waypoint.Icon.NULL, this.receiver);
++        }
++
++        void add(Plugin plugin) throws Exception {
++            this.invoke("addInvertedVisibility", plugin);
++        }
++
++        void remove(Plugin plugin) throws Exception {
++            this.invoke("removeInvertedVisibility", plugin);
++        }
++
++        void invoke(String name, Plugin plugin) throws Exception {
++            Method method = CraftPlayer.class.getDeclaredMethod(name, Plugin.class, org.bukkit.entity.Entity.class);
++            method.setAccessible(true);
++            method.invoke(this.viewer, plugin, this.sourceView);
++        }
++
++        static CraftServer server() {
++            CraftServer server = mock(CraftServer.class);
++            when(server.getHandle()).thenReturn(mock(DedicatedPlayerList.class));
++            when(server.getDefaultGameMode()).thenReturn(GameMode.SURVIVAL);
++            return server;
++        }
++
++        static ServerPlayer player(AtomicReference<UUID> id) {
++            ServerPlayer player = mock(ServerPlayer.class);
++            when(player.getUUID()).thenAnswer(ignored -> id.get());
++            doReturn(EntityTypes.PLAYER).when(player).getType();
++            when(player.getInventory()).thenReturn(mock(net.minecraft.world.entity.player.Inventory.class));
++            when(player.getEnderChestInventory()).thenReturn(mock(net.minecraft.world.inventory.PlayerEnderChestContainer.class));
++            return player;
++        }
++    }
++}

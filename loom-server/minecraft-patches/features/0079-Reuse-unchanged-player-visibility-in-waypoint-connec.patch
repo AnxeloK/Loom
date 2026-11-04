@@ -1,0 +1,128 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: anxelok <anxelok@localhost>
+Date: Wed, 4 Nov 2026 14:05:05 +0200
+Subject: [PATCH] Reuse unchanged player visibility in waypoint connections
+
+
+diff --git a/net/minecraft/world/waypoints/WaypointTransmitter.java b/net/minecraft/world/waypoints/WaypointTransmitter.java
+index 07af92310ee5c8bba04e6175b6faac629632e4de..38280a5418000c3eb52666ece32bc500dad38bb2 100644
+--- a/net/minecraft/world/waypoints/WaypointTransmitter.java
++++ b/net/minecraft/world/waypoints/WaypointTransmitter.java
+@@ -1,6 +1,9 @@
+ package net.minecraft.world.waypoints;
+ 
+ import java.util.Optional;
++import java.util.UUID;
++import org.bukkit.craftbukkit.entity.CraftPlayer;
++import org.jspecify.annotations.Nullable;
+ import net.minecraft.core.BlockPos;
+ import net.minecraft.network.protocol.game.ClientboundTrackedWaypointPacket;
+ import net.minecraft.server.level.ServerPlayer;
+@@ -20,7 +23,11 @@ public interface WaypointTransmitter extends Waypoint {
+     Waypoint.Icon waypointIcon();
+ 
+     static boolean doesSourceIgnoreReceiver(final LivingEntity source, final ServerPlayer receiver) {
+-        if (!receiver.getBukkitEntity().canSee(source.getBukkitEntity())) return true; // Paper - ignore if entity is hidden from player
++        return doesSourceIgnoreReceiver(source, receiver, receiver.getBukkitEntity().canSee(source.getBukkitEntity()));
++    }
++
++    private static boolean doesSourceIgnoreReceiver(final LivingEntity source, final ServerPlayer receiver, final boolean visible) {
++        if (!visible) return true; // Paper - ignore if entity is hidden from player
+         if (receiver.isSpectator()) {
+             return false;
+         } else if (!source.isSpectator() && !source.hasIndirectPassenger(receiver)) {
+@@ -33,6 +40,43 @@ public interface WaypointTransmitter extends Waypoint {
+         }
+     }
+ 
++    final class EntityVisibility {
++        private volatile @Nullable Snapshot snapshot;
++
++        boolean canSee(final LivingEntity source, final ServerPlayer receiver) {
++            // Custom entities and wrappers can implement visibility beyond the Bukkit override map.
++            if (source.getClass() != ServerPlayer.class || receiver.getClass() != ServerPlayer.class) {
++                return receiver.getBukkitEntity().canSee(source.getBukkitEntity());
++            }
++            final Snapshot current = this.snapshot;
++            if (current != null
++                && current.sourceView().getHandle() == source && current.viewer().getHandle() == receiver
++                && current.revision() == current.viewer().getEntityVisibilityRevision()
++                && current.sourceId() == source.getUUID() && current.viewerId() == receiver.getUUID()
++                && current.visibleByDefault() == source.visibleByDefault) {
++                return current.visible();
++            }
++            final CraftPlayer sourceView = ((ServerPlayer)source).getBukkitEntity();
++            final CraftPlayer viewer = receiver.getBukkitEntity();
++            final long revision = viewer.getEntityVisibilityRevision();
++            final UUID sourceId = source.getUUID();
++            final UUID viewerId = receiver.getUUID();
++            final boolean visibleByDefault = source.visibleByDefault;
++            final boolean visible = viewer.canSee((org.bukkit.entity.Entity)sourceView);
++            if (sourceView.getClass() == CraftPlayer.class && viewer.getClass() == CraftPlayer.class
++                && sourceView.getHandle() == source && viewer.getHandle() == receiver) {
++                // Publish the inputs read before the lookup. A concurrent change then invalidates
++                // this decision instead of associating an older result with a newer revision.
++                this.snapshot = new Snapshot(sourceView, viewer, sourceId, viewerId, revision, visibleByDefault, visible);
++            }
++            return visible;
++        }
++
++        private record Snapshot(CraftPlayer sourceView, CraftPlayer viewer, UUID sourceId, UUID viewerId,
++                                long revision, boolean visibleByDefault, boolean visible) {
++        }
++    }
++
+     static boolean isChunkVisible(final ChunkPos chunkPos, final ServerPlayer receiver) {
+         // Paper start - rewrite chunk system
+         final ca.spottedleaf.moonrise.patches.chunk_system.player.RegionizedPlayerChunkLoader.PlayerChunkLoaderData playerChunkLoader = ((ca.spottedleaf.moonrise.patches.chunk_system.player.ChunkSystemServerPlayer)receiver).moonrise$getChunkLoader();
+@@ -76,6 +120,7 @@ public interface WaypointTransmitter extends Waypoint {
+         private final LivingEntity source;
+         private final Waypoint.Icon icon;
+         private final ServerPlayer receiver;
++        private final EntityVisibility visibility = new EntityVisibility();
+         private float lastAngle;
+ 
+         public EntityAzimuthConnection(final LivingEntity source, final Waypoint.Icon icon, final ServerPlayer receiver) {
+@@ -88,7 +133,7 @@ public interface WaypointTransmitter extends Waypoint {
+ 
+         @Override
+         public boolean isBroken() {
+-            return WaypointTransmitter.doesSourceIgnoreReceiver(this.source, this.receiver)
++            return WaypointTransmitter.doesSourceIgnoreReceiver(this.source, this.receiver, this.visibility.canSee(this.source, this.receiver))
+                 || WaypointTransmitter.isChunkVisible(this.source.chunkPosition(), this.receiver)
+                 || !WaypointTransmitter.isReallyFar(this.source, this.receiver);
+         }
+@@ -118,6 +163,7 @@ public interface WaypointTransmitter extends Waypoint {
+         private final LivingEntity source;
+         private final Waypoint.Icon icon;
+         private final ServerPlayer receiver;
++        private final EntityVisibility visibility = new EntityVisibility();
+         private BlockPos lastPosition;
+ 
+         public EntityBlockConnection(final LivingEntity source, final Waypoint.Icon icon, final ServerPlayer receiver) {
+@@ -153,7 +199,7 @@ public interface WaypointTransmitter extends Waypoint {
+ 
+         @Override
+         public boolean isBroken() {
+-            return WaypointTransmitter.BlockConnection.super.isBroken() || WaypointTransmitter.doesSourceIgnoreReceiver(this.source, this.receiver);
++            return WaypointTransmitter.BlockConnection.super.isBroken() || WaypointTransmitter.doesSourceIgnoreReceiver(this.source, this.receiver, this.visibility.canSee(this.source, this.receiver));
+         }
+     }
+ 
+@@ -161,6 +207,7 @@ public interface WaypointTransmitter extends Waypoint {
+         private final LivingEntity source;
+         private final Waypoint.Icon icon;
+         private final ServerPlayer receiver;
++        private final EntityVisibility visibility = new EntityVisibility();
+         private ChunkPos lastPosition;
+ 
+         public EntityChunkConnection(final LivingEntity source, final Waypoint.Icon icon, final ServerPlayer receiver) {
+@@ -197,7 +244,7 @@ public interface WaypointTransmitter extends Waypoint {
+         @Override
+         public boolean isBroken() {
+             return WaypointTransmitter.ChunkConnection.super.isBroken()
+-                || WaypointTransmitter.doesSourceIgnoreReceiver(this.source, this.receiver)
++                || WaypointTransmitter.doesSourceIgnoreReceiver(this.source, this.receiver, this.visibility.canSee(this.source, this.receiver))
+                 || WaypointTransmitter.isChunkVisible(this.lastPosition, this.receiver);
+         }
+     }
