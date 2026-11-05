@@ -1,0 +1,170 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 05:28:25 +0200
+Subject: [PATCH] Publish validated waypoint positions at the end of the tick
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 31f2bfe2a2ffa9a15bfbd9c9489115d88bed55f1..2a693b91947da0accac13615b0ce2891b728eb38 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -2082,8 +2082,13 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             profiler.push("tick");
+             this.tickFrame.start();
+             // Paper - improve tick loop - moved into runAllTasksAtTickStart
+-            this.runAllTasksAtTickStart(); // Paper - improve tick loop
+-            this.tickServer(sprinting ? () -> false : this::haveTime);
++            try {
++                for (final ServerLevel level : this.getAllLevels()) level.getWaypointManager().beginPositionUpdateBatch();
++                this.runAllTasksAtTickStart(); // Paper - improve tick loop
++                this.tickServer(sprinting ? () -> false : this::haveTime);
++            } finally {
++                this.finishWaypointPositionBatches(false);
++            }
+             // Paper start - rewrite chunk system
+             final Throwable crash = this.chunkSystemCrash;
+             if (crash != null) {
+@@ -2097,6 +2102,19 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         }
+     }
+ 
++    private void finishWaypointPositionBatches(final boolean publish) {
++        final java.util.List<ServerLevel> pending = new java.util.ArrayList<>();
++        for (final ServerLevel level : this.getAllLevels()) {
++            if (level.getWaypointManager().endPositionUpdateBatch()) pending.add(level);
++        }
++        if (pending.isEmpty()) return;
++        net.minecraft.server.threading.TickRegions.runJoinedWorldPhase(this, pending, level -> {
++            final var context = net.minecraft.server.threading.TickRegions.pushLevelContext(level);
++            try { level.getWaypointManager().flushPositionUpdates(publish); }
++            finally { net.minecraft.server.threading.TickRegions.popContext(context); }
++        }, "waypointPositions");
++    }
++
+     private void autoSave() {
+         this.ticksUntilAutosave = this.autosavePeriod; // CraftBukkit
+         LOGGER.debug("Autosave started");
+@@ -2282,6 +2300,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             player.connection.resumeFlushing();
+         }
+ 
++        this.finishWaypointPositionBatches(true);
+         profiler.pop();
+         this.serverActivityMonitor.tick();
+     }
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index 1cb54fb8bc654354cbf762a8837de986c6b4278c..207e185d5a9dee4908aaa4f17e8569e71b83452e 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -1721,6 +1721,8 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+         )) {
+             throw new IllegalStateException("Waypoint position batch lost its world owner");
+         }
++        if ((moved && this.isTransmittingWaypoint() || this.isReceivingWaypoints() && this.connection != null)
++            && level.getWaypointManager().deferPositionUpdate(this, moved)) return;
+         if (moved && this.isTransmittingWaypoint()) {
+             level.getWaypointManager().updateWaypoint(this);
+         }
+diff --git a/net/minecraft/server/waypoints/ServerWaypointManager.java b/net/minecraft/server/waypoints/ServerWaypointManager.java
+index 4c2a292ce16aec16da53e774fafb712b7fcdd99e..1ca367cbdeaa9a87540aa8ab8428467fe2a55493 100644
+--- a/net/minecraft/server/waypoints/ServerWaypointManager.java
++++ b/net/minecraft/server/waypoints/ServerWaypointManager.java
+@@ -18,6 +18,12 @@ import net.minecraft.world.waypoints.WaypointTransmitter;
+ import org.jspecify.annotations.Nullable;
+ 
+ public class ServerWaypointManager implements WaypointManager<WaypointTransmitter> {
++    private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
++    private final net.minecraft.server.level.ServerLevel level;
++    // Global control opens and closes the tick window; the world owner owns its pending updates.
++    private volatile boolean positionUpdateBatch;
++    private volatile boolean positionsPending;
++    private Map<ServerPlayer, Boolean> pendingPositions = new java.util.IdentityHashMap<>();
+     private final Set<WaypointTransmitter> waypoints = new HashSet<>();
+     private final Set<ServerPlayer> players = new HashSet<>();
+     private final Table<ServerPlayer, WaypointTransmitter, WaypointTransmitter.Connection> connections = HashBasedTable.create();
+@@ -28,10 +34,67 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     public boolean locatorBarEnabled; // Avoid a gamerule lookup for each player
+ 
+     public ServerWaypointManager(net.minecraft.server.level.ServerLevel serverLevel) {
++        this.level = serverLevel;
+         this.locatorBarEnabled = serverLevel.getGameRules().get(GameRules.LOCATOR_BAR);
+     }
+     // Paper end - optimize ServerWaypointManager with locator bar disabled
+ 
++    public void beginPositionUpdateBatch() {
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.level.getServer(), "begin-waypoint-positions");
++        if (this.positionUpdateBatch || this.positionsPending) {
++            throw new IllegalStateException("Previous waypoint position batch has not finished");
++        }
++        this.positionUpdateBatch = true;
++    }
++
++    public boolean endPositionUpdateBatch() {
++        if (!this.positionUpdateBatch) return this.positionsPending;
++        net.minecraft.server.threading.runtime.OwnerDomainExecutor.assertGlobalOwner(this.level.getServer(), "end-waypoint-positions");
++        this.positionUpdateBatch = false;
++        return this.positionsPending;
++    }
++
++    /** Retain final locator positions during the tick without deferring physics or decision events. */
++    public boolean deferPositionUpdate(final ServerPlayer player, final boolean moved) {
++        if (!this.positionUpdateBatch || !this.locatorBarEnabled) return false;
++        this.assertPositionOwner();
++        if (player.level() != this.level || player.isRemoved()) return false;
++        this.pendingPositions.merge(player, moved, (previous, current) -> previous || current);
++        this.positionsPending = true;
++        return true;
++    }
++
++    public void flushPositionUpdates(final boolean publish) {
++        this.assertPositionOwner();
++        final Map<ServerPlayer, Boolean> pending = this.pendingPositions;
++        this.pendingPositions = new java.util.IdentityHashMap<>();
++        this.positionsPending = false;
++        try {
++            if (!publish || !this.locatorBarEnabled) return;
++            for (Entry<ServerPlayer, Boolean> update : pending.entrySet()) {
++                final ServerPlayer player = update.getKey();
++                if (player.level() != this.level || player.isRemoved()
++                    || player.connection != null && (player.connection.player != player || player.connection.processedDisconnect)) continue;
++                try {
++                    if (update.getValue() && player.isTransmittingWaypoint()) this.updateWaypoint(player);
++                    if (player.isReceivingWaypoints() && player.connection != null) this.updatePlayer(player);
++                } catch (Exception failure) {
++                    if (failure instanceof net.minecraft.ReportedException reported && reported.getCause() instanceof OutOfMemoryError) throw reported;
++                    LOGGER.error("Failed to update waypoint position for player {} in {}", player.getUUID(), this.level.dimension().identifier(), failure);
++                    this.level.getServer().reportPacketHandlingException(failure, net.minecraft.network.protocol.game.GamePacketTypes.CLIENTBOUND_WAYPOINT);
++                }
++            }
++        } finally {
++            pending.clear();
++        }
++    }
++
++    private void assertPositionOwner() {
++        if (!net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(
++            this.level, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE
++        )) throw new IllegalStateException("Waypoint position updates require the full world owner");
++    }
++
+     @Override
+     public void trackWaypoint(final WaypointTransmitter waypoint) {
+         this.waypoints.add(waypoint);
+@@ -147,6 +210,8 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     }
+ 
+     public void removePlayer(final ServerPlayer player) {
++        this.pendingPositions.remove(player);
++        this.positionsPending = !this.pendingPositions.isEmpty();
+         this.connections.row(player).entrySet().removeIf(entry -> {
+             entry.getValue().disconnect();
+             this.removeReceiverIndex(player, entry.getKey());
+@@ -157,6 +222,8 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     }
+ 
+     public void breakAllConnections() {
++        this.pendingPositions.clear();
++        this.positionsPending = false;
+         this.connections.values().forEach(WaypointTransmitter.Connection::disconnect);
+         this.connections.clear();
+         this.receiversByWaypoint.values().forEach(Map::clear);

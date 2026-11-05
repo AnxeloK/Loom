@@ -1,0 +1,347 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 05:28:26 +0200
+Subject: [PATCH] Cover tick waypoint publication and owner cleanup
+
+
+diff --git a/src/test/java/net/minecraft/server/level/ServerPlayerWaypointBatchTest.java b/src/test/java/net/minecraft/server/level/ServerPlayerWaypointBatchTest.java
+index 9875b396977093307068a1aabaee9f03a6fcc95c..82411df8e3b8b7d4229ccaecee17cc8481904fe8 100644
+--- a/src/test/java/net/minecraft/server/level/ServerPlayerWaypointBatchTest.java
++++ b/src/test/java/net/minecraft/server/level/ServerPlayerWaypointBatchTest.java
+@@ -216,6 +216,43 @@ class ServerPlayerWaypointBatchTest {
+         verify(f.manager, never()).updateWaypoint(f.player);
+     }
+ 
++    @Test
++    void separateMovementValidationsShareTheTickPublicationButKeepEveryMove() throws Exception {
++        final Fixture f = new Fixture();
++        final var rules = mock(net.minecraft.world.level.gamerules.GameRules.class);
++        when(rules.get(net.minecraft.world.level.gamerules.GameRules.LOCATOR_BAR)).thenReturn(true);
++        when(f.level.getGameRules()).thenReturn(rules);
++        final var manager = spy(new ServerWaypointManager(f.level));
++        final AtomicReference<Vec3> published = new AtomicReference<>();
++        doAnswer(call -> { published.set(f.player.position()); return null; }).when(manager).updateWaypoint(f.player);
++        doNothing().when(manager).updatePlayer(f.player);
++        when(f.level.getWaypointManager()).thenReturn(manager);
++        run(() -> {
++            try (var ignored = net.minecraft.server.threading.runtime.OwnerDomainExecutor.enterGlobal(f.server, "tick-waypoints")) {
++                manager.beginPositionUpdateBatch();
++                var owner = TickRegions.pushLevelContext(f.level);
++                try {
++                    for (int i = 1; i <= 3; i++) {
++                        int batch = f.player.beginWaypointPositionBatch();
++                        f.player.setPosRaw(i, 0, 0);
++                        if (i == 3) f.player.setPosRaw(2, 0, 0);
++                        f.player.endWaypointPositionBatch(batch);
++                    }
++                } finally { TickRegions.popContext(owner); }
++                verify(manager, never()).updateWaypoint(f.player);
++                assertTrue(manager.endPositionUpdateBatch());
++                owner = TickRegions.pushLevelContext(f.level);
++                try { manager.flushPositionUpdates(true); }
++                finally { TickRegions.popContext(owner); }
++            }
++        });
++        verify(manager).updateWaypoint(f.player);
++        verify(manager).updatePlayer(f.player);
++        verify(f.callback, times(4)).onMove();
++        assertEquals(new Vec3(2, 0, 0), f.player.position());
++        assertEquals(f.player.position(), published.get());
++    }
++
+     private static final class Fixture {
+         final MinecraftServer server = mock(MinecraftServer.class);
+         final ServerLevel level = mock(ServerLevel.class);
+@@ -241,6 +278,7 @@ class ServerPlayerWaypointBatchTest {
+             doReturn(true).when(player).isTransmittingWaypoint();
+             doReturn(true).when(player).isReceivingWaypoints();
+             player.connection = mock(ServerGamePacketListenerImpl.class);
++            player.connection.player = player;
+         }
+ 
+         void positions() {
+diff --git a/src/test/java/net/minecraft/server/waypoints/ServerWaypointTickBatchTest.java b/src/test/java/net/minecraft/server/waypoints/ServerWaypointTickBatchTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..dd38074a87c55a0ffdac1731269d46cc5f2e6548
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/waypoints/ServerWaypointTickBatchTest.java
+@@ -0,0 +1,279 @@
++package net.minecraft.server.waypoints;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.server.network.ServerGamePacketListenerImpl;
++import net.minecraft.server.threading.TickRegions;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.level.Level;
++import net.minecraft.world.level.gamerules.GameRules;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class ServerWaypointTickBatchTest {
++    @BeforeAll static void initializeTypes() {
++        mock(MinecraftServer.class); mock(ServerLevel.class); mock(ServerPlayer.class);
++        mock(ServerGamePacketListenerImpl.class); mock(ServerWaypointManager.class);
++    }
++
++    @Test void repeatedValidatedPositionsPublishOneSourceAndReceiverRefresh() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> {
++                for (int i = 0; i < 20; i++) assertTrue(f.manager.deferPositionUpdate(f.first, true));
++                verify(f.manager, never()).updateWaypoint(f.first);
++                verify(f.manager, never()).updatePlayer(f.first);
++            });
++            assertTrue(f.manager.endPositionUpdateBatch());
++            f.owned(() -> f.manager.flushPositionUpdates(true));
++            verify(f.manager).updateWaypoint(f.first);
++            verify(f.manager).updatePlayer(f.first);
++            assertFalse(f.manager.endPositionUpdateBatch());
++        });
++    }
++
++    @Test void receiverOnlyUpdatesMergeWithLaterMovement() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> {
++                f.manager.deferPositionUpdate(f.first, false);
++                f.manager.deferPositionUpdate(f.first, true);
++                f.manager.deferPositionUpdate(f.first, false);
++            });
++            f.finish(true);
++            verify(f.manager).updateWaypoint(f.first);
++            verify(f.manager).updatePlayer(f.first);
++        });
++    }
++
++    @Test void stationaryReceiverDoesNotRefreshItsTransmitter() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> f.manager.deferPositionUpdate(f.first, false));
++            f.finish(true);
++            verify(f.manager, never()).updateWaypoint(f.first);
++            verify(f.manager).updatePlayer(f.first);
++        });
++    }
++
++    @Test void callsOutsideTheTickWindowKeepTheirImmediatePath() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            f.owned(() -> assertFalse(f.manager.deferPositionUpdate(f.first, true)));
++            assertFalse(f.manager.endPositionUpdateBatch());
++        });
++    }
++
++    @Test void disabledLocatorDoesNotRetainPendingPlayers() throws Exception {
++        Fixture f = new Fixture(); f.manager.locatorBarEnabled = false;
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> assertFalse(f.manager.deferPositionUpdate(f.first, true)));
++            assertFalse(f.manager.endPositionUpdateBatch());
++        });
++    }
++
++    @Test void abortClearsPendingPositionsWithoutPublishingThem() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> f.manager.deferPositionUpdate(f.first, true));
++            f.finish(false);
++            verify(f.manager, never()).updateWaypoint(f.first);
++            verify(f.manager, never()).updatePlayer(f.first);
++            f.manager.beginPositionUpdateBatch();
++            assertFalse(f.manager.endPositionUpdateBatch());
++        });
++    }
++
++    @Test void transfersAndRemovedPlayersAreNotPublishedInTheirOldWorld() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> {
++                f.manager.deferPositionUpdate(f.first, true);
++                f.manager.deferPositionUpdate(f.second, true);
++            });
++            doReturn(mock(ServerLevel.class)).when(f.first).level();
++            doReturn(true).when(f.second).isRemoved();
++            f.finish(true);
++            verify(f.manager, never()).updateWaypoint(any());
++            verify(f.manager, never()).updatePlayer(any());
++        });
++    }
++
++    @Test void receiverDepartureRetiresItsPendingPosition() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> { f.manager.deferPositionUpdate(f.first, true); f.manager.removePlayer(f.first); });
++            assertFalse(f.manager.endPositionUpdateBatch());
++        });
++    }
++
++    @Test void connectionResetRetiresPendingPositionWork() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> { f.manager.deferPositionUpdate(f.first, true); f.manager.breakAllConnections(); });
++            assertFalse(f.manager.endPositionUpdateBatch());
++        });
++    }
++
++    @Test void aChangedEligibilityControlsTheFinalPublication() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> f.manager.deferPositionUpdate(f.first, true));
++            doReturn(false).when(f.first).isTransmittingWaypoint();
++            doReturn(false).when(f.first).isReceivingWaypoints();
++            f.finish(true);
++            verify(f.manager, never()).updateWaypoint(any());
++            verify(f.manager, never()).updatePlayer(any());
++        });
++    }
++
++    @Test void callbacksDuringPublicationUseTheImmediatePath() throws Exception {
++        Fixture f = new Fixture();
++        doAnswer(call -> { assertFalse(f.manager.deferPositionUpdate(f.second, true)); return null; })
++            .when(f.manager).updateWaypoint(f.first);
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> f.manager.deferPositionUpdate(f.first, true));
++            f.finish(true);
++            assertFalse(f.manager.endPositionUpdateBatch());
++        });
++    }
++
++    @Test void aFailedPublicationDoesNotRetainPlayersOrSuppressOtherPlayers() throws Exception {
++        Fixture f = new Fixture();
++        doThrow(new IllegalArgumentException("connection callback failed")).when(f.manager).updateWaypoint(f.first);
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> { f.manager.deferPositionUpdate(f.first, true); f.manager.deferPositionUpdate(f.second, true); });
++            f.finish(true);
++            verify(f.manager).updateWaypoint(f.second);
++            verify(f.manager).updatePlayer(f.second);
++            verify(f.server).reportPacketHandlingException(any(Exception.class), eq(net.minecraft.network.protocol.game.GamePacketTypes.CLIENTBOUND_WAYPOINT));
++            f.manager.beginPositionUpdateBatch();
++            assertFalse(f.manager.endPositionUpdateBatch());
++        });
++    }
++
++    @Test void boundedOwnersCannotEnqueueOrFlushWorldPositionUpdates() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            var context = TickRegions.pushRegionContext(f.level, 0, 0, 0, 0);
++            try {
++                assertThrows(IllegalStateException.class, () -> f.manager.deferPositionUpdate(f.first, true));
++                assertThrows(IllegalStateException.class, () -> f.manager.flushPositionUpdates(true));
++            } finally { TickRegions.popContext(context); }
++            assertFalse(f.manager.endPositionUpdateBatch());
++        });
++    }
++
++    @Test void fatalPublicationStillRetiresPendingReferences() throws Exception {
++        Fixture f = new Fixture();
++        doThrow(new OutOfMemoryError("test failure")).when(f.manager).updateWaypoint(f.first);
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> f.manager.deferPositionUpdate(f.first, true));
++            assertThrows(OutOfMemoryError.class, () -> f.finish(true));
++            f.manager.beginPositionUpdateBatch();
++            assertFalse(f.manager.endPositionUpdateBatch());
++        });
++    }
++
++    @Test void aPlayerFromAnotherWorldCannotJoinThePendingBatch() throws Exception {
++        Fixture f = new Fixture();
++        doReturn(mock(ServerLevel.class)).when(f.first).level();
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> assertFalse(f.manager.deferPositionUpdate(f.first, true)));
++            assertFalse(f.manager.endPositionUpdateBatch());
++        });
++    }
++
++    @Test void aReplacedConnectionDoesNotPublishThePreviousPlayer() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> f.manager.deferPositionUpdate(f.first, true));
++            f.first.connection.player = f.second;
++            f.finish(true);
++            verify(f.manager, never()).updateWaypoint(f.first);
++            verify(f.manager, never()).updatePlayer(f.first);
++        });
++    }
++
++    @Test void aDisconnectedSessionDoesNotPublishItsQueuedPosition() throws Exception {
++        Fixture f = new Fixture();
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> f.manager.deferPositionUpdate(f.first, true));
++            f.first.connection.processedDisconnect = true;
++            f.finish(true);
++            verify(f.manager, never()).updateWaypoint(f.first);
++            verify(f.manager, never()).updatePlayer(f.first);
++        });
++    }
++
++    @Test void aTransmitterWithoutAConnectionKeepsItsSourceRefresh() throws Exception {
++        Fixture f = new Fixture(); f.first.connection = null;
++        f.run(() -> {
++            f.manager.beginPositionUpdateBatch();
++            f.owned(() -> f.manager.deferPositionUpdate(f.first, true));
++            f.finish(true);
++            verify(f.manager).updateWaypoint(f.first);
++            verify(f.manager, never()).updatePlayer(f.first);
++        });
++    }
++
++    private static final class Fixture {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel level = mock(ServerLevel.class);
++        final ServerWaypointManager manager;
++        final ServerPlayer first = mock(ServerPlayer.class), second = mock(ServerPlayer.class);
++        Fixture() {
++            GameRules rules = mock(GameRules.class);
++            when(level.getServer()).thenReturn(server); when(level.dimension()).thenReturn(Level.OVERWORLD);
++            when(level.getGameRules()).thenReturn(rules); when(rules.get(GameRules.LOCATOR_BAR)).thenReturn(true);
++            manager = spy(new ServerWaypointManager(level));
++            for (ServerPlayer player : new ServerPlayer[]{first, second}) {
++                doReturn(level).when(player).level();
++                doReturn(true).when(player).isTransmittingWaypoint(); doReturn(true).when(player).isReceivingWaypoints();
++                player.connection = mock(ServerGamePacketListenerImpl.class);
++                player.connection.player = player;
++                doNothing().when(manager).updateWaypoint(player); doNothing().when(manager).updatePlayer(player);
++            }
++        }
++        void finish(boolean publish) {
++            assertTrue(manager.endPositionUpdateBatch());
++            owned(() -> manager.flushPositionUpdates(publish));
++        }
++        void owned(Runnable action) {
++            var context = TickRegions.pushLevelContext(level);
++            try { action.run(); } finally { TickRegions.popContext(context); }
++        }
++        void run(Runnable action) throws Exception {
++            AtomicReference<Throwable> failure = new AtomicReference<>();
++            Thread thread = new TickThread(() -> {
++                try (var ignored = OwnerDomainExecutor.enterGlobal(server, "waypoint-tick-test")) { action.run(); }
++                catch (Throwable error) { failure.set(error); }
++            }, "waypoint-tick-owner-test");
++            thread.setDaemon(true); thread.start(); thread.join(10_000);
++            assertFalse(thread.isAlive()); if (failure.get() != null) throw new AssertionError(failure.get());
++        }
++    }
++}
