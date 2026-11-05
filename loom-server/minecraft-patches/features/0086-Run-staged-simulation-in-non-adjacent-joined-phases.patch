@@ -1,0 +1,213 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 07:03:38 +0200
+Subject: [PATCH] Run staged simulation in non-adjacent joined phases
+
+
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index cc93959c7d4bf3d94893e9b33a3267df90ec8865..a9b5ce0fac5df7f72c1044543952930b2c09bb61 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -211,7 +211,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+                 return;
+             }
+ 
+-            final int shift = net.minecraft.server.threading.TickRegions.getRegionChunkShift();
++            final int shift = net.minecraft.server.threading.TickRegions.getSimulationChunkShift();
+             final it.unimi.dsi.fastutil.longs.Long2ObjectMap<ArrayList<LevelChunk>> byRegion =
+                 new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
+             for (int i = 0; i < size; ++i) {
+@@ -244,7 +244,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+                 final ChunkTickGroup group = new ChunkTickGroup(this, regionChunks.toArray(LevelChunk[]::new));
+                 tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(minX, minZ, minX, minZ, maxX, maxZ, group));
+             }
+-            this.taskPlan = net.minecraft.server.threading.TickRegions.prepareRegionBoundTasks(world, tasks, "chunkTick");
++            this.taskPlan = net.minecraft.server.threading.TickRegions.prepareSimulationRegionTasks(world, tasks, "chunkTick");
+         }
+ 
+         private boolean matches(final LevelChunk[] chunks, final int size) {
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 83db93a69fd26e2116b33d5a4a088df1e4101a8f..065911e58701cad21f023ccbe6a0bc0f377dd29f 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1556,7 +1556,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         final java.util.List<Entity> toTick = new java.util.ArrayList<>();
+         this.entityTickList.forEach(toTick::add);
+         final int count = toTick.size();
+-        final int shift = net.minecraft.server.threading.TickRegions.getRegionChunkShift();
++        final int shift = net.minecraft.server.threading.TickRegions.getSimulationChunkShift();
+         final it.unimi.dsi.fastutil.longs.Long2ObjectMap<java.util.List<Entity>> byRegion =
+             new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
+         java.util.List<Entity> ownerTick = null;
+@@ -1620,10 +1620,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             tasks.add(new net.minecraft.server.threading.TickRegions.RegionBoundTask(dispatchX, dispatchZ, fMinX, fMinZ, fMaxX, fMaxZ, group));
+         }
+         final net.minecraft.server.threading.TickRegions.RegionTaskPlan taskPlan =
+-            net.minecraft.server.threading.TickRegions.prepareRegionBoundTasks(this, tasks, "entityTick");
++            net.minecraft.server.threading.TickRegions.prepareSimulationRegionTasks(this, tasks, "entityTick");
+         if (!taskPlan.isParallel()) {
+-            // Adjacent region cells can merge into one safety bucket. Keep the original entity order and
+-            // immediate callbacks under the full-world lease when the final layout offers no parallelism.
++            // Keep the original entity order and immediate callbacks under the full-world lease when
++            // no simulation phase contains separated cells that can run together.
+             for (int i = 0; i < count; ++i) {
+                 this.tickOneEntity(toTick.get(i));
+             }
+diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
+index 626a681d15bceb9c69c7d72502e4252e023bb474..c1eb9705de41f1f9414dc90044f8b0c5891ee2d2 100644
+--- a/net/minecraft/server/threading/TickRegions.java
++++ b/net/minecraft/server/threading/TickRegions.java
+@@ -123,8 +123,8 @@ public class TickRegions {
+         Integer.getInteger("paper.threadedregions.parallelSimulation.targetTasksPerWorker", 4)
+     );
+     // Loom - non-adjacency buffer (in chunks) between region-task buckets that run in parallel. A block
+-    // update fans out at most ~1 chunk, so buckets within this many chunks of each other are merged to tick
+-    // together, guaranteeing parallel buckets cannot race on a shared edge chunk. This is the load-bearing
++    // update fans out at most ~1 chunk, so neighboring tasks must share a bucket or run in separate joined
++    // phases. Parallel buckets cannot race on a shared edge chunk. This is the load-bearing
+     // safety primitive for intra-world parallel ticking. Higher = safer but coarser (less parallelism).
+     static final int REGION_TASK_BUFFER_CHUNKS = Math.max(0, Integer.getInteger("loom.regionTaskBufferChunks", 1));
+     private static final int DIAGNOSTIC_EVENT_LIMIT = Math.max(
+@@ -205,6 +205,11 @@ public class TickRegions {
+         return ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ThreadedTicketLevelPropagator.SECTION_SHIFT;
+     }
+ 
++    /** Simulation dispatch uses scheduler-sized cells; ticket propagation retains its own section size. */
++    public static int getSimulationChunkShift() {
++        return Math.min(REGION_BUCKET_SHIFT, getRegionChunkShift());
++    }
++
+     public static RegionContext pushLevelContext(final ServerLevel world) {
+         return pushRegionContext(world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE);
+     }
+@@ -808,36 +813,92 @@ public class TickRegions {
+         final List<RegionBoundBucket> buckets = containsMultiChunkRegionTasks(ownedTasks)
+             ? bucketRegionBoundTasksCached(world, ownedTasks, stageName)
+             : bucketRegionBoundTasksByDispatchChunk(world, ownedTasks);
+-        return new RegionTaskPlan(world, stageName, buckets);
++        return new RegionTaskPlan(world, stageName, buckets.isEmpty() ? List.of() : List.of(buckets));
++    }
++
++    /**
++     * Prepare staged simulation in joined, non-adjacent phases. Callers must stage cross-region effects
++     * until every phase completes; unlike general region jobs, their groups may run in a different order.
++     */
++    public static RegionTaskPlan prepareSimulationRegionTasks(
++        final ServerLevel world,
++        final List<RegionBoundTask> tasks,
++        final String stageName
++    ) {
++        Objects.requireNonNull(world, "World may not be null");
++        Objects.requireNonNull(tasks, "Tasks may not be null");
++        Objects.requireNonNull(stageName, "Stage name may not be null");
++        final List<RegionBoundBucket> buckets = new ArrayList<>(tasks.size());
++        for (final RegionBoundTask task : tasks) {
++            final RegionBoundBucket bucket = new RegionBoundBucket(world);
++            bucket.add(task);
++            buckets.add(bucket);
++        }
++        buckets.sort(Comparator
++            .comparingInt(RegionBoundBucket::minChunkX)
++            .thenComparingInt(RegionBoundBucket::minChunkZ)
++            .thenComparingInt(RegionBoundBucket::maxChunkX)
++            .thenComparingInt(RegionBoundBucket::maxChunkZ));
++
++        final List<List<RegionBoundBucket>> phases = new ArrayList<>();
++        for (final RegionBoundBucket bucket : buckets) {
++            List<RegionBoundBucket> selected = null;
++            for (final List<RegionBoundBucket> phase : phases) {
++                boolean conflicts = false;
++                for (final RegionBoundBucket other : phase) {
++                    if (bucket.intersects(other)) {
++                        conflicts = true;
++                        break;
++                    }
++                }
++                if (!conflicts) {
++                    selected = phase;
++                    break;
++                }
++            }
++            if (selected == null) {
++                selected = new ArrayList<>();
++                phases.add(selected);
++            }
++            selected.add(bucket);
++        }
++        return new RegionTaskPlan(world, stageName, phases);
+     }
+ 
+     /** Immutable membership; a cached simulation layout is reusable while its tasks remain unchanged. */
+     public static final class RegionTaskPlan {
+         private final ServerLevel world;
+         private final String stageName;
+-        private final List<RegionBoundBucket> buckets;
++        private final List<List<RegionBoundBucket>> phases;
+ 
+-        private RegionTaskPlan(final ServerLevel world, final String stageName, final List<RegionBoundBucket> buckets) {
++        private RegionTaskPlan(final ServerLevel world, final String stageName, final List<List<RegionBoundBucket>> phases) {
+             this.world = world;
+             this.stageName = stageName;
+-            this.buckets = List.copyOf(buckets);
++            this.phases = phases.stream().map(List::copyOf).toList();
+         }
+ 
+         public boolean isParallel() {
+-            return PARALLEL_SIMULATION_ENABLED && this.buckets.size() > 1;
++            if (PARALLEL_SIMULATION_ENABLED) {
++                for (final List<RegionBoundBucket> phase : this.phases) {
++                    if (phase.size() > 1) return true;
++                }
++            }
++            return false;
+         }
+ 
+         public void runFromCurrentContext() {
+-            if (this.buckets.isEmpty()) {
++            if (this.phases.isEmpty()) {
+                 return;
+             }
+             final List<ContextLeaseBounds> suspended = suspendContextStackForWorld(this.world);
+             try {
+-                if (this.isParallel()) {
+-                    dispatchBucketsParticipating(this.buckets.size(), i -> this.buckets.get(i).run(this.stageName), this.stageName);
+-                } else {
+-                    for (int i = 0, len = this.buckets.size(); i < len; ++i) {
+-                        this.buckets.get(i).run(this.stageName);
++                for (final List<RegionBoundBucket> phase : this.phases) {
++                    if (PARALLEL_SIMULATION_ENABLED && phase.size() > 1) {
++                        dispatchBucketsParticipating(phase.size(), i -> phase.get(i).run(this.stageName), this.stageName);
++                    } else {
++                        for (int i = 0, len = phase.size(); i < len; ++i) {
++                            phase.get(i).run(this.stageName);
++                        }
+                     }
+                 }
+             } finally {
+@@ -3237,18 +3298,18 @@ public class TickRegions {
+             // Loom - expand by the non-adjacency buffer so buckets within REGION_TASK_BUFFER_CHUNKS of each
+             // other are treated as overlapping and merged; parallel buckets are then guaranteed a chunk gap.
+             final int b = REGION_TASK_BUFFER_CHUNKS;
+-            return this.minChunkX - b <= task.maxChunkX()
+-                && this.maxChunkX + b >= task.minChunkX()
+-                && this.minChunkZ - b <= task.maxChunkZ()
+-                && this.maxChunkZ + b >= task.minChunkZ();
++            return (long)this.minChunkX - b <= task.maxChunkX()
++                && (long)this.maxChunkX + b >= task.minChunkX()
++                && (long)this.minChunkZ - b <= task.maxChunkZ()
++                && (long)this.maxChunkZ + b >= task.minChunkZ();
+         }
+ 
+         private boolean intersects(final RegionBoundBucket other) {
+             final int b = REGION_TASK_BUFFER_CHUNKS;
+-            return this.minChunkX - b <= other.maxChunkX
+-                && this.maxChunkX + b >= other.minChunkX
+-                && this.minChunkZ - b <= other.maxChunkZ
+-                && this.maxChunkZ + b >= other.minChunkZ;
++            return (long)this.minChunkX - b <= other.maxChunkX
++                && (long)this.maxChunkX + b >= other.minChunkX
++                && (long)this.minChunkZ - b <= other.maxChunkZ
++                && (long)this.maxChunkZ + b >= other.minChunkZ;
+         }
+ 
+         private void absorb(final RegionBoundBucket other) {

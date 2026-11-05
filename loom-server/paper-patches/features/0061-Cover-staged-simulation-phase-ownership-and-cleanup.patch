@@ -1,0 +1,251 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 06:58:35 +0200
+Subject: [PATCH] Cover staged simulation phase ownership and cleanup
+
+
+diff --git a/src/test/java/net/minecraft/server/level/SerialSimulationFallbackTest.java b/src/test/java/net/minecraft/server/level/SerialSimulationFallbackTest.java
+index 02c303d194c99590978b06e4f52097c0f19a67fb..c19260291e1831a1e007d8769ff78d681678d736 100644
+--- a/src/test/java/net/minecraft/server/level/SerialSimulationFallbackTest.java
++++ b/src/test/java/net/minecraft/server/level/SerialSimulationFallbackTest.java
+@@ -47,6 +47,42 @@ class SerialSimulationFallbackTest {
+         assertEquals(TickRegions.isParallelSimulationEnabled(), parallel(plan(f.world, chunks(-2, -1, 128, 129))));
+     }
+ 
++    @Test
++    void aConnectedStripCanTickItsSeparatedEndsTogether() throws Exception {
++        final Fixture f = new Fixture();
++        assertTrue(parallel(plan(f.world, chunks(0, 7, 8, 15, 16, 23))));
++    }
++
++    @Test
++    void connectedChunkRegionsStageEveryChunkAndReuseThePlan() throws Exception {
++        final Fixture f = new Fixture();
++        final LevelChunk[] chunks = chunks(0, 7, 8, 15, 16, 23);
++        final ReferenceList<LevelChunk> ticking = new ReferenceList<>(new LevelChunk[0]);
++        for (final LevelChunk chunk : chunks) ticking.add(chunk);
++        when(f.world.moonrise$getEntityTickingChunks()).thenReturn(ticking);
++        final GameRules rules = mock(GameRules.class);
++        when(rules.get(GameRules.RANDOM_TICK_SPEED)).thenReturn(3);
++        when(f.world.getGameRules()).thenReturn(rules);
++        final ServerChunkCache cache = mock(ServerChunkCache.class);
++        set(cache, "level", f.world);
++        final List<LevelChunk> seen = Collections.synchronizedList(new ArrayList<>());
++        doAnswer(call -> {
++            final LevelChunk chunk = call.getArgument(0);
++            assertTrue(RegionTickStaging.isStaging());
++            assertTrue(TickRegions.isCurrentThreadOwnerQuiet(f.world, chunk.locX, chunk.locZ, chunk.locX, chunk.locZ));
++            assertEquals(3, (int)call.getArgument(1));
++            seen.add(chunk);
++            return null;
++        }).when(f.world).loom$tickChunk(any(), anyInt(), any(), any());
++        f.owned(() -> {
++            invoke(cache, "iterateTickingChunksFaster", new Class<?>[0]);
++            invoke(cache, "iterateTickingChunksFaster", new Class<?>[0]);
++            f.assertSerialOwner();
++        });
++        assertEquals(chunks.length * 2, seen.size());
++        for (final LevelChunk chunk : chunks) assertEquals(2, Collections.frequency(seen, chunk));
++    }
++
+     @Test
+     void chunkPlanInvalidatesOnIdentityOrOrderChange() throws Exception {
+         final Fixture f = new Fixture();
+@@ -126,6 +162,37 @@ class SerialSimulationFallbackTest {
+         f.assertEntityTicks(entities);
+     }
+ 
++    @Test
++    void connectedEntityRegionsStageBeforeOwnerEntities() throws Exception {
++        final Fixture f = new Fixture();
++        final Entity owner = entity(1, true);
++        final List<Entity> entities = List.of(entity(0, false), owner, entity(8, false), entity(16, false));
++        final EntityTickList ticking = new EntityTickList();
++        entities.forEach(ticking::add);
++        set(f.world, "entityTickList", ticking);
++        final List<Entity> seen = Collections.synchronizedList(new ArrayList<>());
++        doAnswer(call -> {
++            final Entity current = call.getArgument(1);
++            if (current == owner) {
++                f.assertSerialOwner();
++                assertEquals(3, seen.size());
++            } else {
++                assertTrue(RegionTickStaging.isStaging());
++                final ChunkPos pos = current.chunkPosition();
++                assertTrue(TickRegions.isCurrentThreadOwnerQuiet(f.world, pos.x(), pos.z(), pos.x(), pos.z()));
++            }
++            seen.add(current);
++            return null;
++        }).when(f.world).guardEntityTick(any(), any());
++        f.owned(() -> {
++            invoke(f.world, "tickEntitiesInParallel", new Class<?>[0]);
++            f.assertSerialOwner();
++        });
++        assertEquals(4, seen.size());
++        assertTrue(seen.containsAll(entities));
++        assertSame(owner, seen.getLast());
++    }
++
+     @Test
+     void oneEntityRegionRecordsItsElapsedTime() throws Exception {
+         final Fixture f = new Fixture();
+diff --git a/src/test/java/net/minecraft/server/threading/StagedSimulationRegionPlanTest.java b/src/test/java/net/minecraft/server/threading/StagedSimulationRegionPlanTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..49bd4dced77c6cc1e9e8742656be4c09edbe1004
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/threading/StagedSimulationRegionPlanTest.java
+@@ -0,0 +1,154 @@
++package net.minecraft.server.threading;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.level.Level;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Normal
++class StagedSimulationRegionPlanTest {
++
++    @Test
++    void separatedEndsJoinBeforeTheirAdjacentMiddleRuns() throws Exception {
++        final Fixture f = new Fixture();
++        final AtomicInteger ends = new AtomicInteger();
++        final AtomicInteger middle = new AtomicInteger();
++        final var plan = TickRegions.prepareSimulationRegionTasks(f.world, List.of(
++            f.task(0, 7, ends::incrementAndGet),
++            f.task(8, 15, () -> { assertEquals(2, ends.get()); middle.incrementAndGet(); }),
++            f.task(16, 23, ends::incrementAndGet)
++        ), "staged-strip-test");
++        assertTrue(plan.isParallel());
++        f.owned(() -> { plan.runFromCurrentContext(); f.assertFullOwner(); });
++        assertEquals(2, ends.get());
++        assertEquals(1, middle.get());
++    }
++
++    @Test
++    void adjacentBoundsRetainTheSafetyBuffer() {
++        final Fixture f = new Fixture();
++        final var plan = TickRegions.prepareSimulationRegionTasks(f.world, List.of(
++            f.task(0, 7, () -> {}), f.task(8, 15, () -> {})
++        ), "staged-buffer-test");
++        assertFalse(plan.isParallel());
++    }
++
++    @Test
++    void overlappingBoundsCannotShareAParallelPhase() {
++        final Fixture f = new Fixture();
++        assertFalse(TickRegions.prepareSimulationRegionTasks(f.world, List.of(
++            f.task(0, 8, () -> {}), f.task(8, 16, () -> {})
++        ), "staged-overlap-test").isParallel());
++    }
++
++    @Test
++    void fullCoordinateRangeStillConflictsWithAnInteriorTask() {
++        final Fixture f = new Fixture();
++        assertFalse(TickRegions.prepareSimulationRegionTasks(f.world, List.of(
++            f.task(Integer.MIN_VALUE, Integer.MAX_VALUE, () -> {}), f.task(0, 0, () -> {})
++        ), "staged-extreme-bounds-test").isParallel());
++    }
++
++    @Test
++    void preparedMembershipIsReusableAfterTheCallerClearsItsList() throws Exception {
++        final Fixture f = new Fixture();
++        final AtomicInteger count = new AtomicInteger();
++        final List<TickRegions.RegionBoundTask> tasks = new ArrayList<>(List.of(
++            f.task(0, 7, count::incrementAndGet), f.task(32, 39, count::incrementAndGet)
++        ));
++        final var plan = TickRegions.prepareSimulationRegionTasks(f.world, tasks, "staged-membership-test");
++        tasks.clear();
++        f.owned(() -> { plan.runFromCurrentContext(); plan.runFromCurrentContext(); f.assertFullOwner(); });
++        assertEquals(4, count.get());
++    }
++
++    @Test
++    void aFailedPhaseDoesNotStartItsSuccessorOrRetainTheBoundedOwner() throws Exception {
++        final Fixture f = new Fixture();
++        final AtomicInteger middle = new AtomicInteger();
++        final var plan = TickRegions.prepareSimulationRegionTasks(f.world, List.of(
++            f.task(0, 7, () -> { throw new IllegalStateException("staged callback failed"); }),
++            f.task(8, 15, middle::incrementAndGet), f.task(16, 23, () -> {})
++        ), "staged-failure-test");
++        f.owned(() -> {
++            assertThrows(RuntimeException.class, plan::runFromCurrentContext);
++            f.assertFullOwner();
++        });
++        assertEquals(0, middle.get());
++    }
++
++    @Test
++    void generalRegionJobsKeepTheirMergedOrderingContract() {
++        final Fixture f = new Fixture();
++        assertFalse(TickRegions.prepareRegionBoundTasks(f.world, List.of(
++            f.task(0, 7, () -> {}), f.task(8, 15, () -> {}), f.task(16, 23, () -> {})
++        ), "general-strip-test").isParallel());
++    }
++
++    @Test
++    void emptySimulationKeepsItsExistingWorldOwner() throws Exception {
++        final Fixture f = new Fixture();
++        final var plan = TickRegions.prepareSimulationRegionTasks(f.world, List.of(), "staged-empty-test");
++        assertFalse(plan.isParallel());
++        f.owned(() -> {
++            final var before = TickRegions.currentContext();
++            plan.runFromCurrentContext();
++            assertSame(before, TickRegions.currentContext());
++            f.assertFullOwner();
++        });
++    }
++
++    private static final class Fixture {
++        final MinecraftServer server = mock(MinecraftServer.class);
++        final ServerLevel world = mock(ServerLevel.class);
++
++        Fixture() {
++            when(world.getServer()).thenReturn(server);
++            when(world.dimension()).thenReturn(Level.OVERWORLD);
++        }
++
++        TickRegions.RegionBoundTask task(final int minX, final int maxX, final Runnable action) {
++            return new TickRegions.RegionBoundTask(minX, 0, minX, 0, maxX, 0, () -> {
++                assertTrue(OwnerDomainExecutor.isRegionOwner(world, minX, 0, maxX, 0));
++                assertTrue(TickRegions.isCurrentThreadOwnerQuiet(world, minX, 0, maxX, 0));
++                action.run();
++            });
++        }
++
++        void assertFullOwner() {
++            assertTrue(OwnerDomainExecutor.isRegionOwner(world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE));
++            assertTrue(TickRegions.isCurrentThreadOwnerQuiet(world, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE));
++        }
++
++        void owned(final Runnable action) throws Exception {
++            final AtomicReference<Throwable> failure = new AtomicReference<>();
++            final Thread thread = new TickThread(() -> {
++                try {
++                    final var context = TickRegions.pushLevelContext(world);
++                    try { action.run(); }
++                    finally { TickRegions.popContext(context); }
++                } catch (Throwable error) {
++                    failure.set(error);
++                } finally {
++                    TickRegions.clearWorldState(world);
++                }
++            }, "staged-simulation-test");
++            thread.setDaemon(true);
++            thread.start();
++            thread.join(15_000L);
++            assertFalse(thread.isAlive(), "staged simulation did not finish");
++            if (failure.get() instanceof Error error) throw error;
++            if (failure.get() instanceof RuntimeException error) throw error;
++            if (failure.get() != null) throw new AssertionError(failure.get());
++        }
++    }
++}

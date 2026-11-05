@@ -45,6 +45,10 @@ chunk-system:
 
 The same rule applies to `paper.threadedregions.parallelScheduler.threads`. More scheduler threads do not create more physical CPU. Start from Loom's automatic choice and test changes against the same player activity.
 
+Chunk and entity simulation use the dispatch cell size set by `paper.threadedregions.parallelScheduler.bucketShift`: the default `3` means eight chunks per side, capped at the ticket section size. Ticket propagation keeps its own sections. Separated simulation groups can run together in joined phases; neighboring or overlapping groups run in different phases with the existing ownership margins. Staged effects are applied after all phases finish. General region jobs keep their existing merged ordering.
+
+`paper.threadedregions.parallelSimulation=false` retains serial simulation. Smaller dispatch cells can expose more parallel work, but scheduling also costs CPU. Compare tick latency and queues under the same activity before tuning cell size or worker counts.
+
 ## What to inspect first
 
 | Symptom | Likely next check |
