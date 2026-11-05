@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 02:07:33 +0200
+Subject: [PATCH] Cover attribute reads across instance replacement
+
+
+diff --git a/src/test/java/net/minecraft/world/entity/ai/attributes/AttributeMapReadTest.java b/src/test/java/net/minecraft/world/entity/ai/attributes/AttributeMapReadTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..da04abe5d966672a4645f6c67c3bd62eaea44958
+--- /dev/null
++++ b/src/test/java/net/minecraft/world/entity/ai/attributes/AttributeMapReadTest.java
+@@ -0,0 +1,76 @@
++package net.minecraft.world.entity.ai.attributes;
++
++import net.minecraft.core.Holder;
++import net.minecraft.resources.Identifier;
++import org.bukkit.support.environment.Normal;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++@Normal
++class AttributeMapReadTest {
++    private final Holder<Attribute> attribute = Holder.direct(new RangedAttribute("test.read", 2.0, -100, 100));
++    private final AttributeSupplier supplier = AttributeSupplier.builder().add(this.attribute).build();
++
++    @Test void readingDefaultsDoesNotCreateAnOwnedInstanceOrDirtyIt() {
++        var attributes = new AttributeMap(this.supplier);
++        for (int i = 0; i < 10; ++i) assertEquals(2.0, attributes.getValue(this.attribute));
++        assertTrue(attributes.getAttributesToUpdate().isEmpty());
++        assertTrue(attributes.getAttributesToSync().isEmpty());
++    }
++
++    @Test void creatingAnOwnedInstanceReplacesThePreviouslyReadDefault() {
++        var first = new AttributeMap(this.supplier);
++        var second = new AttributeMap(this.supplier);
++        assertEquals(2.0, first.getValue(this.attribute));
++        assertEquals(2.0, second.getValue(this.attribute));
++        first.getInstance(this.attribute).setBaseValue(7.0);
++        assertEquals(7.0, first.getValue(this.attribute));
++        assertEquals(2.0, second.getValue(this.attribute));
++    }
++
++    @Test void mutationsStillRecalculateTheLiveInstance() {
++        var attributes = new AttributeMap(this.supplier);
++        var instance = attributes.getInstance(this.attribute);
++        assertEquals(2.0, attributes.getValue(this.attribute));
++        var modifier = new AttributeModifier(Identifier.parse("test:read"), 3.0, AttributeModifier.Operation.ADD_VALUE);
++        instance.addTransientModifier(modifier);
++        assertEquals(5.0, attributes.getValue(this.attribute));
++        instance.removeModifier(modifier.id());
++        assertEquals(2.0, attributes.getValue(this.attribute));
++        instance.setBaseValue(9.0);
++        assertEquals(9.0, attributes.getValue(this.attribute));
++    }
++
++    @Test void registrationThroughAnEquivalentHolderReplacesTheReadInstance() {
++        var attributes = new AttributeMap(this.supplier);
++        attributes.getInstance(this.attribute).setBaseValue(7.0);
++        assertEquals(7.0, attributes.getValue(this.attribute));
++        var equivalent = Holder.direct(this.attribute.value());
++        assertNotSame(this.attribute, equivalent);
++        assertEquals(this.attribute, equivalent);
++        attributes.registerAttribute(equivalent);
++        assertEquals(2.0, attributes.getValue(this.attribute));
++        attributes.getInstance(equivalent).setBaseValue(11.0);
++        assertEquals(11.0, attributes.getValue(this.attribute));
++    }
++
++    @Test void assigningAnotherMapIsVisibleAfterReadingDefaults() {
++        var target = new AttributeMap(this.supplier);
++        var source = new AttributeMap(this.supplier);
++        assertEquals(2.0, target.getValue(this.attribute));
++        source.getInstance(this.attribute).setBaseValue(8.0);
++        target.assignAllValues(source);
++        assertEquals(8.0, target.getValue(this.attribute));
++    }
++
++    @Test void aMissingAttributeStillFailsUntilItIsRegistered() {
++        var attributes = new AttributeMap(this.supplier);
++        Holder<Attribute> missing = Holder.direct(new RangedAttribute("test.missing", 4, -100, 100));
++        assertEquals(2.0, attributes.getValue(this.attribute));
++        assertThrows(IllegalArgumentException.class, () -> attributes.getValue(missing));
++        assertNull(attributes.getInstance(missing));
++        attributes.registerAttribute(missing);
++        assertEquals(4.0, attributes.getValue(missing));
++        assertEquals(2.0, attributes.getValue(this.attribute));
++    }
++}

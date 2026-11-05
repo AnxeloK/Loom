@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 02:07:32 +0200
+Subject: [PATCH] Reuse the last resolved attribute instance
+
+
+diff --git a/net/minecraft/world/entity/ai/attributes/AttributeMap.java b/net/minecraft/world/entity/ai/attributes/AttributeMap.java
+index 68bad6752bd313ca3ebde7fd4e3b2c46c5dee3ef..f07ae9406c10afd15c4f9e9e59fbdf6c37830930 100644
+--- a/net/minecraft/world/entity/ai/attributes/AttributeMap.java
++++ b/net/minecraft/world/entity/ai/attributes/AttributeMap.java
+@@ -18,6 +18,9 @@ public class AttributeMap {
+     private final Set<AttributeInstance> attributesToSync = new ObjectOpenHashSet<>();
+     private final Set<AttributeInstance> attributesToUpdate = new ObjectOpenHashSet<>();
+     private final AttributeSupplier supplier;
++    // Owner-confined reference lookup. Values remain with the live instance, including its dirty flag.
++    private @Nullable Holder<Attribute> lastReadAttribute;
++    private @Nullable AttributeInstance lastReadInstance;
+ 
+     public AttributeMap(final AttributeSupplier supplier) {
+         this.supplier = supplier;
+@@ -43,7 +46,15 @@ public class AttributeMap {
+     }
+ 
+     public @Nullable AttributeInstance getInstance(final Holder<Attribute> attribute) {
+-        return this.attributes.computeIfAbsent(attribute, key -> this.supplier.createInstance(this::onAttributeModified, (Holder<Attribute>)key));
++        this.lastReadAttribute = null;
++        this.lastReadInstance = null;
++        try {
++            return this.attributes.computeIfAbsent(attribute, key -> this.supplier.createInstance(this::onAttributeModified, (Holder<Attribute>)key));
++        } finally {
++            // Creating an instance can invoke its dirty callback before the map is updated.
++            this.lastReadAttribute = null;
++            this.lastReadInstance = null;
++        }
+     }
+ 
+     public boolean hasAttribute(final Holder<Attribute> attribute) {
+@@ -56,8 +67,16 @@ public class AttributeMap {
+     }
+ 
+     public double getValue(final Holder<Attribute> attribute) {
+-        AttributeInstance ownAttribute = this.attributes.get(attribute);
+-        return ownAttribute != null ? ownAttribute.getValue() : this.supplier.getValue(attribute);
++        if (attribute == this.lastReadAttribute && this.lastReadInstance != null) {
++            return this.lastReadInstance.getValue();
++        }
++        AttributeInstance instance = this.attributes.get(attribute);
++        if (instance == null) {
++            instance = this.supplier.getAttributeInstance(attribute);
++        }
++        this.lastReadInstance = instance;
++        this.lastReadAttribute = attribute;
++        return instance.getValue();
+     }
+ 
+     public double getBaseValue(final Holder<Attribute> attribute) {
+@@ -152,6 +171,8 @@ public class AttributeMap {
+     public void registerAttribute(Holder<Attribute> attributeBase) {
+         AttributeInstance attributeModifiable = new AttributeInstance(attributeBase, AttributeInstance::getAttribute);
+         attributes.put(attributeBase, attributeModifiable);
++        this.lastReadAttribute = null;
++        this.lastReadInstance = null;
+     }
+     // Paper - end - living entity allow attribute registration
+ 
