@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 02:23:13 +0200
+Subject: [PATCH] Cover empty spawning filters in small worlds
+
+
+diff --git a/src/test/java/net/minecraft/server/level/SpawningChunkTraversalTest.java b/src/test/java/net/minecraft/server/level/SpawningChunkTraversalTest.java
+index b9ff9847c2770960e0cc6447f2390198ec8b8887..6c715d258396c9f585f1a9f6ea615e87d22be7f6 100644
+--- a/src/test/java/net/minecraft/server/level/SpawningChunkTraversalTest.java
++++ b/src/test/java/net/minecraft/server/level/SpawningChunkTraversalTest.java
+@@ -34,6 +34,37 @@ class SpawningChunkTraversalTest {
+         mock(ChunkMap.class); mock(LevelChunk.class); mock(NewChunkHolder.class);
+     }
+ 
++    @Test
++    void smallWorldWithoutEligiblePlayersDoesNotReadEveryChunkMembership() throws Exception {
++        try (Fixture f = new Fixture()) {
++            f.player(0, 0, 8).event.setCancelled(true);
++            f.player(16, 16, 8).spectator = true;
++            f.player(32, 32, 8).player.playerNaturallySpawnedEvent = null;
++            f.player(48, 48, 0);
++            f.grid(-8, 8);
++            for (LevelChunk chunk : f.chunks) clearInvocations(chunk);
++            assertTrue(f.collect().isEmpty());
++            for (LevelChunk chunk : f.chunks) verify(chunk, never()).moonrise$getChunkHolder();
++        }
++    }
++
++    @Test
++    void aSmallWorldRechecksSpawnEligibilityOnEveryPass() throws Exception {
++        try (Fixture f = new Fixture()) {
++            State state = f.player(0, 0, 8);
++            state.event.setCancelled(true);
++            f.grid(-8, 8);
++            assertTrue(f.collect().isEmpty());
++            state.event.setCancelled(false);
++            assertEquals(f.expected(), f.collect());
++            assertFalse(f.collect().isEmpty());
++            state.event.setSpawnRadius((byte)0);
++            assertTrue(f.collect().isEmpty());
++            state.event.setSpawnRadius((byte)-8);
++            assertEquals(f.expected(), f.collect());
++        }
++    }
++
+     @Test
+     void crowdedPlayersKeepMembershipAndSourceOrder() throws Exception {
+         try (Fixture f = new Fixture()) {

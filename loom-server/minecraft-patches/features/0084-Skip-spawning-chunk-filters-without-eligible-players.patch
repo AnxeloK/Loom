@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AnxeloK <95703440+AnxeloK@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 02:26:21 +0200
+Subject: [PATCH] Skip spawning chunk filters without eligible players
+
+
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+index 07beca9816209bbc7bf8fecffb7c8ea443200d60..1bb4aa5482c2a23710e1bbb18debaad10407460f 100644
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -757,6 +757,25 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+         // Loom start - filter independent player clusters in parallel. The player-ticking list is normally
+         // stable, so cache both its exact identity/order and the spatial partition. Workers only write their
+         // own result slots; the world owner appends matches afterward in the original order.
++        if (net.minecraft.server.threading.runtime.OwnerDomainExecutor.isRegionOwner(this.level,
++                Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)
++            && net.minecraft.server.threading.TickRegions.isCurrentThreadOwnerQuiet(this.level,
++                Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
++            boolean eligiblePlayer = false;
++            for (final var tracked : this.level.moonrise$getNearbyPlayers().getSpawnRangesSnapshot()) {
++                final ServerPlayer player = tracked.player();
++                final var event = player.playerNaturallySpawnedEvent;
++                if (event != null && !event.isCancelled() && event.getSpawnRadius() != 0 && !player.isSpectator()) {
++                    eligiblePlayer = true;
++                    break;
++                }
++            }
++            // Empty eligibility is independent of chunk membership. Recheck it each pass so
++            // event, spectator and tracking changes immediately restore normal traversal.
++            if (!eligiblePlayer) {
++                return;
++            }
++        }
+         SpawningChunkFilterPlan plan = this.spawningChunkFilterPlan;
+         if (plan == null || !plan.matches(raw, size)) {
+             this.spawningChunkFilterPlan = plan = new SpawningChunkFilterPlan(this, raw, size);
