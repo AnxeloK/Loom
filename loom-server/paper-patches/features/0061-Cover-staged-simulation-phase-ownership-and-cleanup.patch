@@ -91,10 +91,10 @@ index 02c303d194c99590978b06e4f52097c0f19a67fb..c19260291e1831a1e007d8769ff78d68
          final Fixture f = new Fixture();
 diff --git a/src/test/java/net/minecraft/server/threading/StagedSimulationRegionPlanTest.java b/src/test/java/net/minecraft/server/threading/StagedSimulationRegionPlanTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..49bd4dced77c6cc1e9e8742656be4c09edbe1004
+index 0000000000000000000000000000000000000000..3f8dbc8afc3d4f597df7ef895bf3c38142b986ec
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/threading/StagedSimulationRegionPlanTest.java
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,215 @@
 +package net.minecraft.server.threading;
 +
 +import ca.spottedleaf.moonrise.common.util.TickThread;
@@ -105,9 +105,16 @@ index 0000000000000000000000000000000000000000..49bd4dced77c6cc1e9e8742656be4c09
 +import net.minecraft.server.MinecraftServer;
 +import net.minecraft.server.level.ServerLevel;
 +import net.minecraft.server.threading.runtime.OwnerDomainExecutor;
++import net.minecraft.world.InteractionHand;
++import net.minecraft.world.entity.LivingEntity;
++import net.minecraft.world.entity.PathfinderMob;
++import net.minecraft.world.entity.ai.goal.MeleeAttackGoal;
++import net.minecraft.world.entity.ai.sensing.Sensing;
 +import net.minecraft.world.level.Level;
 +import org.bukkit.support.environment.Normal;
 +import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.ValueSource;
 +import static org.junit.jupiter.api.Assertions.*;
 +import static org.mockito.Mockito.*;
 +
@@ -145,6 +152,60 @@ index 0000000000000000000000000000000000000000..49bd4dced77c6cc1e9e8742656be4c09
 +        assertFalse(TickRegions.prepareSimulationRegionTasks(f.world, List.of(
 +            f.task(0, 8, () -> {}), f.task(8, 16, () -> {})
 +        ), "staged-overlap-test").isParallel());
++    }
++
++    @ParameterizedTest
++    @ValueSource(booleans = {true, false})
++    void crossRegionMeleeRunsOnceOnTheWorldOwnerIfTheTargetIsStillCurrent(final boolean currentTarget) throws Exception {
++        final Fixture f = new Fixture();
++        final PathfinderMob attacker = mock(PathfinderMob.class);
++        final LivingEntity target = mock(LivingEntity.class);
++        final Sensing sensing = mock(Sensing.class);
++        when(attacker.level()).thenReturn(f.world);
++        when(attacker.isAlive()).thenReturn(true);
++        when(attacker.getTarget()).thenReturn(target);
++        when(attacker.getSensing()).thenReturn(sensing);
++        when(attacker.isWithinMeleeAttackRange(target)).thenReturn(true);
++        when(sensing.hasLineOfSight(target)).thenReturn(true);
++        when(target.level()).thenReturn(f.world);
++        when(target.isAlive()).thenReturn(true);
++        when(target.getX()).thenReturn(128.0);
++        when(attacker.doHurtTarget(f.world, target)).thenAnswer(invocation -> {
++            f.assertFullOwner();
++            assertTrue(TickThread.isTickThreadFor(target));
++            return true;
++        });
++        final class AttackGoal extends MeleeAttackGoal {
++            AttackGoal() { super(attacker, 1.0, true); }
++            void attack() { this.checkAndPerformAttack(target); }
++        }
++        final AttackGoal goal = new AttackGoal();
++        final var staging = RegionTickStaging.newSession();
++        final var plan = TickRegions.prepareSimulationRegionTasks(f.world, List.of(
++            f.task(0, 7, () -> {
++                assertFalse(TickThread.isTickThreadFor(target));
++                RegionTickStaging.begin(staging);
++                try {
++                    goal.attack();
++                    verify(attacker, never()).doHurtTarget(f.world, target);
++                } finally {
++                    RegionTickStaging.end();
++                }
++            }),
++            f.task(32, 39, () -> {})
++        ), "cross-region-melee");
++        assertTrue(plan.isParallel());
++        f.owned(() -> {
++            plan.runFromCurrentContext();
++            if (!currentTarget) {
++                when(attacker.getTarget()).thenReturn(null);
++            }
++            RegionTickStaging.applyAndClear(staging, f.world);
++            RegionTickStaging.applyAndClear(staging, f.world);
++        });
++        final int attacks = currentTarget ? 1 : 0;
++        verify(attacker, times(attacks)).swingForAttack(InteractionHand.MAIN_HAND);
++        verify(attacker, times(attacks)).doHurtTarget(f.world, target);
 +    }
 +
 +    @Test

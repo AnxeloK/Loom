@@ -53,6 +53,46 @@ index 83db93a69fd26e2116b33d5a4a088df1e4101a8f..065911e58701cad21f023ccbe6a0bc0f
              for (int i = 0; i < count; ++i) {
                  this.tickOneEntity(toTick.get(i));
              }
+diff --git a/net/minecraft/server/threading/RegionTickStaging.java b/net/minecraft/server/threading/RegionTickStaging.java
+index 4d9074cda04825ba8d144b489a8b2ca3a6162a12..18f6249020afbea16c5fa98f198cde26b1cc485f 100644
+--- a/net/minecraft/server/threading/RegionTickStaging.java
++++ b/net/minecraft/server/threading/RegionTickStaging.java
+@@ -141,6 +141,7 @@ public final class RegionTickStaging {
+         List<StagedSpawn> spawns;
+         List<StagedDecision> events;
+         List<StagedTreeDecision> conditionalCommits;
++        List<Runnable> meleeAttacks;
+         // Deferred entity moves, COALESCED per entity: an entity may setPos() many times in one tick, but a
+         // single applyMove() at replay reads its current (final) position and re-sections it once. The callback
+         // carries the last staging-session id it joined, so this ordered list needs neither hashing nor one map
+@@ -203,6 +204,15 @@ public final class RegionTickStaging {
+         return CURRENT.get() != null;
+     }
+ 
++    /** Replay an attack that needs both entities' owners after the simulation workers join. */
++    public static void stageMeleeAttack(final Runnable attack) {
++        final Buffer buffer = java.util.Objects.requireNonNull(CURRENT.get(), "Melee attack staged outside simulation");
++        if (buffer.meleeAttacks == null) {
++            buffer.meleeAttacks = new ArrayList<>();
++        }
++        buffer.meleeAttacks.add(attack);
++    }
++
+     // Begin staging on the current worker thread for the given dispatch session (idempotent within a thread).
+     public static void begin(final Session session) {
+         if (CURRENT.get() == null) {
+@@ -676,6 +686,11 @@ public final class RegionTickStaging {
+                 s.level().addFreshEntity(s.entity(), s.reason());
+             }
+         }
++        for (Buffer buffer = buffers; buffer != null; buffer = buffer.next) {
++            if (buffer.meleeAttacks != null) {
++                buffer.meleeAttacks.forEach(Runnable::run);
++            }
++        }
+     }
+ 
+     private static void resumeReplay(
 diff --git a/net/minecraft/server/threading/TickRegions.java b/net/minecraft/server/threading/TickRegions.java
 index 626a681d15bceb9c69c7d72502e4252e023bb474..c1eb9705de41f1f9414dc90044f8b0c5891ee2d2 100644
 --- a/net/minecraft/server/threading/TickRegions.java
@@ -211,3 +251,39 @@ index 626a681d15bceb9c69c7d72502e4252e023bb474..c1eb9705de41f1f9414dc90044f8b0c5
          }
  
          private void absorb(final RegionBoundBucket other) {
+diff --git a/net/minecraft/world/entity/ai/goal/MeleeAttackGoal.java b/net/minecraft/world/entity/ai/goal/MeleeAttackGoal.java
+index 4ac8b0f115e80b5dfe7ee315c1ec3aafdab9e79b..421f59eeb06741874c89dbd12471f012a616717e 100644
+--- a/net/minecraft/world/entity/ai/goal/MeleeAttackGoal.java
++++ b/net/minecraft/world/entity/ai/goal/MeleeAttackGoal.java
+@@ -126,12 +126,28 @@ public class MeleeAttackGoal extends Goal {
+ 
+     protected void checkAndPerformAttack(final LivingEntity target) {
+         if (this.canPerformAttack(target)) {
+-            this.resetAttackCooldown();
+-            this.mob.swingForAttack(InteractionHand.MAIN_HAND);
+-            this.mob.doHurtTarget(getServerLevel(this.mob), target);
++            final var level = getServerLevel(this.mob);
++            if (net.minecraft.server.threading.RegionTickStaging.isStaging()
++                && !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(target)) {
++                // Damage and its synchronous event decisions also need the victim's owner.
++                net.minecraft.server.threading.RegionTickStaging.stageMeleeAttack(() -> {
++                    if (this.mob.isAlive() && target.isAlive() && this.mob.getTarget() == target
++                        && this.mob.level() == level && target.level() == level && this.canPerformAttack(target)) {
++                        this.performAttack(level, target);
++                    }
++                });
++                return;
++            }
++            this.performAttack(level, target);
+         }
+     }
+ 
++    private void performAttack(final net.minecraft.server.level.ServerLevel level, final LivingEntity target) {
++        this.resetAttackCooldown();
++        this.mob.swingForAttack(InteractionHand.MAIN_HAND);
++        this.mob.doHurtTarget(level, target);
++    }
++
+     protected void resetAttackCooldown() {
+         this.ticksUntilNextAttack = this.adjustedTickDelay(20);
+     }
